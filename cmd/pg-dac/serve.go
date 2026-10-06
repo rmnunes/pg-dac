@@ -17,10 +17,12 @@ import (
 	"github.com/rodrigonunes/pg-dac/internal/artifact"
 	"github.com/rodrigonunes/pg-dac/internal/deploy"
 	"github.com/rodrigonunes/pg-dac/internal/devdb"
+	"github.com/rodrigonunes/pg-dac/internal/drift"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/execute"
 	"github.com/rodrigonunes/pg-dac/internal/introspect"
 	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rodrigonunes/pg-dac/internal/refactor"
 	"github.com/rodrigonunes/pg-dac/internal/source"
 	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
 )
@@ -70,6 +72,7 @@ func runServe(cmd *cobra.Command, addr string) error {
 	mux.HandleFunc("/cancel", d.auth(d.cancelOp))
 	mux.HandleFunc("/script", d.auth(d.script))
 	mux.HandleFunc("/publish", d.auth(d.publish))
+	mux.HandleFunc("/drift", d.auth(d.drift))
 	mux.HandleFunc("/shutdown", d.auth(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		shutdown()
@@ -179,6 +182,8 @@ type compareReq struct {
 	ExcludeIDs             []string `json:"excludeIDs"`
 	RequireKey             string   `json:"requireKey"`
 	SkipDeployScripts      bool     `json:"skipDeployScripts"`
+	AllowDrift             bool     `json:"allowDrift"`
+	RecordBaseline         *bool    `json:"recordBaseline"` // default true
 }
 
 // engineOptions derives the engine options; the desired-state source's
@@ -281,6 +286,11 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	send("phase", map[string]any{"step": "diff", "message": "Diffing and generating plan…", "toCount": objectCount(to)})
+	from, prelude, rwarns, err := pendingRenames(ctx, req.From, from, dplan)
+	if err != nil {
+		send("error", map[string]any{"message": err.Error()})
+		return
+	}
 	res, err := engine.Compare(from, to, req.engineOptions(dplan.DropPolicy))
 	if err != nil {
 		if canceled() {
@@ -289,7 +299,33 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	send("result", map[string]any{"plan": res.PlanDoc(), "warnings": append(append(fw, tw...), res.Warnings...)})
+	res.Prelude = prelude
+	send("result", map[string]any{"plan": res.PlanDoc(), "warnings": append(append(append(fw, tw...), rwarns...), res.Warnings...)})
+}
+
+// pendingRenames applies the desired state's pending refactorlog renames to
+// the target model (reading the applied ids when the target is a database) and
+// returns the statements that would perform and record them.
+func pendingRenames(ctx context.Context, fromSpec string, from *model.Database, dplan *deploy.Plan) (*model.Database, []sqlgen.Statement, []string, error) {
+	if dplan == nil || dplan.Refactor == nil || len(dplan.Refactor.Operations) == 0 {
+		return from, nil, nil, nil
+	}
+	applied := map[string]bool{}
+	if source.IsConnString(fromSpec) {
+		conn, err := pgx.Connect(ctx, fromSpec)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		defer conn.Close(ctx)
+		if applied, err = refactor.ReadApplied(ctx, conn); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	renames, warns := refactor.Pending(from, dplan.Refactor, applied)
+	if len(renames) == 0 {
+		return from, nil, warns, nil
+	}
+	return refactor.ApplyToModel(from, renames), refactor.Statements(renames), warns, nil
 }
 
 // objectCount is a rough size of a model, shown in the compare progress dialog.
@@ -320,12 +356,18 @@ func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fmt.Errorf("to: %w", err))
 		return
 	}
+	from, prelude, rwarns, err := pendingRenames(d.ctx, req.From, from, dplan)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
 	res, err := engine.Compare(from, to, req.engineOptions(dplan.DropPolicy))
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards), "warnings": append(append(fw, tw...), res.Warnings...)})
+	res.Prelude = prelude
+	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards), "warnings": append(append(append(fw, tw...), rwarns...), res.Warnings...)})
 }
 
 // publish streams a live apply over Server-Sent Events: a "start" event, one
@@ -361,16 +403,55 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close(d.ctx)
 
-	fromModel, _, err := introspect.IntrospectWithWarnings(d.ctx, conn, introspect.Options{IncludeSchemas: req.Schemas})
-	if err != nil {
-		send("error", map[string]any{"message": "introspect target: " + err.Error()})
-		return
-	}
+	// Resolve the desired state first: nothing touches the target until the
+	// source is known to build.
 	dplan := deployPlan(req.To)
 	toModel, warns, err := source.Resolve(d.ctx, req.To, d.sourceOptions(req))
 	if err != nil {
 		send("error", map[string]any{"message": "resolve source: " + err.Error()})
 		return
+	}
+	fromModel, _, err := introspect.IntrospectWithWarnings(d.ctx, conn, introspect.Options{IncludeSchemas: req.Schemas})
+	if err != nil {
+		send("error", map[string]any{"message": "introspect target: " + err.Error()})
+		return
+	}
+	drifted, hadBaseline := false, false
+	if len(req.Schemas) == 0 {
+		rep, err := drift.Check(d.ctx, conn, fromModel)
+		if err != nil {
+			send("error", map[string]any{"message": err.Error()})
+			return
+		}
+		drifted, hadBaseline = rep.Drifted, rep.Baseline != nil
+		if rep.Drifted && !req.AllowDrift {
+			send("error", map[string]any{"drift": true, "message": fmt.Sprintf(
+				"the target has drifted from its last baseline (#%d from %s): %d change(s) were made outside pg-dac; set allowDrift to publish anyway",
+				rep.Baseline.ID, rep.Baseline.Source, len(rep.Changes.Plan.Ops))})
+			return
+		}
+	}
+	// Refactorlog renames run first, are recorded, and the target is re-read.
+	if dplan.Refactor != nil && len(dplan.Refactor.Operations) > 0 {
+		applied, err := refactor.ReadApplied(d.ctx, conn)
+		if err != nil {
+			send("error", map[string]any{"message": err.Error()})
+			return
+		}
+		renames, _ := refactor.Pending(fromModel, dplan.Refactor, applied)
+		if len(renames) > 0 {
+			for _, r := range renames {
+				send("progress", map[string]any{"index": 0, "total": 0, "sql": "-- refactorlog: " + r.Op.Describe()})
+			}
+			if err := execute.ApplyStatements(d.ctx, conn, refactor.Statements(renames)); err != nil {
+				send("error", map[string]any{"message": "refactorlog: " + err.Error()})
+				return
+			}
+			if fromModel, _, err = introspect.IntrospectWithWarnings(d.ctx, conn, introspect.Options{IncludeSchemas: req.Schemas}); err != nil {
+				send("error", map[string]any{"message": "introspect target: " + err.Error()})
+				return
+			}
+		}
 	}
 	opts := req.engineOptions(dplan.DropPolicy)
 	res, err := engine.Compare(fromModel, toModel, opts)
@@ -385,7 +466,13 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(),
 		"deployScripts": len(pre) + len(post), "warnings": append(warns, res.Warnings...)})
 	if res.Empty() && len(pre)+len(post) == 0 {
-		send("done", map[string]any{"applied": 0})
+		baselineRecorded := false
+		if (req.RecordBaseline == nil || *req.RecordBaseline) && len(req.Schemas) == 0 && (drifted || !hadBaseline) {
+			if _, err := drift.Record(d.ctx, conn, fromModel, req.To, "pg-dac "+d.version); err == nil {
+				baselineRecorded = true
+			}
+		}
+		send("done", map[string]any{"applied": 0, "baselineRecorded": baselineRecorded})
 		return
 	}
 	if res.HasBlocking() && !opts.AllowHazards {
@@ -415,7 +502,53 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
 		return
 	}
-	send("done", map[string]any{"applied": applied, "deployScripts": len(pre) + len(post)})
+	baselineRecorded := false
+	if (req.RecordBaseline == nil || *req.RecordBaseline) && len(req.Schemas) == 0 {
+		if after, err := introspect.Introspect(d.ctx, conn, introspect.Options{}); err == nil {
+			if _, err := drift.Record(d.ctx, conn, after, req.To, "pg-dac "+d.version); err == nil {
+				baselineRecorded = true
+			}
+		}
+	}
+	send("done", map[string]any{"applied": applied, "deployScripts": len(pre) + len(post), "baselineRecorded": baselineRecorded})
+}
+
+// drift reports how a database differs from the baseline its last publish
+// recorded: {drifted, currentSha256, baseline{...}, changes: PlanDoc}.
+func (d *daemon) drift(w http.ResponseWriter, r *http.Request) {
+	req, err := decode(r)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	if !source.IsConnString(req.From) {
+		badRequest(w, fmt.Errorf("drift target (from) must be a database connection string"))
+		return
+	}
+	conn, err := pgx.Connect(d.ctx, req.From)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	defer conn.Close(d.ctx)
+	current, err := introspect.Introspect(d.ctx, conn, introspect.Options{IncludeSchemas: req.Schemas})
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	rep, err := drift.Check(d.ctx, conn, current)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	out := map[string]any{"drifted": rep.Drifted, "currentSha256": rep.CurrentSHA256}
+	if rep.Baseline != nil {
+		out["baseline"] = map[string]any{"id": rep.Baseline.ID, "recordedAt": rep.Baseline.RecordedAt, "source": rep.Baseline.Source, "sha256": rep.Baseline.SHA256}
+	}
+	if rep.Changes != nil {
+		out["changes"] = rep.Changes.PlanDoc()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // --- helpers ---

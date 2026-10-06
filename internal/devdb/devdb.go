@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,15 +87,59 @@ func Start(ctx context.Context, cfg Config) (*Instance, error) {
 	// Serialize the (first-time) binary extraction across processes (per version):
 	// parallel test binaries — or two concurrent pg-dac invocations — would
 	// otherwise race to populate the shared binaries cache and fail to rename
-	// files on Windows. Held only for the duration of Start.
+	// files on Windows. Held only for the duration of Start. The library only
+	// extracts when the cache lacks bin/pg_ctl, so a complete cache is never
+	// touched again — a running instance and a new start can share it. An
+	// incomplete cache (a crashed or interrupted first extraction) is wiped
+	// first so the library extracts it afresh instead of failing on it.
 	unlock := acquireStartLock(cfg.Version)
+	resetIncompleteCache(cfg.Version)
 	err = pg.Start()
+	if err == nil {
+		markCacheComplete(cfg.Version)
+	}
 	unlock()
 	if err != nil {
 		_ = os.RemoveAll(baseDir)
 		return nil, fmt.Errorf("start scratch postgres: %w", err)
 	}
 	return &Instance{pg: pg, port: port, baseDir: baseDir}, nil
+}
+
+// completeMarker is written into the binaries cache after the first
+// successful start, proving the extraction finished.
+const completeMarker = ".pgdac-complete"
+
+// resetIncompleteCache removes a binaries cache that exists but was never
+// marked complete (an interrupted extraction), so it is rebuilt from the
+// downloaded archive instead of failing on missing files.
+func resetIncompleteCache(v embeddedpostgres.PostgresVersion) {
+	dir := binariesCache(v)
+	if _, err := os.Stat(filepath.Join(dir, completeMarker)); err == nil {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bin")); err == nil {
+		_ = os.RemoveAll(dir)
+	}
+}
+
+func markCacheComplete(v embeddedpostgres.PostgresVersion) {
+	dir := binariesCache(v)
+	// The library decides whether to extract by stat'ing bin/pg_ctl — without
+	// the .exe suffix — so on Windows a complete cache still looked empty and
+	// every start re-extracted over files a running instance had open. An
+	// executable copy under the extension-less name satisfies the check and
+	// runs through CreateProcess like any PE file.
+	if runtime.GOOS == "windows" {
+		exe := filepath.Join(dir, "bin", "pg_ctl.exe")
+		bare := filepath.Join(dir, "bin", "pg_ctl")
+		if _, err := os.Stat(bare); err != nil {
+			if data, err := os.ReadFile(exe); err == nil {
+				_ = os.WriteFile(bare, data, 0o755)
+			}
+		}
+	}
+	_ = os.WriteFile(filepath.Join(dir, completeMarker), []byte(time.Now().UTC().Format(time.RFC3339)), 0o644)
 }
 
 // acquireStartLock takes a best-effort cross-process lock (an exclusively-created

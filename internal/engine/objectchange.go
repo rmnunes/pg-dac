@@ -22,6 +22,8 @@ type PlanDoc struct {
 	DataLoss       bool           `json:"dataLoss"`
 	Changes        []ObjectChange `json:"changes"`
 	HazardSummary  []HazardCount  `json:"hazardSummary,omitempty"`
+	// Prelude lists refactorlog renames that run before the migration.
+	Prelude []sqlgen.Statement `json:"prelude,omitempty"`
 }
 
 // ObjectChange describes the change to a single top-level object. Sub-object
@@ -54,9 +56,10 @@ func (r *Result) PlanDoc() PlanDoc {
 	changes := r.ObjectChanges()
 	doc := PlanDoc{
 		FormatVersion:  PlanFormatVersion,
-		StatementCount: len(r.Statements),
+		StatementCount: len(r.Statements) + len(r.Prelude),
 		DataLoss:       r.HasDataLoss(),
 		Changes:        changes,
+		Prelude:        r.Prelude,
 	}
 
 	type agg struct {

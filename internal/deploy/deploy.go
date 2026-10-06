@@ -18,6 +18,7 @@ import (
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/execute"
 	"github.com/rodrigonunes/pg-dac/internal/project"
+	"github.com/rodrigonunes/pg-dac/internal/refactor"
 )
 
 // Script is one deployment script: a display name and its SQL.
@@ -33,11 +34,14 @@ type Plan struct {
 	DropPolicy string // "" | none | safe | all
 	// ManifestYAML is the project's pgdac.yaml text, when the source has one.
 	ManifestYAML []byte
+	// Refactor is the project's refactorlog (renames to apply once per target).
+	Refactor *refactor.Log
 }
 
 // Empty reports whether the plan carries nothing.
 func (p *Plan) Empty() bool {
-	return p == nil || (len(p.Pre) == 0 && len(p.Post) == 0 && p.DropPolicy == "" && len(p.ManifestYAML) == 0)
+	return p == nil || (len(p.Pre) == 0 && len(p.Post) == 0 && p.DropPolicy == "" && len(p.ManifestYAML) == 0 &&
+		(p.Refactor == nil || len(p.Refactor.Operations) == 0))
 }
 
 // ForSource inspects a desired-state spec: a project directory with a
@@ -63,6 +67,9 @@ func ForSource(spec string) (*Plan, error) {
 	}
 	plan := &Plan{DropPolicy: m.DropPolicy}
 	if plan.ManifestYAML, err = os.ReadFile(filepath.Join(spec, project.ManifestName)); err != nil {
+		return nil, err
+	}
+	if plan.Refactor, err = refactor.Load(spec); err != nil {
 		return nil, err
 	}
 	if plan.Pre, err = readScripts(spec, m.PreDeployFiles); err != nil {
@@ -97,6 +104,11 @@ func fromArtifact(o *artifact.Opened) *Plan {
 		plan.DropPolicy = o.Manifest.Deploy.DropPolicy
 	}
 	plan.ManifestYAML = o.Parts[artifact.PartProject]
+	if data, ok := o.Parts[artifact.PartRefactorLog]; ok {
+		if log, err := refactor.Parse(data); err == nil {
+			plan.Refactor = log
+		}
+	}
 	for _, name := range partsUnder(o, artifact.PartPreDeployDir) {
 		plan.Pre = append(plan.Pre, Script{Name: name, SQL: string(o.Parts[name])})
 	}
@@ -129,6 +141,11 @@ func (p *Plan) ArtifactParts() ([]artifact.ExtraPart, *artifact.DeployInfo) {
 	info := &artifact.DeployInfo{DropPolicy: p.DropPolicy}
 	if len(p.ManifestYAML) > 0 {
 		parts = append(parts, artifact.ExtraPart{Name: artifact.PartProject, Data: p.ManifestYAML})
+	}
+	if p.Refactor != nil && len(p.Refactor.Operations) > 0 {
+		if data, err := p.Refactor.Bytes(); err == nil {
+			parts = append(parts, artifact.ExtraPart{Name: artifact.PartRefactorLog, Data: data})
+		}
 	}
 	for i, s := range p.Pre {
 		name := fmt.Sprintf("%s%04d_%s", artifact.PartPreDeployDir, i+1, filepath.Base(s.Name))

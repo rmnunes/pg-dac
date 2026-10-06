@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
 	"github.com/rodrigonunes/pg-dac/internal/artifact"
 	"github.com/rodrigonunes/pg-dac/internal/deploy"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rodrigonunes/pg-dac/internal/refactor"
 	"github.com/rodrigonunes/pg-dac/internal/source"
+	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
 	"github.com/rodrigonunes/pg-dac/internal/validate"
 )
 
@@ -30,6 +33,7 @@ type commonFlags struct {
 	// the default unless --drop-objects-not-in-source was given explicitly.
 	dropPolicy     string
 	dropObjectsSet bool
+	plan           *deploy.Plan
 }
 
 func (f *commonFlags) bind(cmd *cobra.Command) {
@@ -62,7 +66,7 @@ func (f *commonFlags) sourceOptions() (source.Options, error) {
 }
 
 // loadDeployPlan reads the desired-state source's deployment plan (pre/post
-// scripts, drop policy) and records the policy for options().
+// scripts, drop policy, refactorlog) and records the policy for options().
 func (f *commonFlags) loadDeployPlan(cmd *cobra.Command) (*deploy.Plan, error) {
 	plan, err := deploy.ForSource(f.to)
 	if err != nil {
@@ -70,7 +74,37 @@ func (f *commonFlags) loadDeployPlan(cmd *cobra.Command) (*deploy.Plan, error) {
 	}
 	f.dropPolicy = plan.DropPolicy
 	f.dropObjectsSet = cmd.Flags().Changed("drop-objects-not-in-source")
+	f.plan = plan
 	return plan, nil
+}
+
+// applyRefactorLog finds the refactorlog operations the target still needs
+// (skipping those it has recorded as applied, when the target is a live
+// database), applies them to the target model so the diff sees renames rather
+// than drop + create pairs, and returns the statements that perform and record
+// them. They are emitted ahead of the migration.
+func (f *commonFlags) applyRefactorLog(cmd *cobra.Command, from *model.Database) (*model.Database, []sqlgen.Statement, error) {
+	if f.plan == nil || f.plan.Refactor == nil || len(f.plan.Refactor.Operations) == 0 {
+		return from, nil, nil
+	}
+	applied := map[string]bool{}
+	if source.IsConnString(f.from) {
+		ctx := cmd.Context()
+		conn, err := pgx.Connect(ctx, f.from)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--from: %w", err)
+		}
+		defer conn.Close(ctx)
+		if applied, err = refactor.ReadApplied(ctx, conn); err != nil {
+			return nil, nil, err
+		}
+	}
+	renames, warns := refactor.Pending(from, f.plan.Refactor, applied)
+	printWarnings(cmd, "refactorlog", warns)
+	if len(renames) == 0 {
+		return from, nil, nil
+	}
+	return refactor.ApplyToModel(from, renames), refactor.Statements(renames), nil
 }
 
 // resolveModels resolves both sources to models, printing any unsupported-object
@@ -105,11 +139,16 @@ func printWarnings(cmd *cobra.Command, label string, warns []string) {
 	}
 }
 
-// compare resolves both sources, runs the engine, and — if --validate was given
-// — replays the migration in a scratch database, writing the outcome to stderr
-// (so it never corrupts a script written to stdout).
+// compare resolves both sources, applies the desired state's pending
+// refactorlog renames to the target model, runs the engine, and — if
+// --validate was given — replays the migration in a scratch database, writing
+// the outcome to stderr (so it never corrupts a script written to stdout).
 func (f *commonFlags) compare(cmd *cobra.Command) (*engine.Result, error) {
 	from, to, err := f.resolveModels(cmd)
+	if err != nil {
+		return nil, err
+	}
+	from, prelude, err := f.applyRefactorLog(cmd, from)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +156,7 @@ func (f *commonFlags) compare(cmd *cobra.Command) (*engine.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	res.Prelude = prelude
 	printWarnings(cmd, "plan", res.Warnings)
 	if f.doValidate {
 		f.printValidation(cmd, from, to)

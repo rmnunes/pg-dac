@@ -331,8 +331,10 @@ ORDER BY n.nspname`
 	if len(opts.IncludeSchemas) > 0 {
 		rows, err = q.Query(ctx, fmt.Sprintf(base, "n.nspname = ANY($1)"), opts.IncludeSchemas)
 	} else {
+		// pgdac holds pg-dac's own bookkeeping (refactorlog, baselines) and is
+		// never part of a schema model.
 		rows, err = q.Query(ctx, fmt.Sprintf(base,
-			"n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'"))
+			"n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' AND n.nspname <> 'pgdac'"))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read schemas: %w", err)

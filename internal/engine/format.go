@@ -17,8 +17,8 @@ import (
 func (r *Result) Script(allowHazards bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "-- pg-dac migration script\n")
-	fmt.Fprintf(&b, "-- %d statement(s)\n", len(r.Statements))
-	if r.Empty() {
+	fmt.Fprintf(&b, "-- %d statement(s)\n", len(r.Statements)+len(r.Prelude))
+	if r.Empty() && len(r.Prelude) == 0 {
 		b.WriteString("-- (no changes)\n")
 		return b.String()
 	}
@@ -30,6 +30,18 @@ func (r *Result) Script(allowHazards bool) string {
 		fmt.Fprintf(&b, "-- WARNING: %s\n", w)
 	}
 	b.WriteString(SessionPreamble + "\n\n")
+
+	if len(r.Prelude) > 0 {
+		b.WriteString("-- refactorlog: renames recorded in the project, applied once per target\n")
+		for _, s := range r.Prelude {
+			if s.Note != "" {
+				fmt.Fprintf(&b, "-- %s\n", s.Note)
+			}
+			b.WriteString(s.SQL)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
 
 	for _, s := range r.Statements {
 		if s.Note != "" {

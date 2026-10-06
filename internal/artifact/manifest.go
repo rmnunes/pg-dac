@@ -27,6 +27,7 @@ const (
 	// a project; PartPreDeployDir / PartPostDeployDir hold its deployment
 	// scripts as numbered parts (NNNN_<file>.sql) in execution order.
 	PartProject       = "project/pgdac.yaml"
+	PartRefactorLog   = "project/refactorlog.json"
 	PartPreDeployDir  = "deploy/pre/"
 	PartPostDeployDir = "deploy/post/"
 )

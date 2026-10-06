@@ -8,17 +8,20 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rodrigonunes/pg-dac/internal/deploy"
+	"github.com/rodrigonunes/pg-dac/internal/drift"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/execute"
 	"github.com/rodrigonunes/pg-dac/internal/introspect"
+	"github.com/rodrigonunes/pg-dac/internal/refactor"
 	"github.com/rodrigonunes/pg-dac/internal/source"
+	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
 	"github.com/rodrigonunes/pg-dac/internal/validate"
 )
 
 func newPublishCmd() *cobra.Command {
 	f := &commonFlags{}
 	var lockTimeout time.Duration
-	var dryRun, noDeployScripts bool
+	var dryRun, noDeployScripts, allowDrift, noBaseline bool
 
 	cmd := &cobra.Command{
 		Use:   "publish",
@@ -50,13 +53,62 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Resolve the desired state first: nothing touches the target until the
+			// source is known to build.
+			toModel, toWarns, err := source.Resolve(ctx, f.to, srcOpts)
+			if err != nil {
+				return fmt.Errorf("--to: %w", err)
+			}
 			fromModel, fromWarns, err := introspect.IntrospectWithWarnings(ctx, conn, introspect.Options{IncludeSchemas: f.schemas})
 			if err != nil {
 				return fmt.Errorf("introspect target: %w", err)
 			}
-			toModel, toWarns, err := source.Resolve(ctx, f.to, srcOpts)
-			if err != nil {
-				return fmt.Errorf("--to: %w", err)
+			// Drift: a target that changed outside pg-dac since its last publish is
+			// not published to unless the operator says so (BlockWhenDriftDetected).
+			drifted, hadBaseline := false, false
+			if len(f.schemas) == 0 {
+				rep, err := drift.Check(ctx, conn, fromModel)
+				if err != nil {
+					return err
+				}
+				drifted, hadBaseline = rep.Drifted, rep.Baseline != nil
+				if rep.Drifted {
+					msg := fmt.Sprintf("the target has drifted from its last baseline (#%d from %s, %s): %d change(s) were made outside pg-dac — run `pg-dac drift --from <target>` to see them",
+						rep.Baseline.ID, rep.Baseline.Source, rep.Baseline.RecordedAt.Format(time.RFC3339), len(rep.Changes.Plan.Ops))
+					if !allowDrift && !dryRun {
+						return fmt.Errorf("refusing to publish: %s; re-run with --allow-drift to publish anyway (a fresh baseline is recorded)", msg)
+					}
+					fmt.Fprintln(cmd.ErrOrStderr(), "warning (drift): "+msg)
+				}
+			}
+			// Refactorlog: perform the renames the target still needs, record
+			// them, and read the target again so the diff starts from the renamed
+			// state (dry runs only transform the model and print the statements).
+			var prelude []sqlgen.Statement
+			if plan.Refactor != nil && len(plan.Refactor.Operations) > 0 {
+				applied, err := refactor.ReadApplied(ctx, conn)
+				if err != nil {
+					return err
+				}
+				renames, rwarns := refactor.Pending(fromModel, plan.Refactor, applied)
+				printWarnings(cmd, "refactorlog", rwarns)
+				if len(renames) > 0 {
+					prelude = refactor.Statements(renames)
+					if dryRun {
+						fromModel = refactor.ApplyToModel(fromModel, renames)
+					} else {
+						for _, r := range renames {
+							fmt.Fprintf(cmd.ErrOrStderr(), "refactorlog: %s\n", r.Op.Describe())
+						}
+						if err := execute.ApplyStatements(ctx, conn, prelude); err != nil {
+							return fmt.Errorf("refactorlog: %w", err)
+						}
+						prelude = nil
+						if fromModel, fromWarns, err = introspect.IntrospectWithWarnings(ctx, conn, introspect.Options{IncludeSchemas: f.schemas}); err != nil {
+							return fmt.Errorf("introspect target: %w", err)
+						}
+					}
+				}
 			}
 			printWarnings(cmd, "--from", fromWarns)
 			printWarnings(cmd, "--to", toWarns)
@@ -66,6 +118,7 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			res.Prelude = prelude
 			printWarnings(cmd, "plan", res.Warnings)
 			pre, post := plan.Pre, plan.Post
 			if noDeployScripts {
@@ -73,6 +126,15 @@ func newPublishCmd() *cobra.Command {
 			}
 			if res.Empty() && len(pre) == 0 && len(post) == 0 {
 				fmt.Fprintln(out, "Target is already up to date.")
+				if !dryRun && !noBaseline && len(f.schemas) == 0 && (drifted || !hadBaseline) {
+					// Nothing to migrate, but the target has no baseline yet (or its
+					// drift was just accepted): record the current state as the baseline.
+					bl, err := drift.Record(ctx, conn, fromModel, f.to, "pg-dac "+appVersion())
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(out, "Recorded baseline #%d.\n", bl.ID)
+				}
 				return nil
 			}
 
@@ -128,6 +190,18 @@ func newPublishCmd() *cobra.Command {
 				fmt.Fprintf(out, " and %d deploy script(s)", len(pre)+len(post))
 			}
 			fmt.Fprintln(out, ".")
+			// Record the resulting schema as the target's baseline for drift checks.
+			if !noBaseline && len(f.schemas) == 0 {
+				after, err := introspect.Introspect(ctx, conn, introspect.Options{})
+				if err != nil {
+					return fmt.Errorf("introspect target for baseline: %w", err)
+				}
+				bl, err := drift.Record(ctx, conn, after, f.to, "pg-dac "+appVersion())
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "Recorded baseline #%d.\n", bl.ID)
+			}
 			return nil
 		},
 	}
@@ -135,5 +209,7 @@ func newPublishCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&lockTimeout, "lock-timeout", 3*time.Second, "session lock_timeout for blocking DDL (0 = unset)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the migration SQL (and deploy scripts) instead of applying")
 	cmd.Flags().BoolVar(&noDeployScripts, "no-deploy-scripts", false, "do not run the source's pre/post-deploy scripts")
+	cmd.Flags().BoolVar(&allowDrift, "allow-drift", false, "publish even if the target changed outside pg-dac since its last baseline")
+	cmd.Flags().BoolVar(&noBaseline, "no-baseline", false, "do not record the resulting schema as the target's drift baseline")
 	return cmd
 }

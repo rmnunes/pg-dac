@@ -68,6 +68,10 @@ type Result struct {
 	// dependency cycle the planner could not order); callers show them to the
 	// user alongside the script.
 	Warnings []string
+	// Prelude holds statements that run before the migration and are not part
+	// of the diff: refactorlog renames and their bookkeeping. Script() emits
+	// them first; publish executes them before re-reading the target.
+	Prelude []sqlgen.Statement
 
 	from, to *model.Database // retained for per-object before/after definition rendering
 	online   bool

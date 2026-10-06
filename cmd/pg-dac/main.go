@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -34,6 +35,7 @@ func run() int {
 	root.AddCommand(
 		newDiffCmd(), newScriptCmd(), newReportCmd(), newPlanCmd(), newPublishCmd(),
 		newBuildCmd(), newExtractCmd(), newInspectCmd(), newServeCmd(), newInitCmd(),
+		newRefactorCmd(), newDriftCmd(), newBaselineCmd(), newLintCmd(),
 	)
 
 	// A single shared scratch server is started lazily on first use (if any
@@ -43,6 +45,13 @@ func run() int {
 	defer cleanup()
 
 	if err := root.ExecuteContext(ctx); err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) {
+			if ee.msg != "" {
+				fmt.Fprintln(os.Stderr, "pg-dac: "+ee.msg)
+			}
+			return ee.code
+		}
 		fmt.Fprintln(os.Stderr, "pg-dac: "+err.Error())
 		return 1
 	}
