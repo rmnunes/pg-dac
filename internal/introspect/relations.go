@@ -210,10 +210,14 @@ func readTriggers(ctx context.Context, q Querier, schemas []string, tables map[s
 	rows, err := q.Query(ctx, `
 SELECT n.nspname, c.relname, tg.tgname,
        pg_catalog.pg_get_triggerdef(tg.oid),
-       COALESCE(pg_catalog.obj_description(tg.oid, 'pg_trigger'), '')
+       COALESCE(pg_catalog.obj_description(tg.oid, 'pg_trigger'), ''),
+       fn.nspname,
+       fp.proname || '(' || pg_catalog.pg_get_function_identity_arguments(fp.oid) || ')'
 FROM pg_catalog.pg_trigger tg
 JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_catalog.pg_proc fp ON fp.oid = tg.tgfoid
+JOIN pg_catalog.pg_namespace fn ON fn.oid = fp.pronamespace
 WHERE n.nspname = ANY($1) AND c.relkind IN ('r', 'p')
   AND NOT tg.tgisinternal     -- skip FK/constraint-backed internal triggers
 ORDER BY n.nspname, c.relname, tg.tgname`, schemas)
@@ -223,13 +227,14 @@ ORDER BY n.nspname, c.relname, tg.tgname`, schemas)
 	defer rows.Close()
 
 	for rows.Next() {
-		var schema, table string
+		var schema, table, fnSchema, fnSig string
 		tr := &model.Trigger{}
-		if err := rows.Scan(&schema, &table, &tr.Name, &tr.Definition, &tr.Comment); err != nil {
+		if err := rows.Scan(&schema, &table, &tr.Name, &tr.Definition, &tr.Comment, &fnSchema, &fnSig); err != nil {
 			return err
 		}
 		tr.Definition = nlnorm(tr.Definition)
 		tr.Table = table
+		tr.DependsOn = []model.ObjRef{{Kind: model.KindFunction, Schema: fnSchema, Name: fnSig}}
 		if t := tables[tkey(schema, table)]; t != nil {
 			t.Triggers = append(t.Triggers, tr)
 		}
@@ -373,7 +378,10 @@ ORDER BY n.nspname, c.relname, con.conname`, schemas)
 			return err
 		}
 		con.Type = constraintType(contype)
-		con.Definition = nlnorm(con.Definition)
+		// pg_get_constraintdef appends " NOT VALID" for unvalidated constraints;
+		// that state is carried by Validated, so strip it from the definition (the
+		// generator re-adds it, and an equal body must compare equal).
+		con.Definition = strings.TrimSuffix(nlnorm(con.Definition), " NOT VALID")
 		con.RefSchema, con.RefTable = deref(refSchema), deref(refTable)
 		if t := tables[tkey(schema, table)]; t != nil {
 			t.Constraints = append(t.Constraints, con)
@@ -490,7 +498,10 @@ ORDER BY n.nspname, c.relname`, schemas)
 }
 
 // readViewDeps returns, for each view/matview keyed by tkey(schema,name), the
-// relations it references, derived from pg_rewrite + pg_depend.
+// relations and functions it references, derived from pg_rewrite + pg_depend.
+// Function references matter for ordering: a function may itself have to wait
+// for a later object (e.g. the view whose row type it returns), so a view that
+// calls it cannot rely on the coarse "functions before views" band alone.
 func readViewDeps(ctx context.Context, q Querier, schemas []string) (map[string][]model.ObjRef, error) {
 	rows, err := q.Query(ctx, `
 SELECT DISTINCT vn.nspname, vc.relname, rn.nspname, rc.relname, rc.relkind::text
@@ -502,7 +513,19 @@ JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass
 JOIN pg_catalog.pg_class rc ON rc.oid = d.refobjid
 JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
 WHERE vc.relkind IN ('v', 'm') AND vn.nspname = ANY($1)
-  AND rc.oid <> vc.oid AND rc.relkind IN ('r', 'p', 'v', 'm')`, schemas)
+  AND rc.oid <> vc.oid AND rc.relkind IN ('r', 'p', 'v', 'm')
+UNION
+SELECT DISTINCT vn.nspname, vc.relname, fn.nspname,
+       fp.proname || '(' || pg_catalog.pg_get_function_identity_arguments(fp.oid) || ')', 'f'
+FROM pg_catalog.pg_rewrite rw
+JOIN pg_catalog.pg_class vc ON vc.oid = rw.ev_class
+JOIN pg_catalog.pg_namespace vn ON vn.oid = vc.relnamespace
+JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass
+     AND d.objid = rw.oid AND d.refclassid = 'pg_catalog.pg_proc'::regclass
+JOIN pg_catalog.pg_proc fp ON fp.oid = d.refobjid
+JOIN pg_catalog.pg_namespace fn ON fn.oid = fp.pronamespace
+WHERE vc.relkind IN ('v', 'm') AND vn.nspname = ANY($1)
+ORDER BY 1, 2, 5, 3, 4`, schemas)
 	if err != nil {
 		return nil, fmt.Errorf("read view deps: %w", err)
 	}
@@ -573,6 +596,12 @@ func relkindToObjKind(k string) model.ObjKind {
 		return model.KindView
 	case "m":
 		return model.KindMatView
+	case "S":
+		return model.KindSequence
+	case "e":
+		return model.KindEnum
+	case "f":
+		return model.KindFunction
 	default:
 		return model.KindTable
 	}

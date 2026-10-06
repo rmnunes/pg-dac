@@ -112,6 +112,12 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 		return nil, fmt.Errorf("read server version: %w", err)
 	}
 
+	restore, err := pinSearchPath(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer restore()
+
 	schemas, err := readSchemas(ctx, q, opts)
 	if err != nil {
 		return nil, err
@@ -153,7 +159,33 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 	return db, nil
 }
 
+// pinSearchPath sets an empty search_path for the duration of introspection
+// (the same trick pg_dump uses) so that every pg_get_*def(), pg_get_expr() and
+// format_type() output is fully schema-qualified. Without it, canonical
+// definitions depend on the session's search_path: the same database read by
+// two roles with different search_paths would produce two different models,
+// and generated SQL would be unqualified and fragile. The previous value is
+// restored on return so a connection reused for an apply is left untouched.
+func pinSearchPath(ctx context.Context, q Querier) (func(), error) {
+	var prev string
+	if err := q.QueryRow(ctx, `SELECT pg_catalog.current_setting('search_path')`).Scan(&prev); err != nil {
+		return nil, fmt.Errorf("read search_path: %w", err)
+	}
+	var ignored string
+	if err := q.QueryRow(ctx, `SELECT pg_catalog.set_config('search_path', '', false)`).Scan(&ignored); err != nil {
+		return nil, fmt.Errorf("pin search_path: %w", err)
+	}
+	return func() {
+		var s string
+		_ = q.QueryRow(context.Background(), `SELECT pg_catalog.set_config('search_path', $1, false)`, prev).Scan(&s)
+	}, nil
+}
+
 func readFunctions(ctx context.Context, q Querier, schemas []string, byName map[string]*model.Schema) error {
+	deps, err := readFunctionDeps(ctx, q, schemas)
+	if err != nil {
+		return err
+	}
 	rows, err := q.Query(ctx, `
 SELECT n.nspname,
        p.proname,
@@ -183,11 +215,78 @@ ORDER BY n.nspname, p.proname`, schemas)
 			return err
 		}
 		f.Definition = nlnorm(f.Definition)
+		f.DependsOn = deps[tkey(f.Schema, f.Signature())]
 		if s := byName[f.Schema]; s != nil {
 			s.Functions = append(s.Functions, f)
 		}
 	}
 	return rows.Err()
+}
+
+// readFunctionDeps returns, for each function keyed by tkey(schema, signature),
+// the objects pg_depend says it needs: relation row types and enum types in its
+// signature, and relations / other functions referenced by a SQL-standard
+// (BEGIN ATOMIC) body. These become planner edges so a function is created after
+// the table or view whose row type it returns — the one ordering a fixed
+// "functions before tables" band cannot express.
+func readFunctionDeps(ctx context.Context, q Querier, schemas []string) (map[string][]model.ObjRef, error) {
+	rows, err := q.Query(ctx, `
+WITH f AS (
+    SELECT p.oid, n.nspname,
+           p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' AS sig
+    FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    WHERE p.prokind IN ('f', 'p') AND n.nspname = ANY($1)
+)
+-- relation row types (tables, views, matviews) used as argument/return types
+SELECT f.nspname, f.sig, rn.nspname, rc.relname, rc.relkind::text
+FROM pg_catalog.pg_depend d
+JOIN f ON d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = f.oid
+JOIN pg_catalog.pg_type t ON d.refclassid = 'pg_catalog.pg_type'::regclass AND d.refobjid = t.oid
+JOIN pg_catalog.pg_class rc ON rc.oid = t.typrelid
+JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
+WHERE rc.relkind IN ('r', 'p', 'v', 'm')
+UNION
+-- enum types in the signature
+SELECT f.nspname, f.sig, tn.nspname, t.typname, 'e'
+FROM pg_catalog.pg_depend d
+JOIN f ON d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = f.oid
+JOIN pg_catalog.pg_type t ON d.refclassid = 'pg_catalog.pg_type'::regclass AND d.refobjid = t.oid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+WHERE t.typtype = 'e'
+UNION
+-- relations referenced directly (SQL-standard bodies)
+SELECT f.nspname, f.sig, rn.nspname, rc.relname, rc.relkind::text
+FROM pg_catalog.pg_depend d
+JOIN f ON d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = f.oid
+JOIN pg_catalog.pg_class rc ON d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = rc.oid
+JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
+WHERE rc.relkind IN ('r', 'p', 'v', 'm', 'S')
+UNION
+-- other functions referenced directly (SQL-standard bodies)
+SELECT f.nspname, f.sig, fn.nspname,
+       fp.proname || '(' || pg_catalog.pg_get_function_identity_arguments(fp.oid) || ')', 'f'
+FROM pg_catalog.pg_depend d
+JOIN f ON d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = f.oid
+JOIN pg_catalog.pg_proc fp ON d.refclassid = 'pg_catalog.pg_proc'::regclass AND d.refobjid = fp.oid
+JOIN pg_catalog.pg_namespace fn ON fn.oid = fp.pronamespace
+WHERE fp.oid <> f.oid
+ORDER BY 1, 2, 3, 4`, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("read function deps: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string][]model.ObjRef{}
+	for rows.Next() {
+		var fschema, fsig, rschema, rname, rkind string
+		if err := rows.Scan(&fschema, &fsig, &rschema, &rname, &rkind); err != nil {
+			return nil, err
+		}
+		k := tkey(fschema, fsig)
+		out[k] = append(out[k], model.ObjRef{Kind: relkindToObjKind(rkind), Schema: rschema, Name: rname})
+	}
+	return out, rows.Err()
 }
 
 func readSchemas(ctx context.Context, q Querier, opts Options) ([]*model.Schema, error) {

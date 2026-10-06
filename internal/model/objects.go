@@ -62,9 +62,10 @@ type Sequence struct {
 	Cache     int64  `json:"cache"`
 	Cycle     bool   `json:"cycle,omitempty"`
 
-	// OwnedBy is set when the sequence is owned by a column (identity/serial),
-	// in which case pg-dac does not emit it as a standalone object — it is
-	// created implicitly with the owning column.
+	// OwnedBy is set when the sequence is owned by a column (identity/serial).
+	// An identity column's sequence is implicit (see Database.IsIdentitySequence)
+	// and is never emitted; a serial column's sequence is emitted explicitly —
+	// CREATE SEQUENCE before the table, ALTER SEQUENCE ... OWNED BY after it.
 	OwnedBy *ColumnRef `json:"ownedBy,omitempty"`
 }
 
@@ -96,6 +97,13 @@ type Function struct {
 	Definition string `json:"definition"`
 	Language   string `json:"language,omitempty"`
 	Comment    string `json:"comment,omitempty"`
+
+	// DependsOn lists objects that must exist before the function can be
+	// created: relation row types and user types (enums) used in its signature,
+	// plus relations/functions a SQL-standard (BEGIN ATOMIC) body references.
+	// Derived from pg_depend. Plain string bodies record no dependencies — they
+	// are covered by applying with check_function_bodies = false.
+	DependsOn []ObjRef `json:"dependsOn,omitempty"`
 }
 
 // Signature returns "name(argtypes)", the overload-aware identity.

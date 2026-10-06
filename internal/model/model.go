@@ -45,6 +45,45 @@ func (d *Database) MajorVersion() int {
 	return d.TargetVersion / 10000
 }
 
+// Table looks up a table by schema and name, returning nil if absent.
+func (d *Database) Table(schema, name string) *Table {
+	for _, s := range d.Schemas {
+		if s.Name != schema {
+			continue
+		}
+		for _, t := range s.Tables {
+			if t.Name == name {
+				return t
+			}
+		}
+	}
+	return nil
+}
+
+// HasColumn reports whether the referenced column exists in the model.
+func (d *Database) HasColumn(ref ColumnRef) bool {
+	t := d.Table(ref.Schema, ref.Table)
+	return t != nil && t.Column(ref.Column) != nil
+}
+
+// IsIdentitySequence reports whether seq is the implicit sequence behind a
+// GENERATED ... AS IDENTITY column. PostgreSQL creates and drops such a
+// sequence together with its column, so it must never be emitted standalone.
+// A serial-style sequence (owned by a column whose DEFAULT calls nextval) is
+// NOT implicit: it has to be created before its table and attached with
+// OWNED BY afterwards, or the table's default references a missing relation.
+func (d *Database) IsIdentitySequence(seq *Sequence) bool {
+	if seq == nil || seq.OwnedBy == nil {
+		return false
+	}
+	t := d.Table(seq.OwnedBy.Schema, seq.OwnedBy.Table)
+	if t == nil {
+		return false
+	}
+	c := t.Column(seq.OwnedBy.Column)
+	return c != nil && c.Identity != ""
+}
+
 // Extension models an installed PostgreSQL extension.
 type Extension struct {
 	Name    string `json:"name"`

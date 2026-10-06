@@ -65,6 +65,9 @@ type Trigger struct {
 	// statement). Authoritative equality key.
 	Definition string `json:"definition"`
 	Comment    string `json:"comment,omitempty"`
+	// DependsOn names the trigger function (so the planner creates the function
+	// first even when that function is itself waiting on a later object).
+	DependsOn []ObjRef `json:"dependsOn,omitempty"`
 }
 
 // Policy models a row-level-security policy (pg_policy).
