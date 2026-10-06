@@ -84,16 +84,25 @@ var scenarios = []scenario{
 	{"enum-value-removed", `CREATE TYPE e AS ENUM ('a','b');`, `CREATE TYPE e AS ENUM ('a');`, miss, "enum removal not diffed, no hazard (WP3)"},
 	{"generated-column-expr-change", `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 2) STORED);`, `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 3) STORED);`, miss, "generated expression not diffed (WP3)"},
 
-	// --- known failures (WP2: dependency-aware migrations) ---
-	{"view-drop-column", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t;`, fail, "CREATE OR REPLACE VIEW cannot drop columns (WP2 B3)"},
-	{"view-rename-column", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b AS bee FROM t;`, fail, "WP2 B3"},
-	{"view-change-column-type", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b::text AS b FROM t;`, fail, "WP2 B3"},
-	{"function-return-type", `CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';`, `CREATE FUNCTION f() RETURNS bigint LANGUAGE sql AS 'SELECT 1';`, fail, "CREATE OR REPLACE cannot change return type (WP2 B4)"},
-	{"alter-column-type-under-view", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t;`, fail, "dependent view blocks ALTER TYPE (WP2 B5)"},
-	{"drop-column-under-view", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, fail, "WP2 B5"},
-	{"drop-table-under-altered-view", `CREATE TABLE t(a int); CREATE TABLE u(b int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE u(b int); CREATE VIEW v AS SELECT b AS a FROM u;`, fail, "WP2 B5"},
+	// --- fixed in WP2 (dependency-aware migrations) ---
+	{"view-drop-column", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t;`, ok, ""},
+	{"view-rename-column", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b AS bee FROM t;`, ok, ""},
+	{"view-change-column-type", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b::text AS b FROM t;`, ok, ""},
+	{"view-append-column-keeps-replace", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, ok, ""},
+	{"function-return-type", `CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';`, `CREATE FUNCTION f() RETURNS bigint LANGUAGE sql AS 'SELECT 1';`, ok, ""},
+	{"function-return-type-used-by-view", `CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE VIEW v AS SELECT f() AS x;`, `CREATE FUNCTION f() RETURNS bigint LANGUAGE sql AS 'SELECT 1'; CREATE VIEW v AS SELECT f() AS x;`, ok, ""},
+	{"function-out-param-type-change", `CREATE FUNCTION f(OUT a int) LANGUAGE sql AS 'SELECT 1';`, `CREATE FUNCTION f(OUT a bigint) LANGUAGE sql AS 'SELECT 1';`, ok, ""},
+	{"function-to-procedure", `CREATE FUNCTION f() RETURNS void LANGUAGE sql AS 'SELECT 1';`, `CREATE PROCEDURE f() LANGUAGE sql AS 'SELECT 1';`, ok, ""},
+	{"alter-column-type-under-view", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t;`, ok, ""},
+	{"view-on-view-under-column-type-change", `CREATE TABLE t(a int); CREATE VIEW v1 AS SELECT a FROM t; CREATE VIEW v2 AS SELECT a FROM v1;`, `CREATE TABLE t(a bigint); CREATE VIEW v1 AS SELECT a FROM t; CREATE VIEW v2 AS SELECT a FROM v1;`, ok, ""},
+	{"matview-under-column-type-change", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t;`, `CREATE TABLE t(a bigint); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t;`, ok, ""},
+	{"drop-column-under-view", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, ok, ""},
+	{"drop-table-under-altered-view", `CREATE TABLE t(a int); CREATE TABLE u(b int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE u(b int); CREATE VIEW v AS SELECT b AS a FROM u;`, ok, ""},
+	{"drop-view-with-dependent-view-rewritten", `CREATE TABLE t(a int); CREATE VIEW v1 AS SELECT a FROM t; CREATE VIEW v2 AS SELECT a FROM v1;`, `CREATE TABLE t(a int); CREATE VIEW v2 AS SELECT a FROM t;`, ok, ""},
+	{"alter-type-text-to-int", `CREATE TABLE t(a text);`, `CREATE TABLE t(a int);`, ok, "an explicit USING cast is emitted"},
+
+	// --- known failures (WP3) ---
 	{"domain-used-by-table-from-empty", ``, `CREATE DOMAIN email AS text CHECK (VALUE LIKE '%@%'); CREATE TABLE t(e email);`, fail, "domains not managed (WP3)"},
-	{"alter-type-text-to-int", `CREATE TABLE t(a text);`, `CREATE TABLE t(a int);`, fail, "needs a USING clause; flagged by hazard note"},
 }
 
 // TestScenarios runs the migration scenario matrix (the audit notes, Appendix A)

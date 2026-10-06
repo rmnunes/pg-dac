@@ -2,6 +2,7 @@ package validate_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/rodrigonunes/pg-dac/internal/devdb"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rodrigonunes/pg-dac/internal/project"
 	"github.com/rodrigonunes/pg-dac/internal/validate"
 )
 
@@ -99,6 +101,61 @@ func TestBootstrap_FromEmpty(t *testing.T) {
 			t.Fatalf("%s: build: %v", name, err)
 		}
 		checkBootstrap(ctx, t, name, empty, to)
+	}
+}
+
+// TestExtractProjectRoundTrip lays the comprehensive fixture out as an
+// extracted project (engine.ObjectScripts: one numbered file per object in
+// global dependency order), builds that project back through the scratch
+// database, and requires it to compare empty against the original model in both
+// directions. This is the gate for `extract --to-project` on schemas where a
+// function's signature needs a view's row type or a view calls such a function.
+func TestExtractProjectRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping scratch-database test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	ctx, cleanup := devdb.WithShared(ctx)
+	defer cleanup()
+
+	to, _, err := build.FromSQL(ctx, bootstrapSQL, build.Options{})
+	if err != nil {
+		t.Fatalf("build fixture: %v", err)
+	}
+	scripts := engine.ObjectScripts(to)
+	if len(scripts) < 10 {
+		t.Fatalf("expected many extracted scripts, got %d", len(scripts))
+	}
+	dir := t.TempDir()
+	for _, sc := range scripts {
+		if err := os.MkdirAll(filepath.Join(dir, sc.Section), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, sc.Section, sc.FileName()), []byte(sc.SQL+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	man := project.Default("roundtrip")
+	man.Include = []string{engine.ExtractSection + "/**/*.sql"}
+	if mv := to.MajorVersion(); mv > 0 {
+		man.TargetMajor = mv
+	}
+	if err := man.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	rebuilt, _, err := build.FromDir(ctx, dir, build.Options{})
+	if err != nil {
+		t.Fatalf("extracted project does not build: %v", err)
+	}
+	opts := engine.DefaultOptions()
+	opts.DropObjectsNotInSource = true
+	if res, err := engine.Compare(rebuilt, to, opts); err != nil || !res.Empty() {
+		t.Errorf("extracted project differs from the original (err=%v):\n%s", err, res.Script(true))
+	}
+	if res, err := engine.Compare(to, rebuilt, opts); err != nil || !res.Empty() {
+		t.Errorf("original differs from the extracted project (err=%v):\n%s", err, res.Script(true))
 	}
 }
 
