@@ -23,6 +23,7 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	addColumnByCol := map[string]int{}
 	defaultOpsByCol := map[string][]int{}
 	colChangeByCol := map[string][]int{} // ALTER TYPE / DROP COLUMN, which dependent views must bracket
+	trigCreateByKey := map[string]int{}  // relation key + "#" + trigger -> CreateTrigger op
 	colKey := func(table model.ObjRef, col string) string { return table.Key() + "#" + col }
 	colRefKey := func(c model.ColumnRef) string {
 		return model.ObjRef{Kind: model.KindTable, Schema: c.Schema, Name: c.Table}.Key() + "#" + c.Column
@@ -31,13 +32,17 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	for i, op := range ops {
 		switch op.Type {
 		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateEnum,
+			diff.OpCreateDomain, diff.OpCreateCompositeType,
 			diff.OpCreateCollation, diff.OpCreateSequence, diff.OpCreateFunction,
 			diff.OpCreateSchema, diff.OpCreateExtension:
 			createByObj[op.Owner.Key()] = i
 		case diff.OpDropTable, diff.OpDropView, diff.OpDropMatView, diff.OpDropEnum,
+			diff.OpDropDomain, diff.OpDropCompositeType,
 			diff.OpDropCollation, diff.OpDropSequence, diff.OpDropFunction,
 			diff.OpDropSchema, diff.OpDropExtension:
 			dropByObj[op.Owner.Key()] = i
+		case diff.OpCreateTrigger:
+			trigCreateByKey[colKey(op.Owner, op.Sub)] = i
 		case diff.OpAddColumn:
 			addColumnByCol[colKey(op.Owner, op.Sub)] = i
 		case diff.OpSetColumnDefault, diff.OpDropColumnDefault, diff.OpAlterColumnIdentity:
@@ -80,11 +85,43 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 		switch op.Type {
 		case diff.OpAddColumn, diff.OpAlterColumnType, diff.OpSetColumnDefault,
 			diff.OpDropColumnDefault, diff.OpSetColumnNotNull, diff.OpDropColumnNotNull,
-			diff.OpAlterColumnIdentity, diff.OpCreateIndex, diff.OpCreatePolicy, diff.OpEnableRLS,
+			diff.OpAlterColumnIdentity, diff.OpAlterColumnGenerated,
+			diff.OpSetColumnStorage, diff.OpSetColumnCompression, diff.OpSetColumnStats,
+			diff.OpSetTableLogged, diff.OpSetRelOptions, diff.OpSetComment,
+			diff.OpCreateIndex, diff.OpCreatePolicy, diff.OpEnableRLS,
 			diff.OpValidateConstraint:
-			// Sub-object operations must follow their owning table's creation.
+			// Sub-object operations must follow their owning object's creation.
 			if c, ok := createByObj[op.Owner.Key()]; ok {
 				add(c, i)
+			}
+
+		case diff.OpSetTriggerEnabled:
+			if c, ok := createByObj[op.Owner.Key()]; ok {
+				add(c, i)
+			}
+			if c, ok := trigCreateByKey[colKey(op.Owner, op.Sub)]; ok {
+				add(c, i)
+			}
+
+		case diff.OpCreateTable:
+			// A partition needs its parent first.
+			if op.Table != nil {
+				if parent, ok := op.Table.ParentRef(); ok {
+					if c, ok := createByObj[parent.Key()]; ok {
+						add(c, i)
+					}
+				}
+			}
+
+		case diff.OpDropTable:
+			// Drop partitions before their parent (the parent drop cascades, and an
+			// explicit drop afterwards would fail).
+			if op.Table != nil {
+				if parent, ok := op.Table.ParentRef(); ok {
+					if d, ok := dropByObj[parent.Key()]; ok {
+						add(i, d)
+					}
+				}
 			}
 
 		case diff.OpCreateTrigger:

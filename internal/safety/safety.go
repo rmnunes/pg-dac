@@ -33,6 +33,12 @@ const (
 	Correctness HazardType = "CORRECTNESS"
 	// UpgradingExtension: ALTER EXTENSION ... UPDATE runs the extension's own scripts.
 	UpgradingExtension HazardType = "UPGRADING_EXTENSION_VERSION"
+	// Unsupported: the desired change cannot be applied in place by PostgreSQL
+	// (dropping or reordering enum values, altering a type that is in use,
+	// re-partitioning a table). The generated statement only raises a warning;
+	// the schema will not converge until the change is made by hand. Error
+	// severity, so a publish is blocked by default.
+	Unsupported HazardType = "UNSUPPORTED_CHANGE"
 )
 
 // Severity ranks how dangerous a hazard is, so callers can render badges and
@@ -62,7 +68,7 @@ func New(t HazardType, msg string) Hazard {
 // else is a warning the user reviews.
 func defaultSeverity(t HazardType) Severity {
 	switch t {
-	case DeletesData:
+	case DeletesData, Unsupported:
 		return SeverityError
 	default:
 		return SeverityWarning

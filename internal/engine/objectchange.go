@@ -204,6 +204,12 @@ func presentKeys(db *model.Database) map[string]model.ObjKind {
 		for _, en := range s.Enums {
 			m[en.Ref().Key()] = model.KindEnum
 		}
+		for _, d := range s.Domains {
+			m[d.Ref().Key()] = model.KindDomain
+		}
+		for _, c := range s.Composites {
+			m[c.Ref().Key()] = model.KindComposite
+		}
 		for _, co := range s.Collations {
 			m[co.Ref().Key()] = model.KindCollation
 		}
@@ -285,6 +291,18 @@ func extractObject(db *model.Database, ref model.ObjRef) *model.Database {
 		for _, en := range src.Enums {
 			if en.Name == ref.Name {
 				out.Enums = []*model.EnumType{en}
+			}
+		}
+	case model.KindDomain:
+		for _, d := range src.Domains {
+			if d.Name == ref.Name {
+				out.Domains = []*model.Domain{d}
+			}
+		}
+	case model.KindComposite:
+		for _, c := range src.Composites {
+			if c.Name == ref.Name {
+				out.Composites = []*model.CompositeType{c}
 			}
 		}
 	case model.KindCollation:

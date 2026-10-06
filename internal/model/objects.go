@@ -21,6 +21,12 @@ type View struct {
 
 	// CheckOption is "" (none), "local", or "cascaded".
 	CheckOption string `json:"checkOption,omitempty"`
+	// SecurityBarrier / SecurityInvoker mirror the view options of the same name.
+	SecurityBarrier bool `json:"securityBarrier,omitempty"`
+	SecurityInvoker bool `json:"securityInvoker,omitempty"`
+
+	// Triggers are the INSTEAD OF / statement triggers defined on the view.
+	Triggers []*Trigger `json:"triggers,omitempty"`
 
 	// DependsOn lists the relations/objects this view references, derived from
 	// pg_depend/pg_rewrite, so the planner can order view creation after its
@@ -166,6 +172,41 @@ func (c *Collation) Ref() ObjRef { return ObjRef{Kind: KindCollation, Schema: c.
 
 // QualifiedName returns the schema-qualified, quoted collation name.
 func (c *Collation) QualifiedName() string { return QualifiedName(c.Schema, c.Name) }
+
+// Domain models a domain type (pg_type typtype 'd'). Definition is the
+// reconstructed CREATE DOMAIN statement (base type, collation, default, NOT
+// NULL, named CHECK constraints) — the authoritative equality key.
+type Domain struct {
+	Schema     string `json:"schema"`
+	Name       string `json:"name"`
+	Owner      string `json:"owner,omitempty"`
+	Definition string `json:"definition"`
+	Comment    string `json:"comment,omitempty"`
+}
+
+// Ref returns a dependency-graph reference to this domain.
+func (d *Domain) Ref() ObjRef { return ObjRef{Kind: KindDomain, Schema: d.Schema, Name: d.Name} }
+
+// QualifiedName returns the schema-qualified, quoted domain name.
+func (d *Domain) QualifiedName() string { return QualifiedName(d.Schema, d.Name) }
+
+// CompositeType models a stand-alone composite type (CREATE TYPE ... AS (...)).
+// Definition is the reconstructed CREATE TYPE statement.
+type CompositeType struct {
+	Schema     string `json:"schema"`
+	Name       string `json:"name"`
+	Owner      string `json:"owner,omitempty"`
+	Definition string `json:"definition"`
+	Comment    string `json:"comment,omitempty"`
+}
+
+// Ref returns a dependency-graph reference to this composite type.
+func (c *CompositeType) Ref() ObjRef {
+	return ObjRef{Kind: KindComposite, Schema: c.Schema, Name: c.Name}
+}
+
+// QualifiedName returns the schema-qualified, quoted type name.
+func (c *CompositeType) QualifiedName() string { return QualifiedName(c.Schema, c.Name) }
 
 // EnumType models an enum type (pg_type + pg_enum).
 type EnumType struct {

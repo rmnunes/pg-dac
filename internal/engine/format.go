@@ -41,8 +41,8 @@ func (r *Result) Script(allowHazards bool) string {
 		if !s.Transactional {
 			b.WriteString("-- (run outside a transaction block)\n")
 		}
-		if !allowHazards && hasDataLoss(s.Hazards) {
-			b.WriteString("-- BLOCKED: possible data loss. Re-run with --allow-hazards to include this.\n")
+		if !allowHazards && hasBlocking(s.Hazards) {
+			b.WriteString("-- BLOCKED: possible data loss or unsupported change. Re-run with --allow-hazards to include this.\n")
 			for _, line := range strings.Split(s.SQL, "\n") {
 				fmt.Fprintf(&b, "-- %s\n", line)
 			}
@@ -75,6 +75,27 @@ func (r *Result) HasDataLoss() bool {
 func hasDataLoss(hz []safety.Hazard) bool {
 	for _, h := range hz {
 		if h.Type == safety.DeletesData {
+			return true
+		}
+	}
+	return false
+}
+
+// HasBlocking reports whether the migration contains any error-severity hazard
+// (data loss, or a change PostgreSQL cannot apply in place) — the gate a publish
+// applies unless hazards are explicitly allowed.
+func (r *Result) HasBlocking() bool {
+	for _, s := range r.Statements {
+		if hasBlocking(s.Hazards) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBlocking(hz []safety.Hazard) bool {
+	for _, h := range hz {
+		if h.Severity == safety.SeverityError {
 			return true
 		}
 	}

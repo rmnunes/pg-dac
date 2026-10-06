@@ -15,6 +15,7 @@ package introspect
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rodrigonunes/pg-dac/internal/model"
@@ -55,8 +56,9 @@ func IntrospectWithWarnings(ctx context.Context, q Querier, opts Options) (*mode
 	return db, warns, nil
 }
 
-// collectWarnings counts objects of types pg-dac does not manage within the
-// given schemas, so callers can tell the user what is being ignored.
+// collectWarnings counts objects of types — and properties — pg-dac does not
+// manage within the given schemas, so callers can tell the user what is being
+// ignored (and, for privileges, what a publish will not carry over).
 func collectWarnings(ctx context.Context, q Querier, schemas []string) ([]string, error) {
 	checks := []struct {
 		label string
@@ -66,15 +68,6 @@ func collectWarnings(ctx context.Context, q Querier, schemas []string) ([]string
 SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
 WHERE n.nspname = ANY($1) AND p.prokind IN ('a','w')
   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_proc'::regclass AND d.objid=p.oid AND d.deptype IN ('e','i'))`},
-		{"domain types", `
-SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
-WHERE n.nspname = ANY($1) AND t.typtype='d'
-  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype IN ('e','i'))`},
-		{"composite types", `
-SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
-JOIN pg_catalog.pg_class c ON c.oid=t.typrelid
-WHERE n.nspname = ANY($1) AND t.typtype='c' AND c.relkind='c'
-  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_type'::regclass AND d.objid=t.oid AND d.deptype IN ('e','i'))`},
 		{"range or multirange types", `
 SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
 WHERE n.nspname = ANY($1) AND t.typtype IN ('r','m')
@@ -86,9 +79,20 @@ WHERE n.nspname = ANY($1) AND c.relkind='f'`},
 SELECT count(*) FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class c ON c.oid=r.ev_class
 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 WHERE n.nspname = ANY($1) AND r.ev_type <> '1'`},
-		{"partitioned tables (partition attachments are not managed)", `
-SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-WHERE n.nspname = ANY($1) AND c.relkind='p'`},
+		{"tables using INHERITS (non-partition inheritance)", `
+SELECT count(DISTINCT ih.inhrelid) FROM pg_catalog.pg_inherits ih
+JOIN pg_catalog.pg_class c ON c.oid = ih.inhrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p') AND NOT c.relispartition`},
+		{"objects with explicit privileges (GRANT/REVOKE)", `
+SELECT (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p','v','m','S') AND c.relacl IS NOT NULL)
+     + (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+          WHERE n.nspname = ANY($1) AND p.proacl IS NOT NULL)
+     + (SELECT count(*) FROM pg_catalog.pg_namespace n
+          WHERE n.nspname = ANY($1) AND n.nspname <> 'public' AND n.nspacl IS NOT NULL)
+     + (SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
+          WHERE n.nspname = ANY($1) AND t.typacl IS NOT NULL)`},
 	}
 
 	var warns []string
@@ -98,7 +102,11 @@ WHERE n.nspname = ANY($1) AND c.relkind='p'`},
 			return nil, fmt.Errorf("scan unsupported-object count (%s): %w", c.label, err)
 		}
 		if n > 0 {
-			warns = append(warns, fmt.Sprintf("%d %s present but not managed by pg-dac", n, c.label))
+			msg := fmt.Sprintf("%d %s present but not managed by pg-dac", n, c.label)
+			if strings.HasPrefix(c.label, "objects with explicit privileges") {
+				msg += " — privileges are not published"
+			}
+			warns = append(warns, msg)
 		}
 	}
 	return warns, nil
@@ -129,6 +137,7 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 		byName[s.Name] = s
 		db.Schemas = append(db.Schemas, s)
 	}
+	major := db.MajorVersion()
 
 	if db.Extensions, err = readExtensions(ctx, q, names); err != nil {
 		return nil, err
@@ -136,7 +145,13 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 	if err := readEnums(ctx, q, names, byName); err != nil {
 		return nil, err
 	}
-	if err := readCollations(ctx, q, names, db.MajorVersion(), byName); err != nil {
+	if err := readDomains(ctx, q, names, byName); err != nil {
+		return nil, err
+	}
+	if err := readCompositeTypes(ctx, q, names, byName); err != nil {
+		return nil, err
+	}
+	if err := readCollations(ctx, q, names, major, byName); err != nil {
 		return nil, err
 	}
 	if err := readSequences(ctx, q, names, byName); err != nil {
@@ -145,13 +160,22 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 	if err := readFunctions(ctx, q, names, byName); err != nil {
 		return nil, err
 	}
-	if err := readTables(ctx, q, names, byName); err != nil {
+	tables, err := readTables(ctx, q, names, major, byName)
+	if err != nil {
 		return nil, err
 	}
-	if err := readViews(ctx, q, names, byName); err != nil {
+	views, err := readViews(ctx, q, names, byName)
+	if err != nil {
 		return nil, err
 	}
-	if err := readMatViews(ctx, q, names, byName); err != nil {
+	mviews, err := readMatViews(ctx, q, names, byName)
+	if err != nil {
+		return nil, err
+	}
+	if err := readIndexes(ctx, q, names, tables, mviews); err != nil {
+		return nil, err
+	}
+	if err := readTriggers(ctx, q, names, major, tables, views); err != nil {
 		return nil, err
 	}
 
@@ -382,6 +406,113 @@ ORDER BY n.nspname, t.typname`, schemas)
 		}
 		if s := byName[e.Schema]; s != nil {
 			s.Enums = append(s.Enums, e)
+		}
+	}
+	return rows.Err()
+}
+
+// readDomains introspects domain types. PostgreSQL has no pg_get_domaindef, so
+// the CREATE DOMAIN statement is reconstructed from the catalog (base type,
+// collation, default, NOT NULL, named CHECK constraints in name order).
+func readDomains(ctx context.Context, q Querier, schemas []string, byName map[string]*model.Schema) error {
+	rows, err := q.Query(ctx, `
+SELECT n.nspname, t.typname,
+       pg_catalog.pg_get_userbyid(t.typowner),
+       pg_catalog.format_type(t.typbasetype, t.typtypmod),
+       t.typnotnull,
+       COALESCE(pg_catalog.pg_get_expr(t.typdefaultbin, 0), ''),
+       CASE WHEN t.typcollation <> 0 AND t.typcollation <> bt.typcollation
+            THEN (SELECT pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(col.collname)
+                  FROM pg_catalog.pg_collation col
+                  JOIN pg_catalog.pg_namespace cn ON cn.oid = col.collnamespace
+                  WHERE col.oid = t.typcollation)
+            ELSE '' END,
+       COALESCE((SELECT string_agg('CONSTRAINT ' || pg_catalog.quote_ident(con.conname) || ' ' || pg_catalog.pg_get_constraintdef(con.oid), ' ' ORDER BY con.conname)
+                 FROM pg_catalog.pg_constraint con WHERE con.contypid = t.oid), ''),
+       COALESCE(pg_catalog.obj_description(t.oid, 'pg_type'), '')
+FROM pg_catalog.pg_type t
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_catalog.pg_type bt ON bt.oid = t.typbasetype
+WHERE t.typtype = 'd' AND n.nspname = ANY($1)
+  AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_depend d
+        WHERE d.classid = 'pg_catalog.pg_type'::regclass
+          AND d.objid = t.oid AND d.deptype IN ('e', 'i'))
+ORDER BY n.nspname, t.typname`, schemas)
+	if err != nil {
+		return fmt.Errorf("read domains: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ns, name, owner, base, def, coll, cons, comment string
+		var notNull bool
+		if err := rows.Scan(&ns, &name, &owner, &base, &notNull, &def, &coll, &cons, &comment); err != nil {
+			return err
+		}
+		stmt := "CREATE DOMAIN " + model.QualifiedName(ns, name) + " AS " + base
+		if coll != "" {
+			stmt += " COLLATE " + coll
+		}
+		if def != "" {
+			stmt += " DEFAULT " + def
+		}
+		if notNull {
+			stmt += " NOT NULL"
+		}
+		if cons != "" {
+			stmt += " " + nlnorm(cons)
+		}
+		d := &model.Domain{Schema: ns, Name: name, Owner: owner, Definition: stmt, Comment: comment}
+		if s := byName[ns]; s != nil {
+			s.Domains = append(s.Domains, d)
+		}
+	}
+	return rows.Err()
+}
+
+// readCompositeTypes introspects stand-alone composite types (CREATE TYPE ...
+// AS (...)); a table's implicit row type is relkind 'r' and excluded.
+func readCompositeTypes(ctx context.Context, q Querier, schemas []string, byName map[string]*model.Schema) error {
+	rows, err := q.Query(ctx, `
+SELECT n.nspname, t.typname,
+       pg_catalog.pg_get_userbyid(t.typowner),
+       COALESCE((SELECT string_agg(
+                   pg_catalog.quote_ident(a.attname) || ' ' || pg_catalog.format_type(a.atttypid, a.atttypmod)
+                   || CASE WHEN a.attcollation <> 0 AND a.attcollation <> at.typcollation
+                           THEN ' COLLATE ' || (SELECT pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(col.collname)
+                                                FROM pg_catalog.pg_collation col
+                                                JOIN pg_catalog.pg_namespace cn ON cn.oid = col.collnamespace
+                                                WHERE col.oid = a.attcollation)
+                           ELSE '' END,
+                   ', ' ORDER BY a.attnum)
+                 FROM pg_catalog.pg_attribute a
+                 JOIN pg_catalog.pg_type at ON at.oid = a.atttypid
+                 WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), ''),
+       COALESCE(pg_catalog.obj_description(t.oid, 'pg_type'), '')
+FROM pg_catalog.pg_type t
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_catalog.pg_class c ON c.oid = t.typrelid
+WHERE t.typtype = 'c' AND c.relkind = 'c' AND n.nspname = ANY($1)
+  AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_depend d
+        WHERE d.classid = 'pg_catalog.pg_type'::regclass
+          AND d.objid = t.oid AND d.deptype IN ('e', 'i'))
+ORDER BY n.nspname, t.typname`, schemas)
+	if err != nil {
+		return fmt.Errorf("read composite types: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ns, name, owner, attrs, comment string
+		if err := rows.Scan(&ns, &name, &owner, &attrs, &comment); err != nil {
+			return err
+		}
+		c := &model.CompositeType{Schema: ns, Name: name, Owner: owner,
+			Definition: "CREATE TYPE " + model.QualifiedName(ns, name) + " AS (" + attrs + ")", Comment: comment}
+		if s := byName[ns]; s != nil {
+			s.Composites = append(s.Composites, c)
 		}
 	}
 	return rows.Err()

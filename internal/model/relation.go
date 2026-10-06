@@ -13,9 +13,14 @@ type Table struct {
 	Persistence string `json:"persistence,omitempty"`
 
 	// PartitionStrategy is non-empty ("range"/"list"/"hash") for partitioned
-	// tables (relkind 'p'). PartitionKey is the canonical pg_get_partkeydef output.
+	// tables (relkind 'p'). PartitionKey is the canonical pg_get_partkeydef
+	// output, e.g. "RANGE (d)", rendered as PARTITION BY <PartitionKey>.
 	PartitionStrategy string `json:"partitionStrategy,omitempty"`
 	PartitionKey      string `json:"partitionKey,omitempty"`
+	// PartitionOf is set for a partition (relispartition): its parent and the
+	// FOR VALUES bound. A partition inherits columns, constraints, indexes and
+	// triggers from the parent, so only its own (local) objects are modeled.
+	PartitionOf *PartitionParent `json:"partitionOf,omitempty"`
 
 	// RelOptions captures storage parameters (e.g. fillfactor, autovacuum_*).
 	RelOptions map[string]string `json:"relOptions,omitempty"`
@@ -31,8 +36,25 @@ type Table struct {
 	Policies    []*Policy     `json:"policies,omitempty"`
 }
 
+// PartitionParent names the partitioned table a partition belongs to and the
+// bound it was created with ("FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+// "FOR VALUES IN ('a')", "FOR VALUES WITH (MODULUS 4, REMAINDER 0)", or "DEFAULT").
+type PartitionParent struct {
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+	Bound  string `json:"bound"`
+}
+
 // Ref returns a dependency-graph reference to this table.
 func (t *Table) Ref() ObjRef { return ObjRef{Kind: KindTable, Schema: t.Schema, Name: t.Name} }
+
+// ParentRef returns the partition parent's reference, or false for a non-partition.
+func (t *Table) ParentRef() (ObjRef, bool) {
+	if t.PartitionOf == nil {
+		return ObjRef{}, false
+	}
+	return ObjRef{Kind: KindTable, Schema: t.PartitionOf.Schema, Name: t.PartitionOf.Table}, true
+}
 
 // QualifiedName returns the schema-qualified, quoted table name.
 func (t *Table) QualifiedName() string { return QualifiedName(t.Schema, t.Name) }
@@ -65,6 +87,9 @@ type Trigger struct {
 	// statement). Authoritative equality key.
 	Definition string `json:"definition"`
 	Comment    string `json:"comment,omitempty"`
+	// Enabled is "" (ENABLE, the default), "disabled", "replica", or "always"
+	// (ALTER TABLE ... DISABLE / ENABLE REPLICA / ENABLE ALWAYS TRIGGER).
+	Enabled string `json:"enabled,omitempty"`
 	// DependsOn names the trigger function (so the planner creates the function
 	// first even when that function is itself waiting on a later object).
 	DependsOn []ObjRef `json:"dependsOn,omitempty"`

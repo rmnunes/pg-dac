@@ -25,6 +25,11 @@ const (
 	OpDropEnum     OpType = "dropEnum"
 	OpAddEnumValue OpType = "addEnumValue"
 
+	OpCreateDomain        OpType = "createDomain"
+	OpDropDomain          OpType = "dropDomain"
+	OpCreateCompositeType OpType = "createCompositeType"
+	OpDropCompositeType   OpType = "dropCompositeType"
+
 	OpCreateCollation OpType = "createCollation"
 	OpDropCollation   OpType = "dropCollation"
 
@@ -33,17 +38,23 @@ const (
 	OpAlterSequence    OpType = "alterSequence"
 	OpSetSequenceOwner OpType = "alterSequenceOwnedBy" // ALTER SEQUENCE ... OWNED BY (after the owning table exists)
 
-	OpCreateTable OpType = "createTable"
-	OpDropTable   OpType = "dropTable"
+	OpCreateTable    OpType = "createTable"
+	OpDropTable      OpType = "dropTable"
+	OpSetTableLogged OpType = "setTableLogged" // ALTER TABLE ... SET LOGGED / SET UNLOGGED
+	OpSetRelOptions  OpType = "setRelOptions"  // ALTER TABLE ... SET (...) / RESET (...)
 
-	OpAddColumn           OpType = "addColumn"
-	OpDropColumn          OpType = "dropColumn"
-	OpAlterColumnType     OpType = "alterColumnType"
-	OpSetColumnDefault    OpType = "setColumnDefault"
-	OpDropColumnDefault   OpType = "dropColumnDefault"
-	OpSetColumnNotNull    OpType = "setColumnNotNull"
-	OpDropColumnNotNull   OpType = "dropColumnNotNull"
-	OpAlterColumnIdentity OpType = "alterColumnIdentity"
+	OpAddColumn            OpType = "addColumn"
+	OpDropColumn           OpType = "dropColumn"
+	OpAlterColumnType      OpType = "alterColumnType"
+	OpSetColumnDefault     OpType = "setColumnDefault"
+	OpDropColumnDefault    OpType = "dropColumnDefault"
+	OpSetColumnNotNull     OpType = "setColumnNotNull"
+	OpDropColumnNotNull    OpType = "dropColumnNotNull"
+	OpAlterColumnIdentity  OpType = "alterColumnIdentity"
+	OpAlterColumnGenerated OpType = "alterColumnGenerated" // SET EXPRESSION / DROP EXPRESSION, or drop + re-add
+	OpSetColumnStorage     OpType = "setColumnStorage"
+	OpSetColumnCompression OpType = "setColumnCompression"
+	OpSetColumnStats       OpType = "setColumnStatistics"
 
 	OpAddConstraint      OpType = "addConstraint"
 	OpDropConstraint     OpType = "dropConstraint"
@@ -60,21 +71,33 @@ const (
 	OpCreateFunction OpType = "createFunction" // emitted as CREATE OR REPLACE
 	OpDropFunction   OpType = "dropFunction"
 
-	OpCreateTrigger OpType = "createTrigger"
-	OpDropTrigger   OpType = "dropTrigger"
+	OpCreateTrigger     OpType = "createTrigger"
+	OpDropTrigger       OpType = "dropTrigger"
+	OpSetTriggerEnabled OpType = "setTriggerEnabled" // ALTER TABLE ... DISABLE / ENABLE [REPLICA|ALWAYS] TRIGGER
 
 	OpCreatePolicy OpType = "createPolicy"
 	OpDropPolicy   OpType = "dropPolicy"
 
 	OpEnableRLS  OpType = "enableRowLevelSecurity"
 	OpDisableRLS OpType = "disableRowLevelSecurity"
+
+	// OpSetComment changes the comment of an existing object or sub-object
+	// (CommentKind + Sub name it; Comment "" removes it).
+	OpSetComment OpType = "setComment"
+
+	// OpUnsupported records a desired change PostgreSQL cannot apply in place
+	// (dropping/reordering enum values, altering a type in use, re-partitioning).
+	// It renders as a RAISE WARNING carrying an error-severity hazard so the
+	// schema never silently fails to converge.
+	OpUnsupported OpType = "unsupportedChange"
 )
 
 // IsDrop reports whether the op type drops an object. The planner orders drops
 // in reverse dependency order relative to creates.
 func (t OpType) IsDrop() bool {
 	switch t {
-	case OpDropSchema, OpDropExtension, OpDropEnum, OpDropCollation, OpDropSequence, OpDropTable,
+	case OpDropSchema, OpDropExtension, OpDropEnum, OpDropDomain, OpDropCompositeType,
+		OpDropCollation, OpDropSequence, OpDropTable,
 		OpDropColumn, OpDropConstraint, OpDropIndex, OpDropView, OpDropMatView,
 		OpDropFunction, OpDropTrigger, OpDropPolicy:
 		return true
@@ -94,31 +117,55 @@ type Op struct {
 	Sub   string
 
 	// Payloads.
-	Schema     *model.Schema
-	Extension  *model.Extension
-	PrevExt    *model.Extension
-	Enum       *model.EnumType
-	Collation  *model.Collation
-	Sequence   *model.Sequence
-	PrevSeq    *model.Sequence
-	Table      *model.Table
-	Column     *model.Column
-	PrevColumn *model.Column
-	Constraint *model.Constraint
-	Index      *model.Index
-	View       *model.View
-	MatView    *model.MaterializedView
-	Function   *model.Function
-	Trigger    *model.Trigger
-	Policy     *model.Policy
+	Schema      *model.Schema
+	Extension   *model.Extension
+	PrevExt     *model.Extension
+	Enum        *model.EnumType
+	Domain      *model.Domain
+	Composite   *model.CompositeType
+	Collation   *model.Collation
+	Sequence    *model.Sequence
+	PrevSeq     *model.Sequence
+	Table       *model.Table
+	PrevTable   *model.Table
+	Column      *model.Column
+	PrevColumn  *model.Column
+	Constraint  *model.Constraint
+	Index       *model.Index
+	View        *model.View
+	MatView     *model.MaterializedView
+	Function    *model.Function
+	Trigger     *model.Trigger
+	PrevTrigger *model.Trigger
+	Policy      *model.Policy
 
-	// EnumValues holds the new labels for OpAddEnumValue.
-	EnumValues []string
+	// EnumValues holds the new labels for OpAddEnumValue; EnumPositions (same
+	// length) says where each goes (BEFORE/AFTER an existing label; both empty
+	// = append).
+	EnumValues    []string
+	EnumPositions []EnumPosition
+
+	// CommentKind (OpSetComment) is "" for the owning object itself, else
+	// "column" | "constraint" | "index" | "trigger" | "policy" with Sub naming it;
+	// Comment is the new text ("" removes the comment).
+	CommentKind string
+	Comment     string
+
+	// RelOptions / RelOptionsReset (OpSetRelOptions) are the storage parameters
+	// to SET and to RESET.
+	RelOptions      map[string]string
+	RelOptionsReset []string
 
 	// Reason, when set, explains why this op exists beyond the plain diff (e.g.
 	// a view recreated because CREATE OR REPLACE cannot drop its columns, or a
 	// dependent recreated around a blocking change). Rendered as a SQL comment.
 	Reason string
+}
+
+// EnumPosition places a new enum label relative to an existing one.
+type EnumPosition struct {
+	Before string
+	After  string
 }
 
 // ChangeSet is the ordered-by-discovery list of operations a diff produced.

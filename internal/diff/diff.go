@@ -28,6 +28,8 @@ func Diff(from, to *model.Database) *ChangeSet {
 		fs := fromSchemas[name]
 		ts := toSchemas[name]
 		diffEnums(cs, fs, ts)
+		diffDomains(cs, fs, ts)
+		diffComposites(cs, fs, ts)
 		diffCollations(cs, fs, ts)
 		diffSequences(cs, from, to, fs, ts)
 		diffFunctions(cs, fs, ts)
@@ -38,12 +40,21 @@ func Diff(from, to *model.Database) *ChangeSet {
 	return cs
 }
 
+// comment emits a COMMENT ON change for an object (or one of its sub-objects)
+// that exists on both sides and is not being recreated.
+func comment(cs *ChangeSet, owner model.ObjRef, kind, sub, prev, cur string) {
+	if prev != cur {
+		cs.add(Op{Type: OpSetComment, Owner: owner, Sub: sub, CommentKind: kind, Comment: cur})
+	}
+}
+
 func diffFunctions(cs *ChangeSet, from, to *model.Schema) {
 	fromF := indexFunctions(from)
 	toF := indexFunctions(to)
 	for _, f := range functionsOf(to) {
 		prev, ok := fromF[f.Signature()]
 		if ok && prev.Definition == f.Definition {
+			comment(cs, f.Ref(), "", "", prev.Comment, f.Comment)
 			continue
 		}
 		if ok {
@@ -95,9 +106,12 @@ func diffSchemas(cs *ChangeSet, from, to *model.Database) {
 	fromS := indexSchemas(from)
 	toS := indexSchemas(to)
 	for _, s := range to.Schemas {
-		if _, ok := fromS[s.Name]; !ok {
+		prev, ok := fromS[s.Name]
+		if !ok {
 			cs.add(Op{Type: OpCreateSchema, Owner: schemaRef(s), Schema: s})
+			continue
 		}
+		comment(cs, schemaRef(s), "", "", prev.Comment, s.Comment)
 	}
 	for _, s := range from.Schemas {
 		if _, ok := toS[s.Name]; !ok {
@@ -106,6 +120,9 @@ func diffSchemas(cs *ChangeSet, from, to *model.Database) {
 	}
 }
 
+// diffEnums adds new labels in their desired position (ADD VALUE BEFORE/AFTER);
+// PostgreSQL cannot remove or reorder labels, so those changes surface as an
+// unsupported-change hazard instead of silently vanishing.
 func diffEnums(cs *ChangeSet, from, to *model.Schema) {
 	fromE := indexEnums(from)
 	toE := indexEnums(to)
@@ -115,13 +132,68 @@ func diffEnums(cs *ChangeSet, from, to *model.Schema) {
 			cs.add(Op{Type: OpCreateEnum, Owner: e.Ref(), Enum: e})
 			continue
 		}
-		if added := appendedValues(prev.Values, e.Values); len(added) > 0 {
-			cs.add(Op{Type: OpAddEnumValue, Owner: e.Ref(), Enum: e, EnumValues: added})
+		comment(cs, e.Ref(), "", "", prev.Comment, e.Comment)
+		added, positions := enumAdditions(prev.Values, e.Values)
+		if len(added) > 0 {
+			cs.add(Op{Type: OpAddEnumValue, Owner: e.Ref(), Enum: e, EnumValues: added, EnumPositions: positions})
+		}
+		if removed := missingValues(prev.Values, e.Values); len(removed) > 0 {
+			cs.add(Op{Type: OpUnsupported, Owner: e.Ref(), Enum: e,
+				Reason: "enum " + e.QualifiedName() + ": value(s) " + quoteList(removed) + " exist in the target but not in the source; PostgreSQL cannot drop enum values in place — recreate the type (and the columns using it) by hand"})
+		} else if !sameRelativeOrder(prev.Values, e.Values) {
+			cs.add(Op{Type: OpUnsupported, Owner: e.Ref(), Enum: e,
+				Reason: "enum " + e.QualifiedName() + ": the existing values are ordered differently in the source; PostgreSQL cannot reorder enum values in place"})
 		}
 	}
 	for _, e := range enumsOf(from) {
 		if _, ok := toE[e.Name]; !ok {
 			cs.add(Op{Type: OpDropEnum, Owner: e.Ref(), Enum: e})
+		}
+	}
+}
+
+func diffDomains(cs *ChangeSet, from, to *model.Schema) {
+	fromD := indexDomains(from)
+	toD := indexDomains(to)
+	for _, d := range domainsOf(to) {
+		prev, ok := fromD[d.Name]
+		if !ok {
+			cs.add(Op{Type: OpCreateDomain, Owner: d.Ref(), Domain: d})
+			continue
+		}
+		if prev.Definition != d.Definition {
+			cs.add(Op{Type: OpUnsupported, Owner: d.Ref(), Domain: d,
+				Reason: "domain " + d.QualifiedName() + " changed (" + prev.Definition + " → " + d.Definition + "); altering a domain in use is not automated — apply the matching ALTER DOMAIN by hand"})
+			continue
+		}
+		comment(cs, d.Ref(), "", "", prev.Comment, d.Comment)
+	}
+	for _, d := range domainsOf(from) {
+		if _, ok := toD[d.Name]; !ok {
+			cs.add(Op{Type: OpDropDomain, Owner: d.Ref(), Domain: d})
+		}
+	}
+}
+
+func diffComposites(cs *ChangeSet, from, to *model.Schema) {
+	fromC := indexComposites(from)
+	toC := indexComposites(to)
+	for _, c := range compositesOf(to) {
+		prev, ok := fromC[c.Name]
+		if !ok {
+			cs.add(Op{Type: OpCreateCompositeType, Owner: c.Ref(), Composite: c})
+			continue
+		}
+		if prev.Definition != c.Definition {
+			cs.add(Op{Type: OpUnsupported, Owner: c.Ref(), Composite: c,
+				Reason: "composite type " + c.QualifiedName() + " changed (" + prev.Definition + " → " + c.Definition + "); altering a composite type in use is not automated — apply the matching ALTER TYPE by hand"})
+			continue
+		}
+		comment(cs, c.Ref(), "", "", prev.Comment, c.Comment)
+	}
+	for _, c := range compositesOf(from) {
+		if _, ok := toC[c.Name]; !ok {
+			cs.add(Op{Type: OpDropCompositeType, Owner: c.Ref(), Composite: c})
 		}
 	}
 }
@@ -139,7 +211,9 @@ func diffCollations(cs *ChangeSet, from, to *model.Schema) {
 			// Collations can't be altered in place; drop then recreate.
 			cs.add(Op{Type: OpDropCollation, Owner: c.Ref(), Collation: prev})
 			cs.add(Op{Type: OpCreateCollation, Owner: c.Ref(), Collation: c})
+			continue
 		}
+		comment(cs, c.Ref(), "", "", prev.Comment, c.Comment)
 	}
 	for _, c := range collationsOf(from) {
 		if _, ok := toC[c.Name]; !ok {
@@ -174,6 +248,7 @@ func diffSequences(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.
 		if !sameOwner(prev.OwnedBy, s.OwnedBy) {
 			cs.add(Op{Type: OpSetSequenceOwner, Owner: s.Ref(), Sequence: s, PrevSeq: prev})
 		}
+		comment(cs, s.Ref(), "", "", prev.Comment, s.Comment)
 	}
 	for _, s := range sequencesOf(from) {
 		if fromDB.IsIdentitySequence(s) {
@@ -197,11 +272,19 @@ func diffTables(cs *ChangeSet, from, to *model.Schema) {
 	toT := indexTables(to)
 	for _, t := range tablesOf(to) {
 		prev, ok := fromT[t.Name]
+		if ok && t.PartitionOf != nil && prev.PartitionOf != nil && *prev.PartitionOf != *t.PartitionOf {
+			// A partition's parent or bound cannot be altered: recreate it. Its
+			// rows are lost, so this is gated like any other drop.
+			reason := "partition parent/bound changed (" + prev.PartitionOf.Bound + " → " + t.PartitionOf.Bound + "); a partition cannot be re-bound in place"
+			cs.add(Op{Type: OpDropTable, Owner: t.Ref(), Table: prev, Reason: reason})
+			ok = false
+		}
 		if !ok {
 			// New table: emit the table (columns only) plus its constraints and
 			// indexes as separate ops so the planner can order FKs after all
 			// referenced tables exist.
 			cs.add(Op{Type: OpCreateTable, Owner: t.Ref(), Table: t})
+			emitColumnAttrs(cs, t, nil)
 			for _, con := range t.Constraints {
 				cs.add(Op{Type: OpAddConstraint, Owner: t.Ref(), Sub: con.Name, Table: t, Constraint: con})
 			}
@@ -212,17 +295,28 @@ func diffTables(cs *ChangeSet, from, to *model.Schema) {
 				cs.add(Op{Type: OpEnableRLS, Owner: t.Ref(), Table: t})
 			}
 			for _, tr := range t.Triggers {
-				cs.add(Op{Type: OpCreateTrigger, Owner: t.Ref(), Sub: tr.Name, Table: t, Trigger: tr})
+				emitTrigger(cs, t.Ref(), t, tr)
 			}
 			for _, pol := range t.Policies {
 				cs.add(Op{Type: OpCreatePolicy, Owner: t.Ref(), Sub: pol.Name, Table: t, Policy: pol})
 			}
 			continue
 		}
+		comment(cs, t.Ref(), "", "", prev.Comment, t.Comment)
+		if prev.Persistence != t.Persistence {
+			cs.add(Op{Type: OpSetTableLogged, Owner: t.Ref(), Table: t, PrevTable: prev})
+		}
+		if prev.PartitionKey != t.PartitionKey {
+			cs.add(Op{Type: OpUnsupported, Owner: t.Ref(), Table: t,
+				Reason: "table " + t.QualifiedName() + ": partitioning changed (" + orNone(prev.PartitionKey) + " → " + orNone(t.PartitionKey) + "); a table cannot be (re)partitioned in place"})
+		}
+		if set, reset := relOptionsDiff(prev.RelOptions, t.RelOptions); len(set) > 0 || len(reset) > 0 {
+			cs.add(Op{Type: OpSetRelOptions, Owner: t.Ref(), Table: t, RelOptions: set, RelOptionsReset: reset})
+		}
 		diffTableColumns(cs, prev, t)
 		diffTableConstraints(cs, prev, t)
 		diffTableIndexes(cs, prev, t)
-		diffTableTriggers(cs, prev, t)
+		diffTriggers(cs, t.Ref(), t, prev.Triggers, t.Triggers, false)
 		diffTablePolicies(cs, prev, t)
 		diffTableRLS(cs, prev, t)
 	}
@@ -233,6 +327,46 @@ func diffTables(cs *ChangeSet, from, to *model.Schema) {
 	}
 }
 
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// emitColumnAttrs emits the storage/compression/statistics ops for columns of a
+// (new) table whose attributes differ from the type defaults; prev is nil for a
+// new table, else the previous column set for attribute diffs.
+func emitColumnAttrs(cs *ChangeSet, t *model.Table, prev map[string]*model.Column) {
+	for _, c := range t.Columns {
+		var p *model.Column
+		if prev != nil {
+			p = prev[c.Name]
+		}
+		pStorage, pComp := "", ""
+		var pStats *int
+		if p != nil {
+			pStorage, pComp, pStats = p.Storage, p.Compression, p.StatsTarget
+		}
+		if pStorage != c.Storage {
+			cs.add(Op{Type: OpSetColumnStorage, Owner: t.Ref(), Sub: c.Name, Table: t, Column: c, PrevColumn: p})
+		}
+		if pComp != c.Compression {
+			cs.add(Op{Type: OpSetColumnCompression, Owner: t.Ref(), Sub: c.Name, Table: t, Column: c, PrevColumn: p})
+		}
+		if !sameStats(pStats, c.StatsTarget) {
+			cs.add(Op{Type: OpSetColumnStats, Owner: t.Ref(), Sub: c.Name, Table: t, Column: c, PrevColumn: p})
+		}
+	}
+}
+
+func sameStats(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 func diffTableColumns(cs *ChangeSet, from, to *model.Table) {
 	fromC := indexColumns(from)
 	toC := indexColumns(to)
@@ -240,6 +374,15 @@ func diffTableColumns(cs *ChangeSet, from, to *model.Table) {
 		prev, ok := fromC[c.Name]
 		if !ok {
 			cs.add(Op{Type: OpAddColumn, Owner: to.Ref(), Sub: c.Name, Table: to, Column: c})
+			if c.Storage != "" {
+				cs.add(Op{Type: OpSetColumnStorage, Owner: to.Ref(), Sub: c.Name, Table: to, Column: c})
+			}
+			if c.Compression != "" {
+				cs.add(Op{Type: OpSetColumnCompression, Owner: to.Ref(), Sub: c.Name, Table: to, Column: c})
+			}
+			if c.StatsTarget != nil {
+				cs.add(Op{Type: OpSetColumnStats, Owner: to.Ref(), Sub: c.Name, Table: to, Column: c})
+			}
 			continue
 		}
 		diffColumn(cs, to, prev, c)
@@ -255,12 +398,17 @@ func diffColumn(cs *ChangeSet, t *model.Table, prev, cur *model.Column) {
 	if prev.Type != cur.Type || prev.Collation != cur.Collation {
 		cs.add(Op{Type: OpAlterColumnType, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 	}
+	if prev.Generated != cur.Generated || prev.GeneratedExpr != cur.GeneratedExpr {
+		// A generation expression cannot be edited before PG17 and a plain column
+		// cannot become generated: sqlgen picks SET EXPRESSION or drop + re-add.
+		cs.add(Op{Type: OpAlterColumnGenerated, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+	}
 	if prev.Identity != cur.Identity {
 		// Identity owns the column's value generation; the single identity op also
 		// reconciles any default (e.g. a serial -> identity conversion), so the
 		// plain default diff below is skipped while identity changes.
 		cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
-	} else if prev.Default != cur.Default {
+	} else if prev.Default != cur.Default && cur.Generated == "" {
 		if cur.Default == "" {
 			cs.add(Op{Type: OpDropColumnDefault, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 		} else {
@@ -274,6 +422,16 @@ func diffColumn(cs *ChangeSet, t *model.Table, prev, cur *model.Column) {
 			cs.add(Op{Type: OpDropColumnNotNull, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 		}
 	}
+	if prev.Storage != cur.Storage {
+		cs.add(Op{Type: OpSetColumnStorage, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+	}
+	if prev.Compression != cur.Compression {
+		cs.add(Op{Type: OpSetColumnCompression, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+	}
+	if !sameStats(prev.StatsTarget, cur.StatsTarget) {
+		cs.add(Op{Type: OpSetColumnStats, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+	}
+	comment(cs, t.Ref(), "column", cur.Name, prev.Comment, cur.Comment)
 }
 
 func diffTableConstraints(cs *ChangeSet, from, to *model.Table) {
@@ -295,6 +453,7 @@ func diffTableConstraints(cs *ChangeSet, from, to *model.Table) {
 			// Same body, but the target still holds it NOT VALID: validate in place.
 			cs.add(Op{Type: OpValidateConstraint, Owner: to.Ref(), Sub: con.Name, Table: to, Constraint: con})
 		}
+		comment(cs, to.Ref(), "constraint", con.Name, prev.Comment, con.Comment)
 	}
 	for _, con := range from.Constraints {
 		if _, ok := toCon[con.Name]; !ok {
@@ -304,44 +463,84 @@ func diffTableConstraints(cs *ChangeSet, from, to *model.Table) {
 }
 
 func diffTableIndexes(cs *ChangeSet, from, to *model.Table) {
-	fromIdx := indexIndexes(from)
-	toIdx := indexIndexes(to)
-	for _, idx := range to.Indexes {
-		prev, ok := fromIdx[idx.Name]
+	diffIndexes(cs, to.Ref(), to, from.Indexes, to.Indexes)
+}
+
+// diffIndexes compares the stand-alone indexes of a relation (table or
+// materialized view); owner is the relation's reference.
+func diffIndexes(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromIdx, toIdx []*model.Index) {
+	prevByName := map[string]*model.Index{}
+	for _, i := range fromIdx {
+		prevByName[i.Name] = i
+	}
+	curByName := map[string]*model.Index{}
+	for _, i := range toIdx {
+		curByName[i.Name] = i
+	}
+	for _, idx := range toIdx {
+		prev, ok := prevByName[idx.Name]
 		if !ok {
-			cs.add(Op{Type: OpCreateIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: idx})
+			cs.add(Op{Type: OpCreateIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx})
 			continue
 		}
 		if prev.Definition != idx.Definition {
-			cs.add(Op{Type: OpDropIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: prev})
-			cs.add(Op{Type: OpCreateIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: idx})
+			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: prev})
+			cs.add(Op{Type: OpCreateIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx})
+			continue
 		}
+		comment(cs, owner, "index", idx.Name, prev.Comment, idx.Comment)
 	}
-	for _, idx := range from.Indexes {
-		if _, ok := toIdx[idx.Name]; !ok {
-			cs.add(Op{Type: OpDropIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: idx})
+	for _, idx := range fromIdx {
+		if _, ok := curByName[idx.Name]; !ok {
+			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx})
 		}
 	}
 }
 
-func diffTableTriggers(cs *ChangeSet, from, to *model.Table) {
-	fromT := indexTriggers(from)
-	toT := indexTriggers(to)
-	for _, tr := range to.Triggers {
-		prev, ok := fromT[tr.Name]
-		if !ok {
-			cs.add(Op{Type: OpCreateTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: tr})
+// emitTrigger emits the CREATE TRIGGER (and its non-default enabled state) for
+// a trigger on a new or recreated relation.
+func emitTrigger(cs *ChangeSet, owner model.ObjRef, table *model.Table, tr *model.Trigger) {
+	cs.add(Op{Type: OpCreateTrigger, Owner: owner, Sub: tr.Name, Table: table, Trigger: tr})
+	if tr.Enabled != "" {
+		cs.add(Op{Type: OpSetTriggerEnabled, Owner: owner, Sub: tr.Name, Table: table, Trigger: tr})
+	}
+}
+
+// diffTriggers compares the triggers of a relation (table or view). When the
+// relation is being recreated, its old triggers vanish with it and every desired
+// trigger is created afresh.
+func diffTriggers(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromT, toT []*model.Trigger, recreated bool) {
+	prevByName := map[string]*model.Trigger{}
+	for _, t := range fromT {
+		prevByName[t.Name] = t
+	}
+	curByName := map[string]*model.Trigger{}
+	for _, t := range toT {
+		curByName[t.Name] = t
+	}
+	for _, tr := range toT {
+		prev, ok := prevByName[tr.Name]
+		if !ok || recreated {
+			emitTrigger(cs, owner, table, tr)
 			continue
 		}
 		if prev.Definition != tr.Definition {
 			// Triggers are recreated on change (CREATE OR REPLACE TRIGGER is PG14+).
-			cs.add(Op{Type: OpDropTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: prev})
-			cs.add(Op{Type: OpCreateTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: tr})
+			cs.add(Op{Type: OpDropTrigger, Owner: owner, Sub: tr.Name, Table: table, Trigger: prev})
+			emitTrigger(cs, owner, table, tr)
+			continue
 		}
+		if prev.Enabled != tr.Enabled {
+			cs.add(Op{Type: OpSetTriggerEnabled, Owner: owner, Sub: tr.Name, Table: table, Trigger: tr, PrevTrigger: prev})
+		}
+		comment(cs, owner, "trigger", tr.Name, prev.Comment, tr.Comment)
 	}
-	for _, tr := range from.Triggers {
-		if _, ok := toT[tr.Name]; !ok {
-			cs.add(Op{Type: OpDropTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: tr})
+	if recreated {
+		return
+	}
+	for _, tr := range fromT {
+		if _, ok := curByName[tr.Name]; !ok {
+			cs.add(Op{Type: OpDropTrigger, Owner: owner, Sub: tr.Name, Table: table, Trigger: tr})
 		}
 	}
 }
@@ -358,7 +557,9 @@ func diffTablePolicies(cs *ChangeSet, from, to *model.Table) {
 		if policyChanged(prev, pol) {
 			cs.add(Op{Type: OpDropPolicy, Owner: to.Ref(), Sub: pol.Name, Table: to, Policy: prev})
 			cs.add(Op{Type: OpCreatePolicy, Owner: to.Ref(), Sub: pol.Name, Table: to, Policy: pol})
+			continue
 		}
+		comment(cs, to.Ref(), "policy", pol.Name, prev.Comment, pol.Comment)
 	}
 	for _, pol := range from.Policies {
 		if _, ok := toP[pol.Name]; !ok {
@@ -377,24 +578,39 @@ func diffTableRLS(cs *ChangeSet, from, to *model.Table) {
 	}
 }
 
+func viewOptionsEqual(a, b *model.View) bool {
+	return a.CheckOption == b.CheckOption && a.SecurityBarrier == b.SecurityBarrier && a.SecurityInvoker == b.SecurityInvoker
+}
+
 func diffViews(cs *ChangeSet, from, to *model.Schema) {
 	fromV := indexViews(from)
 	toV := indexViews(to)
 	for _, v := range viewsOf(to) {
 		prev, ok := fromV[v.Name]
-		if ok && prev.Definition == v.Definition && prev.CheckOption == v.CheckOption {
+		if !ok {
+			cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v})
+			for _, tr := range v.Triggers {
+				emitTrigger(cs, v.Ref(), nil, tr)
+			}
 			continue
 		}
-		if ok && !viewReplaceCompatible(prev, v) {
+		if prev.Definition == v.Definition && viewOptionsEqual(prev, v) {
+			comment(cs, v.Ref(), "", "", prev.Comment, v.Comment)
+			diffTriggers(cs, v.Ref(), nil, prev.Triggers, v.Triggers, false)
+			continue
+		}
+		if !viewReplaceCompatible(prev, v) {
 			// CREATE OR REPLACE VIEW may only append columns; dependents are
-			// recreated by the engine.
+			// recreated by the engine. The view's own triggers go with it.
 			reason := "view columns were dropped, renamed, or retyped — CREATE OR REPLACE VIEW cannot do that, so the view is recreated"
 			cs.add(Op{Type: OpDropView, Owner: v.Ref(), View: prev, Reason: reason})
 			cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v, Reason: reason})
+			diffTriggers(cs, v.Ref(), nil, prev.Triggers, v.Triggers, true)
 			continue
 		}
-		// CREATE OR REPLACE handles both create and compatible body changes.
+		// CREATE OR REPLACE handles compatible body and option changes.
 		cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v})
+		diffTriggers(cs, v.Ref(), nil, prev.Triggers, v.Triggers, false)
 	}
 	for _, v := range viewsOf(from) {
 		if _, ok := toV[v.Name]; !ok {
@@ -410,13 +626,23 @@ func diffMatViews(cs *ChangeSet, from, to *model.Schema) {
 		prev, ok := fromM[m.Name]
 		if !ok {
 			cs.add(Op{Type: OpCreateMatView, Owner: m.Ref(), MatView: m})
+			for _, idx := range m.Indexes {
+				cs.add(Op{Type: OpCreateIndex, Owner: m.Ref(), Sub: idx.Name, Index: idx})
+			}
 			continue
 		}
 		if prev.Definition != m.Definition {
-			// Materialized views cannot be replaced in place.
+			// Materialized views cannot be replaced in place; the indexes go
+			// with the old one and are created afresh.
 			cs.add(Op{Type: OpDropMatView, Owner: m.Ref(), MatView: prev})
 			cs.add(Op{Type: OpCreateMatView, Owner: m.Ref(), MatView: m})
+			for _, idx := range m.Indexes {
+				cs.add(Op{Type: OpCreateIndex, Owner: m.Ref(), Sub: idx.Name, Index: idx})
+			}
+			continue
 		}
+		comment(cs, m.Ref(), "", "", prev.Comment, m.Comment)
+		diffIndexes(cs, m.Ref(), nil, prev.Indexes, m.Indexes)
 	}
 	for _, m := range matViewsOf(from) {
 		if _, ok := toM[m.Name]; !ok {

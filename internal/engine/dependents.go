@@ -18,12 +18,14 @@ import (
 // the "from" model's dependency data (View.ColumnDeps / DependsOn,
 // Trigger.DependsOn), finds every dependent — transitively — and adds a DROP of
 // its current form plus a CREATE of its desired form (or of its current form,
-// when the desired state does not mention it and it can still exist). The
-// planner then brackets the blocking op with those drops and creates via the
-// usual bands and edges. Dependents that reference an object that disappears
-// for good are dropped only. It runs after the drop/include filters so it only
-// reacts to changes that will really be applied, and its own drops are always
-// paired with a create of the same object, so they are never filtered away.
+// when the desired state does not mention it and it can still exist). A
+// recreated view gets its triggers back and a recreated materialized view its
+// indexes. The planner then brackets the blocking op with those drops and
+// creates via the usual bands and edges. Dependents that reference an object
+// that disappears for good are dropped only. It runs after the drop/include
+// filters so it only reacts to changes that will really be applied, and its
+// own drops are always paired with a create of the same object, so they are
+// never filtered away.
 func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.ChangeSet {
 	if from == nil || to == nil || cs.Empty() {
 		return cs
@@ -37,6 +39,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 	droppedCols := map[string]bool{}
 	trigDropped := map[string]bool{}
 	trigCreated := map[string]bool{}
+	idxCreated := map[string]bool{}
 	for _, op := range cs.Ops {
 		switch op.Type {
 		case diff.OpAlterColumnType:
@@ -52,6 +55,8 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 			trigDropped[colKey(op.Owner, op.Sub)] = true
 		case diff.OpCreateTrigger:
 			trigCreated[colKey(op.Owner, op.Sub)] = true
+		case diff.OpCreateIndex:
+			idxCreated[colKey(op.Owner, op.Sub)] = true
 		}
 	}
 	// gone reports whether an object disappears for good (dropped, not recreated).
@@ -70,6 +75,26 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 	}
 	for k := range dropped {
 		push(k)
+	}
+
+	addTrigger := func(owner model.ObjRef, table *model.Table, tr *model.Trigger, reason string) {
+		tk := colKey(owner, tr.Name)
+		if trigCreated[tk] {
+			return
+		}
+		trigCreated[tk] = true
+		added = append(added, diff.Op{Type: diff.OpCreateTrigger, Owner: owner, Sub: tr.Name, Table: table, Trigger: tr, Reason: reason})
+		if tr.Enabled != "" {
+			added = append(added, diff.Op{Type: diff.OpSetTriggerEnabled, Owner: owner, Sub: tr.Name, Table: table, Trigger: tr})
+		}
+	}
+	addIndex := func(owner model.ObjRef, ix *model.Index, reason string) {
+		ik := colKey(owner, ix.Name)
+		if idxCreated[ik] {
+			return
+		}
+		idxCreated[ik] = true
+		added = append(added, diff.Op{Type: diff.OpCreateIndex, Owner: owner, Sub: ix.Name, Index: ix, Reason: reason})
 	}
 
 	// recreate drops a dependent relation and recreates it in its desired form.
@@ -99,29 +124,47 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		switch {
 		case d.view != nil:
 			added = append(added, diff.Op{Type: diff.OpDropView, Owner: d.ref, View: d.view, Reason: reason})
-			if created[key] {
-				return // the differ already recreates it in its desired form
-			}
-			if desired := findView(to, d.ref); desired != nil {
+			var recreated *model.View
+			switch desired := findView(to, d.ref); {
+			case created[key]:
+				recreated = desired // the differ already recreates it in its desired form
+			case desired != nil:
 				added = append(added, diff.Op{Type: diff.OpCreateView, Owner: d.ref, View: desired, Reason: reason})
 				created[key] = true
-			} else if !invalid {
+				recreated = desired
+			case !invalid:
 				added = append(added, diff.Op{Type: diff.OpCreateView, Owner: d.ref, View: d.view,
 					Reason: reason + " (kept with its current definition; it is not part of the desired state)"})
 				created[key] = true
+				recreated = d.view
+			}
+			if recreated != nil {
+				// The view's triggers vanished with it.
+				for _, tr := range recreated.Triggers {
+					addTrigger(d.ref, nil, tr, reason)
+				}
 			}
 		case d.mview != nil:
 			added = append(added, diff.Op{Type: diff.OpDropMatView, Owner: d.ref, MatView: d.mview, Reason: reason})
-			if created[key] {
-				return
-			}
-			if desired := findMatView(to, d.ref); desired != nil {
+			var recreated *model.MaterializedView
+			switch desired := findMatView(to, d.ref); {
+			case created[key]:
+				recreated = desired
+			case desired != nil:
 				added = append(added, diff.Op{Type: diff.OpCreateMatView, Owner: d.ref, MatView: desired, Reason: reason})
 				created[key] = true
-			} else if !invalid {
+				recreated = desired
+			case !invalid:
 				added = append(added, diff.Op{Type: diff.OpCreateMatView, Owner: d.ref, MatView: d.mview,
 					Reason: reason + " (kept with its current definition; it is not part of the desired state)"})
 				created[key] = true
+				recreated = d.mview
+			}
+			if recreated != nil {
+				// The materialized view's indexes vanished with it.
+				for _, ix := range recreated.Indexes {
+					addIndex(d.ref, ix, reason)
+				}
 			}
 		}
 	}
@@ -141,23 +184,17 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		}
 		// Triggers executing a dropped function.
 		for _, t := range idx.triggersByFn[k] {
-			tk := colKey(t.table.Ref(), t.tr.Name)
-			if trigDropped[tk] || gone(t.table.Ref().Key()) {
-				continue // already handled, or the whole table goes away
+			tk := colKey(t.rel, t.tr.Name)
+			if trigDropped[tk] || gone(t.rel.Key()) || dropped[t.rel.Key()] {
+				continue // already handled, or the relation itself is dropped/recreated
 			}
 			trigDropped[tk] = true
 			reason := "recreated because it executes " + k
-			added = append(added, diff.Op{Type: diff.OpDropTrigger, Owner: t.table.Ref(), Sub: t.tr.Name, Table: t.table, Trigger: t.tr, Reason: reason})
-			if trigCreated[tk] {
-				continue
-			}
-			if desired, tbl := findTrigger(to, t.table.Ref(), t.tr.Name); desired != nil {
-				added = append(added, diff.Op{Type: diff.OpCreateTrigger, Owner: t.table.Ref(), Sub: t.tr.Name, Table: tbl, Trigger: desired, Reason: reason})
-				trigCreated[tk] = true
+			added = append(added, diff.Op{Type: diff.OpDropTrigger, Owner: t.rel, Sub: t.tr.Name, Table: t.table, Trigger: t.tr, Reason: reason})
+			if desired, tbl := findTrigger(to, t.rel, t.tr.Name); desired != nil {
+				addTrigger(t.rel, tbl, desired, reason)
 			} else if created[k] {
-				added = append(added, diff.Op{Type: diff.OpCreateTrigger, Owner: t.table.Ref(), Sub: t.tr.Name, Table: t.table, Trigger: t.tr,
-					Reason: reason + " (kept with its current definition; it is not part of the desired state)"})
-				trigCreated[tk] = true
+				addTrigger(t.rel, t.table, t.tr, reason+" (kept with its current definition; it is not part of the desired state)")
 			}
 		}
 	}
@@ -165,10 +202,32 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 	if len(added) == 0 {
 		return cs
 	}
+	// Sub-object drops on a relation that is itself dropped (and recreated)
+	// here would fail: PostgreSQL drops them with the relation.
 	out := &diff.ChangeSet{Ops: make([]diff.Op, 0, len(cs.Ops)+len(added))}
-	out.Ops = append(out.Ops, cs.Ops...)
+	for _, op := range cs.Ops {
+		switch op.Type {
+		case diff.OpDropIndex, diff.OpDropTrigger, diff.OpDropConstraint, diff.OpDropPolicy:
+			if dropped[op.Owner.Key()] && queued[op.Owner.Key()] && isRelationRecreatedHere(op.Owner, added) {
+				continue
+			}
+		}
+		out.Ops = append(out.Ops, op)
+	}
 	out.Ops = append(out.Ops, added...)
 	return out
+}
+
+// isRelationRecreatedHere reports whether this pass added the drop of the
+// relation (as opposed to the differ having emitted it, in which case the
+// differ already avoided redundant sub-object drops).
+func isRelationRecreatedHere(rel model.ObjRef, added []diff.Op) bool {
+	for _, op := range added {
+		if (op.Type == diff.OpDropView || op.Type == diff.OpDropMatView) && op.Owner.Key() == rel.Key() {
+			return true
+		}
+	}
+	return false
 }
 
 // dependentRel is a view or materialized view of the "from" model together with
@@ -181,8 +240,10 @@ type dependentRel struct {
 	colDeps []model.ColumnRef
 }
 
+// dependentTrigger is a trigger of the "from" model on a table or a view.
 type dependentTrigger struct {
-	table *model.Table
+	rel   model.ObjRef
+	table *model.Table // nil for a view trigger
 	tr    *model.Trigger
 }
 
@@ -207,6 +268,11 @@ func indexDependents(db *model.Database) dependentIndex {
 			for _, c := range v.ColumnDeps {
 				idx.byColumn[colRefKey(c)] = append(idx.byColumn[colRefKey(c)], d)
 			}
+			for _, tr := range v.Triggers {
+				for _, dep := range tr.DependsOn {
+					idx.triggersByFn[dep.Key()] = append(idx.triggersByFn[dep.Key()], dependentTrigger{rel: v.Ref(), tr: tr})
+				}
+			}
 		}
 		for _, mv := range s.MatViews {
 			d := dependentRel{ref: mv.Ref(), mview: mv, deps: mv.DependsOn, colDeps: mv.ColumnDeps}
@@ -220,7 +286,7 @@ func indexDependents(db *model.Database) dependentIndex {
 		for _, t := range s.Tables {
 			for _, tr := range t.Triggers {
 				for _, dep := range tr.DependsOn {
-					idx.triggersByFn[dep.Key()] = append(idx.triggersByFn[dep.Key()], dependentTrigger{table: t, tr: tr})
+					idx.triggersByFn[dep.Key()] = append(idx.triggersByFn[dep.Key()], dependentTrigger{rel: t.Ref(), table: t, tr: tr})
 				}
 			}
 		}
@@ -228,16 +294,16 @@ func indexDependents(db *model.Database) dependentIndex {
 	return idx
 }
 
-// colKey identifies a column (or any table sub-object) by its table and name,
-// matching the differ's Owner + Sub.
-func colKey(table model.ObjRef, sub string) string { return table.Key() + "#" + sub }
+// colKey identifies a column (or any relation sub-object) by its relation and
+// name, matching the differ's Owner + Sub.
+func colKey(rel model.ObjRef, sub string) string { return rel.Key() + "#" + sub }
 
 func colRefKey(c model.ColumnRef) string {
 	return colKey(model.ObjRef{Kind: model.KindTable, Schema: c.Schema, Name: c.Table}, c.Column)
 }
 
-// prefixLen returns the length of the "kind:" prefix of a key so the human
-// readable cause can show the qualified name only.
+// prefixLen returns the "kind:" prefix of a key so the human readable cause
+// can show the qualified name only.
 func prefixLen(key string) string {
 	for i := 0; i < len(key); i++ {
 		if key[i] == ':' {
@@ -275,15 +341,29 @@ func findMatView(db *model.Database, ref model.ObjRef) *model.MaterializedView {
 	return nil
 }
 
-func findTrigger(db *model.Database, table model.ObjRef, name string) (*model.Trigger, *model.Table) {
-	t := db.Table(table.Schema, table.Name)
-	if t == nil {
+// findTrigger looks a trigger up on a table or a view of db; the table is nil
+// for a view trigger.
+func findTrigger(db *model.Database, rel model.ObjRef, name string) (*model.Trigger, *model.Table) {
+	switch rel.Kind {
+	case model.KindView:
+		if v := findView(db, rel); v != nil {
+			for _, tr := range v.Triggers {
+				if tr.Name == name {
+					return tr, nil
+				}
+			}
+		}
+		return nil, nil
+	default:
+		t := db.Table(rel.Schema, rel.Name)
+		if t == nil {
+			return nil, nil
+		}
+		for _, tr := range t.Triggers {
+			if tr.Name == name {
+				return tr, t
+			}
+		}
 		return nil, nil
 	}
-	for _, tr := range t.Triggers {
-		if tr.Name == name {
-			return tr, t
-		}
-	}
-	return nil, nil
 }

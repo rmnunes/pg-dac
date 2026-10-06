@@ -103,6 +103,8 @@ type Schema struct {
 	MatViews   []*MaterializedView `json:"matViews,omitempty"`
 	Sequences  []*Sequence         `json:"sequences,omitempty"`
 	Enums      []*EnumType         `json:"enums,omitempty"`
+	Domains    []*Domain           `json:"domains,omitempty"`
+	Composites []*CompositeType    `json:"compositeTypes,omitempty"`
 	Collations []*Collation        `json:"collations,omitempty"`
 	Functions  []*Function         `json:"functions,omitempty"`
 }
@@ -131,6 +133,8 @@ const (
 	KindExtension  ObjKind = "extension"
 	KindSchema     ObjKind = "schema"
 	KindEnum       ObjKind = "enum"
+	KindDomain     ObjKind = "domain"
+	KindComposite  ObjKind = "compositeType"
 	KindCollation  ObjKind = "collation"
 	KindSequence   ObjKind = "sequence"
 	KindFunction   ObjKind = "function"
@@ -179,9 +183,17 @@ func (s *Schema) sort() {
 	sort.Slice(s.MatViews, func(i, j int) bool { return s.MatViews[i].Name < s.MatViews[j].Name })
 	sort.Slice(s.Sequences, func(i, j int) bool { return s.Sequences[i].Name < s.Sequences[j].Name })
 	sort.Slice(s.Enums, func(i, j int) bool { return s.Enums[i].Name < s.Enums[j].Name })
+	sort.Slice(s.Domains, func(i, j int) bool { return s.Domains[i].Name < s.Domains[j].Name })
+	sort.Slice(s.Composites, func(i, j int) bool { return s.Composites[i].Name < s.Composites[j].Name })
 	sort.Slice(s.Collations, func(i, j int) bool { return s.Collations[i].Name < s.Collations[j].Name })
 	sort.Slice(s.Functions, func(i, j int) bool { return s.Functions[i].sortKey() < s.Functions[j].sortKey() })
 	for _, t := range s.Tables {
 		t.sort()
+	}
+	for _, v := range s.Views {
+		sort.Slice(v.Triggers, func(i, j int) bool { return v.Triggers[i].Name < v.Triggers[j].Name })
+	}
+	for _, m := range s.MatViews {
+		sort.Slice(m.Indexes, func(i, j int) bool { return m.Indexes[i].Name < m.Indexes[j].Name })
 	}
 }

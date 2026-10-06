@@ -109,15 +109,34 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		if !safety.AddEnumValueInTransaction(opts.TargetMajor) {
 			note = "ALTER TYPE ADD VALUE cannot run in a transaction before PostgreSQL 12"
 		}
-		for _, v := range op.EnumValues {
-			s := Statement{
-				SQL:           "ALTER TYPE " + op.Enum.QualifiedName() + " ADD VALUE IF NOT EXISTS " + model.QuoteLiteral(v) + ";",
+		for i, v := range op.EnumValues {
+			sql := "ALTER TYPE " + op.Enum.QualifiedName() + " ADD VALUE IF NOT EXISTS " + model.QuoteLiteral(v)
+			if i < len(op.EnumPositions) {
+				switch p := op.EnumPositions[i]; {
+				case p.Before != "":
+					sql += " BEFORE " + model.QuoteLiteral(p.Before)
+				case p.After != "":
+					sql += " AFTER " + model.QuoteLiteral(p.After)
+				}
+			}
+			stmts = append(stmts, Statement{
+				SQL:           sql + ";",
 				Transactional: safety.AddEnumValueInTransaction(opts.TargetMajor),
 				Note:          note,
-			}
-			stmts = append(stmts, s)
+			})
 		}
 		return stmts, nil
+
+	case diff.OpCreateDomain:
+		return one(terminate(op.Domain.Definition), op.Domain.Comment,
+			commentOn("DOMAIN", op.Domain.QualifiedName(), op.Domain.Comment)), nil
+	case diff.OpDropDomain:
+		return one("DROP DOMAIN "+op.Domain.QualifiedName()+";", "", nil), nil
+	case diff.OpCreateCompositeType:
+		return one(terminate(op.Composite.Definition), op.Composite.Comment,
+			commentOn("TYPE", op.Composite.QualifiedName(), op.Composite.Comment)), nil
+	case diff.OpDropCompositeType:
+		return one("DROP TYPE "+op.Composite.QualifiedName()+";", "", nil), nil
 
 	case diff.OpCreateCollation:
 		return one(terminate(op.Collation.Definition), op.Collation.Comment,
@@ -136,6 +155,18 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 
 	case diff.OpCreateTable:
 		return renderCreateTable(op.Table), nil
+	case diff.OpSetTableLogged:
+		return renderSetLogged(op), nil
+	case diff.OpSetRelOptions:
+		return renderRelOptionsChange(op), nil
+	case diff.OpSetColumnStorage, diff.OpSetColumnCompression, diff.OpSetColumnStats:
+		return renderColumnAttr(op), nil
+	case diff.OpAlterColumnGenerated:
+		return renderAlterGenerated(op, opts), nil
+	case diff.OpSetComment:
+		return renderComment(op), nil
+	case diff.OpUnsupported:
+		return renderUnsupported(op), nil
 	case diff.OpDropTable:
 		return haz("DROP TABLE "+op.Table.QualifiedName()+";", "drops a table and all its data",
 			safety.New(safety.DeletesData, "dropping table "+op.Table.Name+" destroys its data"),
@@ -179,11 +210,23 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		return renderDropIndex(op, opts), nil
 
 	case diff.OpCreateView:
-		sql := "CREATE OR REPLACE VIEW " + op.View.QualifiedName() + " AS " + op.View.Definition
-		if op.View.CheckOption != "" {
-			sql += " WITH " + strings.ToUpper(op.View.CheckOption) + " CHECK OPTION"
+		v := op.View
+		sql := "CREATE OR REPLACE VIEW " + v.QualifiedName()
+		var vopts []string
+		if v.SecurityBarrier {
+			vopts = append(vopts, "security_barrier=true")
 		}
-		return one(sql+";", op.View.Comment, commentOn("VIEW", op.View.QualifiedName(), op.View.Comment)), nil
+		if v.SecurityInvoker {
+			vopts = append(vopts, "security_invoker=true")
+		}
+		if len(vopts) > 0 {
+			sql += " WITH (" + strings.Join(vopts, ", ") + ")"
+		}
+		sql += " AS " + v.Definition
+		if v.CheckOption != "" {
+			sql += " WITH " + strings.ToUpper(v.CheckOption) + " CHECK OPTION"
+		}
+		return one(sql+";", v.Comment, commentOn("VIEW", v.QualifiedName(), v.Comment)), nil
 	case diff.OpDropView:
 		return one("DROP VIEW "+op.View.QualifiedName()+";", "", nil), nil
 
@@ -220,9 +263,11 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 	case diff.OpCreateTrigger:
 		tr := op.Trigger
 		return one(terminate(tr.Definition), tr.Comment,
-			commentOn("TRIGGER", model.QuoteIdent(tr.Name)+" ON "+op.Table.QualifiedName(), tr.Comment)), nil
+			commentOn("TRIGGER", model.QuoteIdent(tr.Name)+" ON "+relName(op), tr.Comment)), nil
 	case diff.OpDropTrigger:
-		return one("DROP TRIGGER "+model.QuoteIdent(op.Trigger.Name)+" ON "+op.Table.QualifiedName()+";", "", nil), nil
+		return one("DROP TRIGGER "+model.QuoteIdent(op.Trigger.Name)+" ON "+relName(op)+";", "", nil), nil
+	case diff.OpSetTriggerEnabled:
+		return renderTriggerEnabled(op), nil
 
 	case diff.OpCreatePolicy:
 		return renderCreatePolicy(op), nil
@@ -238,6 +283,10 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 }
 
 // --- helpers ---
+
+// relName is the qualified name of the relation an op's Owner refers to (a
+// table or a view — trigger ops exist for both).
+func relName(op diff.Op) string { return model.QualifiedName(op.Owner.Schema, op.Owner.Name) }
 
 func one(sql, _ string, extra []Statement) []Statement {
 	stmts := []Statement{{SQL: sql, Transactional: true}}

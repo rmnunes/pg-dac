@@ -79,6 +79,9 @@ func opPriority(op diff.Op) int {
 		return 55
 	case diff.OpDropCollation:
 		return 58
+	case diff.OpDropDomain, diff.OpDropCompositeType:
+		// Before enums (a domain/composite may be built on one), after functions.
+		return 59
 	case diff.OpDropSequence:
 		return 50
 	case diff.OpDropEnum:
@@ -102,6 +105,10 @@ func opPriority(op diff.Op) int {
 		return 120
 	case diff.OpAddEnumValue:
 		return 121
+	case diff.OpCreateDomain:
+		return 122
+	case diff.OpCreateCompositeType:
+		return 123
 	case diff.OpCreateFunction:
 		// Functions are created before tables so they are available to column
 		// defaults, generated columns, and CHECK expressions.
@@ -112,13 +119,16 @@ func opPriority(op diff.Op) int {
 		return 131
 	case diff.OpCreateTable:
 		return 140
+	case diff.OpSetTableLogged, diff.OpSetRelOptions:
+		return 144
 	case diff.OpAddColumn:
 		return 145
-	case diff.OpAlterColumnType:
+	case diff.OpAlterColumnType, diff.OpAlterColumnGenerated:
 		return 146
 	case diff.OpSetColumnDefault, diff.OpDropColumnDefault, diff.OpAlterColumnIdentity:
 		return 147
-	case diff.OpSetColumnNotNull, diff.OpDropColumnNotNull:
+	case diff.OpSetColumnNotNull, diff.OpDropColumnNotNull,
+		diff.OpSetColumnStorage, diff.OpSetColumnCompression, diff.OpSetColumnStats:
 		return 148
 	case diff.OpSetSequenceOwner:
 		// OWNED BY needs both the sequence (130) and the owning table/column
@@ -137,7 +147,7 @@ func opPriority(op diff.Op) int {
 		return 165
 	case diff.OpEnableRLS, diff.OpDisableRLS:
 		return 167
-	case diff.OpCreateTrigger:
+	case diff.OpCreateTrigger, diff.OpSetTriggerEnabled:
 		return 168
 	case diff.OpCreatePolicy:
 		return 169
@@ -145,6 +155,10 @@ func opPriority(op diff.Op) int {
 		return 170
 	case diff.OpCreateMatView:
 		return 175
+	case diff.OpSetComment:
+		return 185
+	case diff.OpUnsupported:
+		return 189
 	}
 	return 190
 }

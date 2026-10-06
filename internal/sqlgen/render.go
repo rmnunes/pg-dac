@@ -42,13 +42,20 @@ func renderCreateTable(t *model.Table) []Statement {
 	if t.Persistence == "unlogged" {
 		keyword = "UNLOGGED TABLE"
 	}
-	lines := make([]string, 0, len(t.Columns))
-	for _, c := range t.Columns {
-		lines = append(lines, "    "+columnDef(c))
-	}
-	sql := "CREATE " + keyword + " " + t.QualifiedName() + " (\n" + strings.Join(lines, ",\n") + "\n)"
-	if t.PartitionStrategy != "" && t.PartitionKey != "" {
-		sql += " PARTITION BY " + strings.ToUpper(t.PartitionStrategy) + " (" + t.PartitionKey + ")"
+	var sql string
+	if t.PartitionOf != nil {
+		// A partition inherits its columns from the parent.
+		sql = "CREATE " + keyword + " " + t.QualifiedName() + " PARTITION OF " +
+			model.QualifiedName(t.PartitionOf.Schema, t.PartitionOf.Table) + " " + t.PartitionOf.Bound
+	} else {
+		lines := make([]string, 0, len(t.Columns))
+		for _, c := range t.Columns {
+			lines = append(lines, "    "+columnDef(c))
+		}
+		sql = "CREATE " + keyword + " " + t.QualifiedName() + " (\n" + strings.Join(lines, ",\n") + "\n)"
+		if t.PartitionKey != "" {
+			sql += " PARTITION BY " + t.PartitionKey
+		}
 	}
 	if len(t.RelOptions) > 0 {
 		sql += " WITH (" + renderRelOptions(t.RelOptions) + ")"
@@ -165,23 +172,25 @@ func renderAddConstraint(op diff.Op, opts Options) []Statement {
 	q := model.QuoteIdent(con.Name)
 	base := "ALTER TABLE " + t.QualifiedName() + " ADD CONSTRAINT " + q + " " + con.Definition
 
+	comment := commentOn("CONSTRAINT", q+" ON "+t.QualifiedName(), con.Comment)
+
 	switch con.Type {
 	case model.ConstraintForeignKey, model.ConstraintCheck:
 		if !con.Validated {
 			// The desired state itself keeps the constraint unvalidated.
-			return []Statement{{
+			return append([]Statement{{
 				SQL:           base + " NOT VALID;",
 				Transactional: true,
 				Note:          "the source holds this constraint NOT VALID; it is added unvalidated and not validated",
 				Hazards:       []safety.Hazard{safety.New(safety.ShareRowExclusiveLock, "brief lock to add the constraint (no scan)")},
-			}}
+			}}, comment...)
 		}
 		if opts.Online {
 			lock := safety.ShareRowExclusiveLock
 			if con.Type == model.ConstraintCheck {
 				lock = safety.AccessExclusiveLock
 			}
-			return []Statement{
+			return append([]Statement{
 				{
 					SQL:           base + " NOT VALID;",
 					Transactional: true,
@@ -193,43 +202,44 @@ func renderAddConstraint(op diff.Op, opts Options) []Statement {
 					Transactional: true,
 					Note:          "validate separately (SHARE UPDATE EXCLUSIVE — does not block writes)",
 				},
-			}
+			}, comment...)
 		}
-		return []Statement{{SQL: base + ";", Transactional: true,
-			Hazards: []safety.Hazard{safety.New(safety.AccessExclusiveLock, "scans the table to validate the constraint")}}}
+		return append([]Statement{{SQL: base + ";", Transactional: true,
+			Hazards: []safety.Hazard{safety.New(safety.AccessExclusiveLock, "scans the table to validate the constraint")}}}, comment...)
 
 	case model.ConstraintPrimaryKey, model.ConstraintUnique, model.ConstraintExclude:
 		note := ""
 		if con.Type == model.ConstraintUnique && opts.Online {
 			note = "a lower-lock path exists: CREATE UNIQUE INDEX CONCURRENTLY then ADD CONSTRAINT ... USING INDEX"
 		}
-		return []Statement{{SQL: base + ";", Transactional: true, Note: note,
+		return append([]Statement{{SQL: base + ";", Transactional: true, Note: note,
 			Hazards: []safety.Hazard{
 				safety.New(safety.AccessExclusiveLock, "builds the backing index under ACCESS EXCLUSIVE"),
 				safety.New(safety.IndexBuild, "builds an index"),
-			}}}
+			}}}, comment...)
 	}
-	return []Statement{{SQL: base + ";", Transactional: true}}
+	return append([]Statement{{SQL: base + ";", Transactional: true}}, comment...)
 }
 
 func renderCreateIndex(op diff.Op, opts Options) []Statement {
 	def := strings.TrimRight(op.Index.Definition, ";")
+	comment := commentOn("INDEX", model.QualifiedName(op.Owner.Schema, op.Index.Name), op.Index.Comment)
 	if opts.Online {
-		return []Statement{{
+		return append([]Statement{{
 			SQL:           concurrentIndexDef(def) + ";",
 			Transactional: false,
 			Note:          "CONCURRENTLY: builds without blocking writes; cannot run inside a transaction",
 			Hazards:       []safety.Hazard{safety.New(safety.IndexBuild, "builds an index")},
-		}}
+		}}, comment...)
 	}
-	return []Statement{{
+	return append([]Statement{{
 		SQL:           def + ";",
 		Transactional: true,
 		Hazards: []safety.Hazard{
 			safety.New(safety.ShareLock, "blocks writes on the table while the index builds"),
 			safety.New(safety.IndexBuild, "builds an index"),
 		},
-	}}
+	}}, comment...)
 }
 
 func renderDropIndex(op diff.Op, opts Options) []Statement {
@@ -403,7 +413,7 @@ func renderCreatePolicy(op diff.Op) []Statement {
 		b.WriteString(" WITH CHECK (" + p.WithCheck + ")")
 	}
 	b.WriteString(";")
-	return one(b.String(), p.Comment, nil)
+	return one(b.String(), p.Comment, commentOn("POLICY", model.QuoteIdent(p.Name)+" ON "+op.Table.QualifiedName(), p.Comment))
 }
 
 func renderEnableRLS(op diff.Op) []Statement {
@@ -437,4 +447,192 @@ func genName(prefix, a, b string) string {
 		name = name[:63]
 	}
 	return name
+}
+
+// --- WP3: table/column attributes, trigger state, comments, unsupported changes ---
+
+func renderSetLogged(op diff.Op) []Statement {
+	mode := "LOGGED"
+	if op.Table.Persistence == "unlogged" {
+		mode = "UNLOGGED"
+	}
+	return []Statement{{
+		SQL:           "ALTER TABLE " + op.Table.QualifiedName() + " SET " + mode + ";",
+		Transactional: true,
+		Hazards: []safety.Hazard{
+			safety.New(safety.TableRewrite, "changing a table's persistence rewrites it"),
+			safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table"),
+		},
+	}}
+}
+
+func renderRelOptionsChange(op diff.Op) []Statement {
+	var stmts []Statement
+	if len(op.RelOptions) > 0 {
+		stmts = append(stmts, Statement{
+			SQL:           "ALTER TABLE " + op.Table.QualifiedName() + " SET (" + renderRelOptions(op.RelOptions) + ");",
+			Transactional: true,
+			Hazards:       []safety.Hazard{safety.New(safety.AccessExclusiveLock, "brief ACCESS EXCLUSIVE to change storage parameters")},
+		})
+	}
+	if len(op.RelOptionsReset) > 0 {
+		stmts = append(stmts, Statement{
+			SQL:           "ALTER TABLE " + op.Table.QualifiedName() + " RESET (" + strings.Join(op.RelOptionsReset, ", ") + ");",
+			Transactional: true,
+			Hazards:       []safety.Hazard{safety.New(safety.AccessExclusiveLock, "brief ACCESS EXCLUSIVE to change storage parameters")},
+		})
+	}
+	return stmts
+}
+
+func renderColumnAttr(op diff.Op) []Statement {
+	base := "ALTER TABLE " + op.Table.QualifiedName() + " ALTER COLUMN " + model.QuoteIdent(op.Column.Name)
+	var sql string
+	switch op.Type {
+	case diff.OpSetColumnStorage:
+		v := "DEFAULT"
+		if op.Column.Storage != "" {
+			v = strings.ToUpper(op.Column.Storage)
+		}
+		sql = base + " SET STORAGE " + v
+	case diff.OpSetColumnCompression:
+		v := "DEFAULT"
+		if op.Column.Compression != "" {
+			v = op.Column.Compression
+		}
+		sql = base + " SET COMPRESSION " + v
+	default:
+		v := "-1"
+		if op.Column.StatsTarget != nil {
+			v = strconv.Itoa(*op.Column.StatsTarget)
+		}
+		sql = base + " SET STATISTICS " + v
+	}
+	return []Statement{{SQL: sql + ";", Transactional: true}}
+}
+
+// renderAlterGenerated reconciles a column's generation expression. PG17+ can
+// edit the expression in place and PG13+ can drop it; anything else — and
+// turning a plain column into a generated one — means dropping and re-adding
+// the column.
+func renderAlterGenerated(op diff.Op, opts Options) []Statement {
+	prev, cur := op.PrevColumn, op.Column
+	t := op.Table.QualifiedName()
+	col := model.QuoteIdent(cur.Name)
+	if prev != nil && prev.Generated != "" && cur.Generated == prev.Generated && opts.TargetMajor >= 17 {
+		return []Statement{{
+			SQL:           "ALTER TABLE " + t + " ALTER COLUMN " + col + " SET EXPRESSION AS (" + cur.GeneratedExpr + ");",
+			Transactional: true,
+			Note:          "generation expression changed; stored values are recomputed",
+			Hazards: []safety.Hazard{
+				safety.New(safety.TableRewrite, "recomputes the generated column for every row"),
+				safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table"),
+			},
+		}}
+	}
+	if prev != nil && prev.Generated != "" && cur.Generated == "" && opts.TargetMajor >= 13 {
+		return []Statement{{
+			SQL:           "ALTER TABLE " + t + " ALTER COLUMN " + col + " DROP EXPRESSION;",
+			Transactional: true,
+			Note:          "the column stops being generated and keeps its current values",
+			Hazards:       []safety.Hazard{safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table")},
+		}}
+	}
+	drop := Statement{
+		SQL:           "ALTER TABLE " + t + " DROP COLUMN " + col + ";",
+		Transactional: true,
+		Note:          "the generation of this column changed in a way PostgreSQL cannot alter in place: the column is dropped and re-added",
+		Hazards:       []safety.Hazard{safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table")},
+	}
+	if prev != nil && prev.Generated == "" {
+		drop.Hazards = append(drop.Hazards, safety.New(safety.DeletesData, "the column's existing values are lost when it becomes generated"))
+	} else {
+		drop.Hazards = append(drop.Hazards, safety.New(safety.TableRewrite, "the generated values are recomputed for every row"))
+	}
+	return []Statement{drop, {
+		SQL:           "ALTER TABLE " + t + " ADD COLUMN " + columnDef(cur) + ";",
+		Transactional: true,
+	}}
+}
+
+func renderTriggerEnabled(op diff.Op) []Statement {
+	var mode string
+	switch op.Trigger.Enabled {
+	case "disabled":
+		mode = "DISABLE"
+	case "replica":
+		mode = "ENABLE REPLICA"
+	case "always":
+		mode = "ENABLE ALWAYS"
+	default:
+		mode = "ENABLE"
+	}
+	return []Statement{{
+		SQL:           "ALTER TABLE " + relName(op) + " " + mode + " TRIGGER " + model.QuoteIdent(op.Trigger.Name) + ";",
+		Transactional: true,
+	}}
+}
+
+// renderComment renders COMMENT ON for an object or one of its sub-objects.
+func renderComment(op diff.Op) []Statement {
+	owner := op.Owner
+	qn := model.QualifiedName(owner.Schema, owner.Name)
+	var spec string
+	switch op.CommentKind {
+	case "column":
+		spec = "COLUMN " + qn + "." + model.QuoteIdent(op.Sub)
+	case "constraint":
+		spec = "CONSTRAINT " + model.QuoteIdent(op.Sub) + " ON " + qn
+	case "index":
+		spec = "INDEX " + model.QualifiedName(owner.Schema, op.Sub)
+	case "trigger":
+		spec = "TRIGGER " + model.QuoteIdent(op.Sub) + " ON " + qn
+	case "policy":
+		spec = "POLICY " + model.QuoteIdent(op.Sub) + " ON " + qn
+	default:
+		switch owner.Kind {
+		case model.KindSchema:
+			spec = "SCHEMA " + model.QuoteIdent(owner.Name)
+		case model.KindTable:
+			spec = "TABLE " + qn
+		case model.KindView:
+			spec = "VIEW " + qn
+		case model.KindMatView:
+			spec = "MATERIALIZED VIEW " + qn
+		case model.KindSequence:
+			spec = "SEQUENCE " + qn
+		case model.KindEnum, model.KindComposite:
+			spec = "TYPE " + qn
+		case model.KindDomain:
+			spec = "DOMAIN " + qn
+		case model.KindCollation:
+			spec = "COLLATION " + qn
+		case model.KindFunction:
+			// Owner.Name is "name(identity args)"; ROUTINE covers functions and procedures.
+			name, args := owner.Name, ""
+			if p := strings.IndexByte(name, '('); p >= 0 {
+				name, args = name[:p], name[p:]
+			}
+			spec = "ROUTINE " + model.QualifiedName(owner.Schema, name) + args
+		default:
+			spec = string(owner.Kind) + " " + qn
+		}
+	}
+	body := "NULL"
+	if op.Comment != "" {
+		body = model.QuoteLiteral(op.Comment)
+	}
+	return []Statement{{SQL: "COMMENT ON " + spec + " IS " + body + ";", Transactional: true}}
+}
+
+// renderUnsupported renders a change PostgreSQL cannot make in place as a
+// RAISE WARNING so the script is honest about not converging, carrying an
+// error-severity hazard that blocks publish unless hazards are allowed.
+func renderUnsupported(op diff.Op) []Statement {
+	msg := strings.ReplaceAll(op.Reason, "'", "''")
+	return []Statement{{
+		SQL:           "DO $$ BEGIN RAISE WARNING 'pg-dac: " + msg + "'; END $$;",
+		Transactional: true,
+		Hazards:       []safety.Hazard{safety.New(safety.Unsupported, op.Reason)},
+	}}
 }

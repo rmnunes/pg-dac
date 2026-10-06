@@ -89,7 +89,7 @@ func groupSuffix(groups []sqlgen.OpStatements) string {
 		switch g.Op.Type {
 		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateFunction,
 			diff.OpCreateSequence, diff.OpCreateSchema, diff.OpCreateExtension, diff.OpCreateEnum,
-			diff.OpCreateCollation:
+			diff.OpCreateDomain, diff.OpCreateCompositeType, diff.OpCreateCollation:
 			return ""
 		}
 	}
@@ -98,8 +98,12 @@ func groupSuffix(groups []sqlgen.OpStatements) string {
 		return "_constraints"
 	case diff.OpCreateIndex:
 		return "_indexes"
-	case diff.OpCreateTrigger:
+	case diff.OpCreateTrigger, diff.OpSetTriggerEnabled:
 		return "_triggers"
+	case diff.OpSetColumnStorage, diff.OpSetColumnCompression, diff.OpSetColumnStats:
+		return "_columns"
+	case diff.OpSetComment:
+		return "_comments"
 	case diff.OpCreatePolicy:
 		return "_policies"
 	case diff.OpEnableRLS:

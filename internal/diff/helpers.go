@@ -158,20 +158,138 @@ func unionKeys(a, b map[string]*model.Schema) []string {
 	return out
 }
 
-// appendedValues returns the labels present in cur that are not in prev,
-// preserving cur's order. Used to detect enum values that can be added online.
-func appendedValues(prev, cur []string) []string {
+// enumAdditions returns the labels in cur that are missing from prev, each with
+// the position to insert it at so the final order matches cur: a label goes
+// AFTER the label that precedes it in cur (which exists by the time it is
+// added, being either old or just added), or — for the very first label —
+// BEFORE the next label that already exists.
+func enumAdditions(prev, cur []string) ([]string, []EnumPosition) {
 	have := map[string]struct{}{}
 	for _, v := range prev {
 		have[v] = struct{}{}
 	}
 	var added []string
+	var positions []EnumPosition
+	for i, v := range cur {
+		if _, ok := have[v]; ok {
+			continue
+		}
+		var p EnumPosition
+		switch {
+		case i > 0:
+			p.After = cur[i-1]
+		default:
+			for _, next := range cur[1:] {
+				if _, ok := have[next]; ok {
+					p.Before = next
+					break
+				}
+			}
+		}
+		added = append(added, v)
+		positions = append(positions, p)
+	}
+	return added, positions
+}
+
+// missingValues returns the labels of prev that cur no longer has.
+func missingValues(prev, cur []string) []string {
+	have := map[string]struct{}{}
 	for _, v := range cur {
+		have[v] = struct{}{}
+	}
+	var out []string
+	for _, v := range prev {
 		if _, ok := have[v]; !ok {
-			added = append(added, v)
+			out = append(out, v)
 		}
 	}
-	return added
+	return out
+}
+
+// sameRelativeOrder reports whether the labels common to prev and cur appear in
+// the same order in both.
+func sameRelativeOrder(prev, cur []string) bool {
+	pos := map[string]int{}
+	for i, v := range cur {
+		pos[v] = i
+	}
+	last := -1
+	for _, v := range prev {
+		i, ok := pos[v]
+		if !ok {
+			continue
+		}
+		if i < last {
+			return false
+		}
+		last = i
+	}
+	return true
+}
+
+func quoteList(vals []string) string {
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = model.QuoteLiteral(v)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// relOptionsDiff returns the storage parameters to SET (new or changed) and to
+// RESET (gone), the latter sorted for deterministic output.
+func relOptionsDiff(prev, cur map[string]string) (set map[string]string, reset []string) {
+	for k, v := range cur {
+		if pv, ok := prev[k]; !ok || pv != v {
+			if set == nil {
+				set = map[string]string{}
+			}
+			set[k] = v
+		}
+	}
+	for k := range prev {
+		if _, ok := cur[k]; !ok {
+			reset = append(reset, k)
+		}
+	}
+	sort.Strings(reset)
+	return set, reset
+}
+
+func indexDomains(s *model.Schema) map[string]*model.Domain {
+	m := map[string]*model.Domain{}
+	if s == nil {
+		return m
+	}
+	for _, d := range s.Domains {
+		m[d.Name] = d
+	}
+	return m
+}
+
+func indexComposites(s *model.Schema) map[string]*model.CompositeType {
+	m := map[string]*model.CompositeType{}
+	if s == nil {
+		return m
+	}
+	for _, c := range s.Composites {
+		m[c.Name] = c
+	}
+	return m
+}
+
+func domainsOf(s *model.Schema) []*model.Domain {
+	if s == nil {
+		return nil
+	}
+	return s.Domains
+}
+
+func compositesOf(s *model.Schema) []*model.CompositeType {
+	if s == nil {
+		return nil
+	}
+	return s.Composites
 }
 
 func policyChanged(a, b *model.Policy) bool {
