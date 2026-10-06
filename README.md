@@ -42,7 +42,11 @@ target ─┘
 - **Diff** — purely name-keyed, deterministic; emits typed operations (no SQL).
 - **Plan** — orders operations with a topological sort over dependency edges (foreign keys, view
   and function references, row types used in function signatures, trigger functions, sequence
-  ownership) plus a pg_dump-style object-type priority as the tie-breaker.
+  ownership, the columns a view reads) plus a pg_dump-style object-type priority as the tie-breaker.
+  Changes PostgreSQL refuses while dependents exist — retyping or dropping a column a view reads,
+  dropping a table or function a view or trigger uses, replacing a view whose columns changed or a
+  function whose result type changed — automatically drop the dependents first and recreate them
+  afterwards, each statement annotated with why.
 - **SQL generation + safety** — renders lock-safe DDL: `CREATE INDEX CONCURRENTLY`, constraints
   added `NOT VALID` then `VALIDATE`d, scan-free `SET NOT NULL` on PG12+, etc. Each statement is
   tagged with typed hazards; data-loss operations are blocked unless `--allow-hazards` is given.
@@ -72,13 +76,12 @@ identity), functions and procedures, tables (columns incl. identity/generated/de
 comments on create), primary/foreign/unique/check/exclude constraints (incl. `NOT VALID` state),
 indexes, triggers, row-level-security policies and table RLS enable/force, views, materialized views.
 
-**Known gaps** (details and plan in [STATUS.md](STATUS.md)): incremental changes that drop/rename/
-retype a view column, change a function's return type, or alter a column a view depends on still
-fail (they need dependent-object drop/recreate); partitioning, materialized-view indexes, view
-triggers, check options, trigger enable state, storage parameters, comment changes, enum value
-removal and grants are not modeled yet and are **silently dropped** on publish; the artifact's
-signature covers the content but not yet the manifest metadata; domains/composite/range types are
-reported as warnings only.
+**Known gaps** (details and plan in [STATUS.md](STATUS.md)): partitioning, materialized-view
+indexes, view triggers, check options, trigger enable state, storage parameters, comment changes,
+enum value removal and grants are not modeled yet and are **silently dropped** on publish; policies,
+defaults and constraints that call a function being recreated are not yet recreated around it; the
+artifact's signature covers the content but not yet the manifest metadata; domains/composite/range
+types are reported as warnings only.
 
 ## Usage
 
@@ -104,8 +107,8 @@ pg-dac build   --from ./schema --out app.pgdac --version 2.1.0 --target-major 18
 pg-dac inspect app.pgdac
 
 # Scaffold / reverse-engineer a declarative project
-pg-dac init    --dir ./schema --name app
-pg-dac extract --from "postgres://...prod" --to-project ./schema
+pg-dac init    --dir ./schema --name app                               # section folders for hand authoring
+pg-dac extract --from "postgres://...prod" --to-project ./schema       # schema/NNNN_<kind>_<name>.sql in dependency order
 ```
 
 Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
