@@ -21,10 +21,14 @@ import (
 //	fail  the generated migration errors when applied — a KNOWN gap, listed with
 //	      the work package that fixes it; when it starts passing, flip it to ok
 //	miss  the two models differ but the differ emits nothing (unmodeled attribute)
+//	noconv the migration applies but cannot converge: PostgreSQL has no in-place
+//	      operation for the change, so pg-dac emits an UNSUPPORTED_CHANGE hazard
+//	      (a RAISE WARNING) instead of silently doing nothing
 const (
-	ok   = "ok"
-	fail = "fail"
-	miss = "miss"
+	ok     = "ok"
+	fail   = "fail"
+	miss   = "miss"
+	noconv = "noconv"
 )
 
 type scenario struct {
@@ -66,23 +70,42 @@ var scenarios = []scenario{
 	{"mutual-fk-new-tables", ``, `CREATE TABLE a(id int primary key, b_id int); CREATE TABLE b(id int primary key, a_id int REFERENCES a(id)); ALTER TABLE a ADD FOREIGN KEY (b_id) REFERENCES b(id);`, ok, ""},
 	{"citext-extension-column-from-empty", ``, `CREATE EXTENSION citext; CREATE TABLE t(e citext);`, ok, ""},
 
-	// --- lossy but applies (attribute not modeled; WP3) ---
-	{"partitioned-table-from-empty", ``, `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_2024 PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');`, ok, "LOSSY: created as plain tables (WP3)"},
-	{"matview-with-index-from-empty", ``, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, "LOSSY: matview index dropped (WP3)"},
-	{"view-with-check-option-from-empty", ``, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH CHECK OPTION;`, ok, "LOSSY: check option dropped (WP3)"},
-	{"trigger-disabled-from-empty", ``, `CREATE TABLE t(a int); CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$; CREATE TRIGGER tg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION tf(); ALTER TABLE t DISABLE TRIGGER tg;`, ok, "LOSSY: trigger re-enabled (WP3)"},
-	{"table-with-fillfactor-from-empty", ``, `CREATE TABLE t(a int) WITH (fillfactor = 70);`, ok, "LOSSY: reloptions dropped (WP3)"},
-	{"column-storage-external-from-empty", ``, `CREATE TABLE t(a text); ALTER TABLE t ALTER COLUMN a SET STORAGE EXTERNAL;`, ok, "LOSSY: storage dropped (WP3)"},
-	{"instead-of-trigger-on-view-from-empty", ``, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION vf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN INSERT INTO t VALUES (NEW.a); RETURN NEW; END$$; CREATE TRIGGER v_ins INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION vf();`, ok, "LOSSY: view trigger dropped (WP3)"},
+	// --- fixed in WP3 (attributes that used to be dropped silently) ---
+	{"partitioned-table-from-empty", ``, `CREATE TABLE m(id int, d date, PRIMARY KEY (id, d)) PARTITION BY RANGE (d); CREATE TABLE m_2024 PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2025-01-01'); CREATE TABLE m_rest PARTITION OF m DEFAULT;`, ok, ""},
+	{"partition-add-child", `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_2024 PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');`, `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_2024 PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2025-01-01'); CREATE TABLE m_2025 PARTITION OF m FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');`, ok, ""},
+	{"partition-drop-child", `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_2024 PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2025-01-01'); CREATE TABLE m_2025 PARTITION OF m FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');`, `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_2025 PARTITION OF m FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');`, ok, ""},
+	{"partition-rebound-child", `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_a PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');`, `CREATE TABLE m(id int, d date) PARTITION BY RANGE (d); CREATE TABLE m_a PARTITION OF m FOR VALUES FROM ('2024-01-01') TO ('2026-01-01');`, ok, ""},
+	{"matview-with-index-from-empty", ``, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, ""},
+	{"matview-index-added", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE UNIQUE INDEX mv_a_key ON mv(a);`, ok, ""},
+	{"matview-index-survives-recreate", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, `CREATE TABLE t(a bigint); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, ""},
+	{"view-with-check-option-from-empty", ``, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH CHECK OPTION;`, ok, ""},
+	{"view-check-option-added", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0;`, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH LOCAL CHECK OPTION;`, ok, ""},
+	{"view-security-barrier-added", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE VIEW v WITH (security_barrier = true) AS SELECT a FROM t;`, ok, ""},
+	{"view-security-barrier-removed", `CREATE TABLE t(a int); CREATE VIEW v WITH (security_barrier = true) AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, ok, ""},
+	{"trigger-disabled-from-empty", ``, `CREATE TABLE t(a int); CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$; CREATE TRIGGER tg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION tf(); ALTER TABLE t DISABLE TRIGGER tg;`, ok, ""},
+	{"trigger-disable-existing", `CREATE TABLE t(a int); CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$; CREATE TRIGGER tg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION tf();`, `CREATE TABLE t(a int); CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$; CREATE TRIGGER tg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION tf(); ALTER TABLE t ENABLE ALWAYS TRIGGER tg;`, ok, ""},
+	{"instead-of-trigger-on-view-from-empty", ``, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION vf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN INSERT INTO t VALUES (NEW.a); RETURN NEW; END$$; CREATE TRIGGER v_ins INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION vf();`, ok, ""},
+	{"view-trigger-survives-view-recreate", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t; CREATE FUNCTION vf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN INSERT INTO t(a) VALUES (NEW.a); RETURN NEW; END$$; CREATE TRIGGER v_ins INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION vf();`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION vf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN INSERT INTO t(a) VALUES (NEW.a); RETURN NEW; END$$; CREATE TRIGGER v_ins INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION vf();`, ok, ""},
+	{"table-with-fillfactor-from-empty", ``, `CREATE TABLE t(a int) WITH (fillfactor = 70);`, ok, ""},
+	{"fillfactor-changed-and-removed", `CREATE TABLE t(a int) WITH (fillfactor = 70, autovacuum_enabled = false);`, `CREATE TABLE t(a int) WITH (fillfactor = 90);`, ok, ""},
+	{"column-storage-external-from-empty", ``, `CREATE TABLE t(a text); ALTER TABLE t ALTER COLUMN a SET STORAGE EXTERNAL;`, ok, ""},
+	{"column-storage-and-stats-changed", `CREATE TABLE t(a text, b int);`, `CREATE TABLE t(a text, b int); ALTER TABLE t ALTER COLUMN a SET STORAGE EXTERNAL; ALTER TABLE t ALTER COLUMN b SET STATISTICS 500;`, ok, ""},
+	{"unlogged-table-change", `CREATE TABLE t(a int);`, `CREATE UNLOGGED TABLE t(a int);`, ok, ""},
+	{"logged-table-again", `CREATE UNLOGGED TABLE t(a int);`, `CREATE TABLE t(a int);`, ok, ""},
+	{"comment-change", `CREATE TABLE t(a int); COMMENT ON TABLE t IS 'old';`, `CREATE TABLE t(a int); COMMENT ON TABLE t IS 'new';`, ok, ""},
+	{"comments-added-and-removed", `CREATE TABLE t(a int, b int); CREATE INDEX t_b ON t(b); COMMENT ON COLUMN t.a IS 'gone';`, `CREATE TABLE t(a int, b int); CREATE INDEX t_b ON t(b); COMMENT ON COLUMN t.b IS 'b'; COMMENT ON INDEX t_b IS 'idx'; COMMENT ON TABLE t IS 't';`, ok, ""},
+	{"enum-insert-middle-and-prepend", `CREATE TYPE e AS ENUM ('b','d');`, `CREATE TYPE e AS ENUM ('a','b','c','d','e');`, ok, ""},
+	{"enum-value-removed", `CREATE TYPE e AS ENUM ('a','b');`, `CREATE TYPE e AS ENUM ('a');`, noconv, "PostgreSQL cannot drop enum values; reported as UNSUPPORTED_CHANGE"},
+	{"generated-column-expr-change", `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 2) STORED);`, `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 3) STORED);`, ok, ""},
+	{"generated-to-plain", `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 2) STORED);`, `CREATE TABLE t(a int, b int);`, ok, ""},
+	{"plain-to-generated", `CREATE TABLE t(a int, b int);`, `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 2) STORED);`, ok, "drop + re-add with a DELETES_DATA hazard"},
+	{"domain-used-by-table-from-empty", ``, `CREATE DOMAIN email AS text CHECK (VALUE LIKE '%@%'); CREATE TABLE t(e email);`, ok, ""},
+	{"domain-with-default-not-null-from-empty", ``, `CREATE DOMAIN code AS text NOT NULL DEFAULT 'x' CONSTRAINT code_len CHECK (length(VALUE) < 5); CREATE TABLE t(c code);`, ok, ""},
+	{"domain-changed", `CREATE DOMAIN d AS int CHECK (VALUE > 0);`, `CREATE DOMAIN d AS int CHECK (VALUE > 1);`, noconv, "altering a domain is reported as UNSUPPORTED_CHANGE"},
+	{"composite-type-used-by-table-from-empty", ``, `CREATE TYPE pt AS (x int, y int); CREATE TABLE t(p pt);`, ok, ""},
 	{"grant-from-empty",
 		`DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$;`,
-		`DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$; CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader;`, ok, "LOSSY: grant dropped (WP3)"},
-
-	// --- silent misses (WP3) ---
-	{"unlogged-table-change", `CREATE TABLE t(a int);`, `CREATE UNLOGGED TABLE t(a int);`, miss, "persistence not diffed (WP3)"},
-	{"comment-change", `CREATE TABLE t(a int); COMMENT ON TABLE t IS 'old';`, `CREATE TABLE t(a int); COMMENT ON TABLE t IS 'new';`, miss, "comment changes not diffed (WP3)"},
-	{"enum-value-removed", `CREATE TYPE e AS ENUM ('a','b');`, `CREATE TYPE e AS ENUM ('a');`, miss, "enum removal not diffed, no hazard (WP3)"},
-	{"generated-column-expr-change", `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 2) STORED);`, `CREATE TABLE t(a int, b int GENERATED ALWAYS AS (a * 3) STORED);`, miss, "generated expression not diffed (WP3)"},
+		`DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$; CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader;`, ok, "LOSSY: grants are not published (warned)"},
 
 	// --- fixed in WP2 (dependency-aware migrations) ---
 	{"view-drop-column", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t;`, ok, ""},
@@ -100,9 +123,6 @@ var scenarios = []scenario{
 	{"drop-table-under-altered-view", `CREATE TABLE t(a int); CREATE TABLE u(b int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE u(b int); CREATE VIEW v AS SELECT b AS a FROM u;`, ok, ""},
 	{"drop-view-with-dependent-view-rewritten", `CREATE TABLE t(a int); CREATE VIEW v1 AS SELECT a FROM t; CREATE VIEW v2 AS SELECT a FROM v1;`, `CREATE TABLE t(a int); CREATE VIEW v2 AS SELECT a FROM t;`, ok, ""},
 	{"alter-type-text-to-int", `CREATE TABLE t(a text);`, `CREATE TABLE t(a int);`, ok, "an explicit USING cast is emitted"},
-
-	// --- known failures (WP3) ---
-	{"domain-used-by-table-from-empty", ``, `CREATE DOMAIN email AS text CHECK (VALUE LIKE '%@%'); CREATE TABLE t(e email);`, fail, "domains not managed (WP3)"},
 }
 
 // TestScenarios runs the migration scenario matrix (the audit notes, Appendix A)
@@ -161,6 +181,16 @@ func TestScenarios(t *testing.T) {
 				}
 				if !vr.Converged {
 					t.Fatalf("migration did not converge; residual:\n%s", vr.Residual.Script(true))
+				}
+			case noconv:
+				if err != nil {
+					t.Fatalf("migration failed to apply: %v\n--- script ---\n%s", shortErr(err), res.Script(true))
+				}
+				if vr.Converged {
+					t.Fatalf("expected a non-converging migration (%s) but it converged — flip this scenario to ok", sc.reason)
+				}
+				if !res.HasBlocking() {
+					t.Fatalf("a non-converging migration must carry a blocking hazard:\n%s", res.Script(true))
 				}
 			case fail:
 				if err == nil && vr.Converged {

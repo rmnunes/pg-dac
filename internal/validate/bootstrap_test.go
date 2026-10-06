@@ -68,6 +68,30 @@ CREATE POLICY orders_owner ON app.orders USING (user_id = current_setting('app.u
 CREATE MATERIALIZED VIEW app.order_totals AS SELECT user_id, sum(amount) AS total FROM app.orders GROUP BY user_id;
 ALTER TABLE app.orders ADD CONSTRAINT orders_amount_cap CHECK (amount < 1000000) NOT VALID;
 COMMENT ON TABLE app.users IS 'Application users';
+-- WP3: attributes that used to be dropped silently
+CREATE DOMAIN app.email_addr AS text CHECK (VALUE LIKE '%@%');
+CREATE TYPE app.point2 AS (x integer, y integer);
+CREATE TABLE app.events (
+  id bigserial,
+  at timestamptz NOT NULL,
+  contact app.email_addr,
+  pos app.point2,
+  PRIMARY KEY (id, at)
+) PARTITION BY RANGE (at);
+CREATE TABLE app.events_2024 PARTITION OF app.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+CREATE TABLE app.events_default PARTITION OF app.events DEFAULT;
+CREATE INDEX order_totals_user_idx ON app.order_totals (user_id);
+CREATE UNLOGGED TABLE app.scratch (k text PRIMARY KEY, v text) WITH (fillfactor = 80);
+ALTER TABLE app.scratch ALTER COLUMN v SET STORAGE EXTERNAL;
+ALTER TABLE app.scratch ALTER COLUMN k SET STATISTICS 500;
+ALTER TABLE app.orders DISABLE TRIGGER orders_touch;
+CREATE VIEW app.open_orders AS SELECT id, amount FROM app.orders WHERE amount > 0 WITH CHECK OPTION;
+CREATE VIEW app.secure_users WITH (security_barrier = true) AS SELECT id, email FROM app.users;
+CREATE FUNCTION app.open_orders_ins() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO app.orders(user_id, amount) VALUES (1, NEW.amount); RETURN NEW; END $$;
+CREATE TRIGGER open_orders_ins INSTEAD OF INSERT ON app.open_orders FOR EACH ROW EXECUTE FUNCTION app.open_orders_ins();
+COMMENT ON COLUMN app.users.email IS 'login';
+COMMENT ON INDEX app.orders_user_idx IS 'fk lookup';
+COMMENT ON CONSTRAINT users_email_uniq ON app.users IS 'unique email';
 `
 
 // TestBootstrap_FromEmpty is the end-to-end gate for "publish an artifact into
