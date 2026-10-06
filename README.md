@@ -1,8 +1,9 @@
 # pg-dac
 
 A **DACPAC / SqlPackage-equivalent for PostgreSQL**. It compares schemas, produces
-dependency-ordered, lock-safe migration scripts, and (in later milestones) packages a
-schema into a portable, signed `.pgdac` artifact you can compare against a target database.
+dependency-ordered, lock-safe migration scripts, and packages a schema into a portable, signed
+`.pgdac` artifact you can compare against — and publish into — any target database, including an
+empty one.
 
 If you've used SQL Server's SqlPackage / SQL Database Projects and wished for the same
 declarative, compare-and-script workflow on PostgreSQL, that's what pg-dac is.
@@ -30,45 +31,54 @@ source ─┐
 target ─┘
 ```
 
-- **Model** — built from live `pg_catalog` introspection (the authoritative source). A
-  declarative project or a `.pgdac` artifact is reduced to the same model by materializing it
-  in a throwaway PostgreSQL and re-introspecting, so cosmetic noise (`varchar` vs
-  `character varying`, reparenthesized checks, whitespace) never shows up as a false diff.
-- **Diff** — purely name-keyed; emits typed operations (no SQL).
-- **Plan** — orders operations with a topological sort over derived dependency edges plus a
-  pg_dump-style object-type priority as a tie-breaker (drops in dependents-first order, creates
-  in dependencies-first order; foreign keys land after the tables they reference).
+- **Model** — built from live `pg_catalog` introspection (the authoritative source), with the
+  session `search_path` pinned empty so every definition is fully schema-qualified and the model
+  does not depend on who is reading it. A declarative project or a `.pgdac` artifact is reduced to
+  the same model by materializing it in a throwaway PostgreSQL and re-introspecting — then
+  re-materialized once more from its own canonical SQL, because PostgreSQL's deparsed text is not
+  always a parse fixed point — so cosmetic noise (`varchar` vs `character varying`, reparenthesized
+  checks, whitespace, `IN (...)` lists) never shows up as a false diff and a published target
+  converges.
+- **Diff** — purely name-keyed, deterministic; emits typed operations (no SQL).
+- **Plan** — orders operations with a topological sort over dependency edges (foreign keys, view
+  and function references, row types used in function signatures, trigger functions, sequence
+  ownership) plus a pg_dump-style object-type priority as the tie-breaker.
 - **SQL generation + safety** — renders lock-safe DDL: `CREATE INDEX CONCURRENTLY`, constraints
   added `NOT VALID` then `VALIDATE`d, scan-free `SET NOT NULL` on PG12+, etc. Each statement is
   tagged with typed hazards; data-loss operations are blocked unless `--allow-hazards` is given.
+  Scripts and the executor run with `check_function_bodies = false` (as pg_dump does), so a
+  SQL-language function may reference objects created later in the same migration.
 
 ## Status
 
-**Complete and verified end-to-end against real PostgreSQL (milestones 1–5).**
+The engine, daemon, project model, artifact, and GUI are built and exercised against real
+PostgreSQL (embedded 16, Docker 16/18, and a ~290-object production schema). An independent audit
+on 2026-10-06 (the audit notes) found the from-empty bootstrap broken; the first
+work package since then fixed it. The current gates, all in `go test ./...`:
 
-- **M1 — compare + script.** Object coverage: schemas, extensions, enums, sequences, **functions
-  and procedures**, tables (columns incl. identity/generated/defaults/not-null, comments),
-  primary/foreign/unique/check/exclude constraints, indexes, **triggers**, **row-level-security
-  policies** (and table RLS enable/force), views, and materialized views. Object types pg-dac does
-  not yet manage (domains, composite/range types, aggregates, foreign tables, collations,
-  non-view rules, partition attachments) are **reported as warnings** so a "no differences" result
-  is never silently misleading.
-- **M2 — scratch database + normalization + plan validation.** A bundled, auto-managed embedded
-  PostgreSQL builds a model from a declarative `.sql` project/file (apply + re-introspect) and
-  `--validate`s a migration by replaying it against a scratch copy of the source and confirming
-  it converges.
-- **M3 — `publish`.** Applies the migration with lock-safety: a session `lock_timeout` plus
-  jittered retries on lock-timeout errors, per-statement autocommit (so `CONCURRENTLY` runs and a
-  failed publish is resumable), and a data-loss block gate.
-- **M4 — signed `.pgdac` artifact.** `build`/`extract` produce a portable archive (manifest +
-  model + canonical SQL) with a SHA-256 Merkle root and an Ed25519 signature; `inspect` verifies
-  integrity and the signature.
-- **M5 — artifact comparison.** Any source — connection string, project directory, `.sql` file,
-  or `.pgdac` — can be either side of a comparison, so artifact↔database and artifact↔artifact
-  comparisons (and publishing *from* an artifact) all work through the same verbs.
+- **From-empty bootstrap** (`internal/validate/bootstrap_test.go`): a comprehensive schema is
+  built, published into an empty scratch database, re-introspected, and must show no residual;
+  the script must be byte-identical across repeated compares; the model must survive a trip
+  through a signed `.pgdac`.
+- **Scenario matrix** (`internal/engine/scenarios_test.go`): the migrations from the audit, each
+  tagged `ok`, `fail` (known gap, with the work package that fixes it) or `miss` (attribute not yet
+  modeled). A gap that starts passing makes the test tell you to flip its tag.
+- **Introspection invariants** (`internal/introspect`): the model is independent of the session
+  `search_path`; `NOT VALID` is a flag, not definition text; function, trigger and view dependency
+  edges are recorded.
 
-Sources sharing one CLI invocation reuse a single scratch server (ephemeral databases), and a
-cross-process lock makes concurrent server starts safe.
+**Managed objects:** schemas, extensions, enums, collations, sequences (standalone, serial, and
+identity), functions and procedures, tables (columns incl. identity/generated/defaults/not-null,
+comments on create), primary/foreign/unique/check/exclude constraints (incl. `NOT VALID` state),
+indexes, triggers, row-level-security policies and table RLS enable/force, views, materialized views.
+
+**Known gaps** (details and plan in [STATUS.md](STATUS.md)): incremental changes that drop/rename/
+retype a view column, change a function's return type, or alter a column a view depends on still
+fail (they need dependent-object drop/recreate); partitioning, materialized-view indexes, view
+triggers, check options, trigger enable state, storage parameters, comment changes, enum value
+removal and grants are not modeled yet and are **silently dropped** on publish; the artifact's
+signature covers the content but not yet the manifest metadata; domains/composite/range types are
+reported as warnings only.
 
 ## Usage
 
@@ -82,23 +92,29 @@ go build -o bin/pg-dac ./cmd/pg-dac
 pg-dac diff    --from "postgres://...target" --to ./schema
 pg-dac script  --from "postgres://...target" --to ./schema --validate > migrate.sql
 pg-dac report  --from app.pgdac              --to "postgres://...target" --format json
+pg-dac plan    --from "postgres://...target" --to ./schema              # per-object JSON (GUI/tooling)
 
-# Apply (publish) the desired state to a live database
+# Apply (publish) the desired state to a live database — including an empty one
 pg-dac publish --from "postgres://...target" --to ./schema            # data loss is refused
-pg-dac publish --from "postgres://...target" --to ./schema --dry-run  # preview only
+pg-dac publish --from "postgres://...target" --to app.pgdac --dry-run # preview only
 
 # Package a schema into a portable, signed artifact, and inspect it
 pg-dac extract --from "postgres://...prod" --out prod.pgdac
-pg-dac build   --from ./schema             --out app.pgdac --version 2.1.0
+pg-dac build   --from ./schema --out app.pgdac --version 2.1.0 --target-major 18
 pg-dac inspect app.pgdac
+
+# Scaffold / reverse-engineer a declarative project
+pg-dac init    --dir ./schema --name app
+pg-dac extract --from "postgres://...prod" --to-project ./schema
 ```
 
-Useful flags: `--schema <name>` (repeatable), `--target-major <n>`, `--no-online`,
-`--allow-hazards`, `--drop-objects-not-in-source`, `--validate`, `--dry-run` (publish),
-`--lock-timeout` (publish), `--no-sign` (build/extract), `--require-key` (inspect).
+Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
+the PostgreSQL major used to normalize a project source; a project's `pgdac.yaml` `targetMajor`
+is the default), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source`, `--validate`,
+`--dry-run` and `--lock-timeout` (publish), `--no-sign` (build/extract), `--require-key` (inspect).
 
-> The first run downloads the embedded PostgreSQL binaries (cached afterward), so any command
-> that uses a project/`.sql`/artifact source or `--validate` takes longer the first time.
+> The first run downloads the embedded PostgreSQL binaries (cached per major version), so any
+> command that uses a project/`.sql` source or `--validate` takes longer the first time.
 
 ## Trying it on a real project or database
 
@@ -129,22 +145,18 @@ bin/pg-dac publish --from "$TARGET_DB" --to current.pgdac             # apply
 
 Tips: restrict scope with `--schema app` (repeatable); `--validate` replays the migration in a
 throwaway database first; read every `warning (...)` line — those object types are not yet managed.
+Point a project source at the directory that holds only schema DDL (psql meta-commands such as
+`\i` cannot run server-side), or add a `pgdac.yaml` whose `include` globs select it.
 
 ## Testing
 
 ```bash
-go test -short ./...   # fast unit tests, no database required
-go test ./...          # + embedded-PostgreSQL integration tests (downloads binaries once)
+go test -short ./...       # fast unit tests, no database required
+go test -p 1 ./...         # + embedded-PostgreSQL integration tests (downloads binaries once);
+                           #   -p 1 keeps packages from racing on the embedded binaries
 ```
 
 Set `PG_DAC_TEST_DSN` to also run the self-idempotence check against a real database.
-
-## Development
-
-```bash
-go test ./...                                   # unit tests (no database required)
-PG_DAC_TEST_DSN="postgres://..." go test ./internal/engine   # + self-idempotence integration test
-```
 
 ## License
 

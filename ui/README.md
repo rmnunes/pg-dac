@@ -41,7 +41,7 @@ PostgreSQL binaries once (cached afterward), then stays warm for the session.
 
 ## Using the app
 
-1. Set **Target (--from)** and **Desired (--to)** — each is a connection string, a project
+1. Set **Source** (left, the desired state — the engine's `--to`) and **Target** (right, gets updated — `--from`) — each is a connection string, a project
    directory, a `.sql` file, or a `.pgdac` artifact (use 📁/📦 to browse). **Compare**.
 2. Review the **object tree** (grouped, virtualized, severity-badged). Uncheck objects to
    exclude them; the plan re-computes with your selection.
