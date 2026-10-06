@@ -29,7 +29,7 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 	fl.StringVar(&f.from, "from", "", "source: the current/target database (connection string)")
 	fl.StringVar(&f.to, "to", "", "desired state to converge the target toward (connection string)")
 	fl.StringArrayVar(&f.schemas, "schema", nil, "restrict to these schemas (repeatable; default: all user schemas)")
-	fl.IntVar(&f.targetMajor, "target-major", 0, "target PostgreSQL major version for version-gated strategies (0 = derive)")
+	fl.IntVar(&f.targetMajor, "target-major", 0, "target PostgreSQL major version for version-gated strategies and for normalizing project sources (0 = derive)")
 	fl.BoolVar(&f.noOnline, "no-online", false, "disable lock-safe rewrites (CONCURRENTLY, NOT VALID/VALIDATE)")
 	fl.BoolVar(&f.allowHaz, "allow-hazards", false, "include data-loss operations (otherwise they are blocked)")
 	fl.BoolVar(&f.dropObjects, "drop-objects-not-in-source", false, "drop objects present in the target but not in the source")
@@ -42,11 +42,12 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 // warnings to stderr. The "to" model is desired; "from" is the schema to be changed.
 func (f *commonFlags) resolveModels(cmd *cobra.Command) (from, to *model.Database, err error) {
 	ctx := cmd.Context()
-	from, fromWarns, err := source.Resolve(ctx, f.from, source.Options{Schemas: f.schemas})
+	srcOpts := source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor}
+	from, fromWarns, err := source.Resolve(ctx, f.from, srcOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("--from: %w", err)
 	}
-	to, toWarns, err := source.Resolve(ctx, f.to, source.Options{Schemas: f.schemas})
+	to, toWarns, err := source.Resolve(ctx, f.to, srcOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("--to: %w", err)
 	}

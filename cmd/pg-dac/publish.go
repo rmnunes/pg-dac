@@ -42,7 +42,7 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("introspect target: %w", err)
 			}
-			toModel, toWarns, err := source.Resolve(ctx, f.to, source.Options{Schemas: f.schemas})
+			toModel, toWarns, err := source.Resolve(ctx, f.to, source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor})
 			if err != nil {
 				return fmt.Errorf("--to: %w", err)
 			}

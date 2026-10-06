@@ -32,6 +32,7 @@ func newExtractCmd() *cobra.Command {
 func artifactWriteCmd(use, short string) *cobra.Command {
 	var from, out, name, version, toProject string
 	var schemas []string
+	var targetMajor int
 	var noSign bool
 
 	cmd := &cobra.Command{
@@ -42,7 +43,7 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 			if out == "" && toProject == "" {
 				return fmt.Errorf("specify --out <file.pgdac> or --to-project <dir>")
 			}
-			m, warns, err := source.Resolve(ctx, from, source.Options{Schemas: schemas})
+			m, warns, err := source.Resolve(ctx, from, source.Options{Schemas: schemas, TargetMajor: targetMajor})
 			if err != nil {
 				return fmt.Errorf("--from: %w", err)
 			}
@@ -91,6 +92,7 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 	fl.StringVar(&name, "name", "", "application name (default: the output filename)")
 	fl.StringVar(&version, "version", "1.0.0", "application version")
 	fl.StringArrayVar(&schemas, "schema", nil, "restrict to these schemas (repeatable)")
+	fl.IntVar(&targetMajor, "target-major", 0, "PostgreSQL major version used to normalize a project/.sql source (0 = the project's pgdac.yaml, else 16)")
 	fl.BoolVar(&noSign, "no-sign", false, "do not sign the artifact (integrity checksum only)")
 	fl.StringVar(&toProject, "to-project", "", "reverse-engineer the source into a declarative project directory instead of a .pgdac")
 	_ = cmd.MarkFlagRequired("from")

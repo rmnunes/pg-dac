@@ -24,6 +24,9 @@ type Options struct {
 	// Schemas restricts a live-database source to the named schemas (empty = all
 	// user schemas).
 	Schemas []string
+	// TargetMajor selects the scratch PostgreSQL major used to normalize a
+	// project/.sql source (0 = the project's manifest, else the library default).
+	TargetMajor int
 }
 
 // Resolve turns a source spec into a model and any unsupported-object warnings.
@@ -35,12 +38,11 @@ func Resolve(ctx context.Context, spec string, opts Options) (*model.Database, [
 	case IsConnString(spec):
 		return resolveDB(ctx, spec, opts)
 	case strings.HasSuffix(spec, ".pgdac"):
-		m, err := resolveArtifact(spec)
-		return m, nil, err
+		return resolveArtifact(spec)
 	}
 
 	if fi, err := os.Stat(spec); err == nil {
-		bopts := build.Options{Schemas: opts.Schemas}
+		bopts := build.Options{Schemas: opts.Schemas, TargetMajor: opts.TargetMajor}
 		if fi.IsDir() {
 			return build.FromDir(ctx, spec, bopts)
 		}
@@ -76,19 +78,28 @@ func IsConnString(s string) bool {
 }
 
 // resolveArtifact opens a .pgdac, rejecting it if its integrity check fails or
-// if it is signed but the signature does not verify.
-func resolveArtifact(path string) (*model.Database, error) {
+// if it is signed but the signature does not verify. An artifact written by an
+// older format version is accepted with a warning: its canonical form may differ
+// from a freshly introspected model (e.g. unqualified names), which shows up as
+// spurious differences until it is rebuilt.
+func resolveArtifact(path string) (*model.Database, []string, error) {
 	o, err := artifact.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !o.IntegrityOK {
-		return nil, fmt.Errorf("artifact %s failed its integrity check (corrupt or tampered)", path)
+		return nil, nil, fmt.Errorf("artifact %s failed its integrity check (corrupt or tampered)", path)
 	}
 	if o.Signed && !o.SignatureOK {
-		return nil, fmt.Errorf("artifact %s has an invalid signature", path)
+		return nil, nil, fmt.Errorf("artifact %s has an invalid signature", path)
 	}
-	return o.Model, nil
+	var warns []string
+	if o.Manifest.FormatVersion < artifact.FormatVersion {
+		warns = append(warns, fmt.Sprintf("artifact %s uses format version %d (current %d); its canonical "+
+			"definitions may differ in schema qualification — rebuild it to avoid spurious differences",
+			path, o.Manifest.FormatVersion, artifact.FormatVersion))
+	}
+	return o.Model, warns, nil
 }
 
 func resolveDB(ctx context.Context, spec string, opts Options) (*model.Database, []string, error) {

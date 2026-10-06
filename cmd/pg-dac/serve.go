@@ -224,8 +224,9 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		return false
 	}
 
+	srcOpts := source.Options{Schemas: req.Schemas, TargetMajor: req.TargetMajor}
 	send("phase", map[string]any{"step": "read-from", "message": "Reading Target…", "source": req.From})
-	from, fw, err := source.Resolve(ctx, req.From, source.Options{Schemas: req.Schemas})
+	from, fw, err := source.Resolve(ctx, req.From, srcOpts)
 	if err != nil {
 		if canceled() {
 			return
@@ -235,7 +236,7 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	send("phase", map[string]any{"step": "read-to", "message": "Reading Source…", "source": req.To, "fromCount": objectCount(from)})
-	to, tw, err := source.Resolve(ctx, req.To, source.Options{Schemas: req.Schemas})
+	to, tw, err := source.Resolve(ctx, req.To, srcOpts)
 	if err != nil {
 		if canceled() {
 			return
@@ -272,12 +273,13 @@ func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	from, fw, err := source.Resolve(d.ctx, req.From, source.Options{Schemas: req.Schemas})
+	srcOpts := source.Options{Schemas: req.Schemas, TargetMajor: req.TargetMajor}
+	from, fw, err := source.Resolve(d.ctx, req.From, srcOpts)
 	if err != nil {
 		badRequest(w, fmt.Errorf("from: %w", err))
 		return
 	}
-	to, tw, err := source.Resolve(d.ctx, req.To, source.Options{Schemas: req.Schemas})
+	to, tw, err := source.Resolve(d.ctx, req.To, srcOpts)
 	if err != nil {
 		badRequest(w, fmt.Errorf("to: %w", err))
 		return
@@ -328,7 +330,7 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": "introspect target: " + err.Error()})
 		return
 	}
-	toModel, warns, err := source.Resolve(d.ctx, req.To, source.Options{Schemas: req.Schemas})
+	toModel, warns, err := source.Resolve(d.ctx, req.To, source.Options{Schemas: req.Schemas, TargetMajor: req.TargetMajor})
 	if err != nil {
 		send("error", map[string]any{"message": "resolve source: " + err.Error()})
 		return

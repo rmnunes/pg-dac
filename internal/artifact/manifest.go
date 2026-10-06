@@ -66,4 +66,10 @@ type Signature struct {
 }
 
 // FormatVersion is the current .pgdac layout version.
-const FormatVersion = 1
+//
+//	1: initial layout.
+//	2: canonical definitions are fully schema-qualified (introspection pins an
+//	   empty search_path) and serial-backed sequences are modeled explicitly. A
+//	   v1 artifact still opens, but comparing it against a v2 model can report
+//	   qualification-only differences — rebuild it.
+const FormatVersion = 2
