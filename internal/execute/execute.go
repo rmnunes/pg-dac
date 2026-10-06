@@ -67,6 +67,9 @@ func Apply(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opts Opti
 
 // ApplyStream is Apply with a per-statement progress callback (for streaming UIs).
 func ApplyStream(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opts Options, onStmt Progress) (int, error) {
+	if err := prepareSession(ctx, conn); err != nil {
+		return 0, err
+	}
 	if opts.LockTimeout > 0 {
 		if _, err := conn.Exec(ctx, fmt.Sprintf("SET lock_timeout = %d", opts.LockTimeout.Milliseconds())); err != nil {
 			return 0, fmt.Errorf("set lock_timeout: %w", err)
@@ -120,9 +123,24 @@ func backoff(opts Options, attempt int) time.Duration {
 	return time.Duration(rand.Int63n(int64(max) + 1))
 }
 
+// prepareSession applies the session settings every pg-dac migration relies on
+// (mirrored by the preamble at the top of generated scripts). Function bodies
+// are not validated at CREATE time — as in pg_dump output — so a SQL-language
+// function created in the "before tables" band may reference a table created
+// later in the same migration.
+func prepareSession(ctx context.Context, conn Execer) error {
+	if _, err := conn.Exec(ctx, "SET check_function_bodies = false"); err != nil {
+		return fmt.Errorf("set check_function_bodies: %w", err)
+	}
+	return nil
+}
+
 // ApplyStatements runs each statement in its own autocommit command. It stops at
 // the first error and reports which statement failed.
 func ApplyStatements(ctx context.Context, e Execer, stmts []sqlgen.Statement) error {
+	if err := prepareSession(ctx, e); err != nil {
+		return err
+	}
 	for _, s := range stmts {
 		if _, err := e.Exec(ctx, s.SQL); err != nil {
 			return fmt.Errorf("statement failed: %s: %w", firstLine(s.SQL), err)

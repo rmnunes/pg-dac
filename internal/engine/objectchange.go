@@ -355,6 +355,20 @@ func dependsOnFor(db *model.Database, ref model.ObjRef) []string {
 				}
 			}
 		}
+	case model.KindFunction:
+		for _, f := range src.Functions {
+			if f.Ref().Key() == ref.Key() {
+				for _, d := range f.DependsOn {
+					add(d.Key())
+				}
+			}
+		}
+	case model.KindSequence:
+		for _, sq := range src.Sequences {
+			if sq.Name == ref.Name && sq.OwnedBy != nil {
+				add(model.ObjRef{Kind: model.KindTable, Schema: sq.OwnedBy.Schema, Name: sq.OwnedBy.Table}.Key())
+			}
+		}
 	}
 	return deps
 }

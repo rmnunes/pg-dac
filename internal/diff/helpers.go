@@ -198,3 +198,62 @@ func sequenceChanged(a, b *model.Sequence) bool {
 		a.Cache != b.Cache ||
 		a.Cycle != b.Cycle
 }
+
+// --- nil-safe collection accessors (a side may lack the schema entirely) ---
+
+func enumsOf(s *model.Schema) []*model.EnumType {
+	if s == nil {
+		return nil
+	}
+	return s.Enums
+}
+
+func collationsOf(s *model.Schema) []*model.Collation {
+	if s == nil {
+		return nil
+	}
+	return s.Collations
+}
+
+func sequencesOf(s *model.Schema) []*model.Sequence {
+	if s == nil {
+		return nil
+	}
+	return s.Sequences
+}
+
+func functionsOf(s *model.Schema) []*model.Function {
+	if s == nil {
+		return nil
+	}
+	return s.Functions
+}
+
+func tablesOf(s *model.Schema) []*model.Table {
+	if s == nil {
+		return nil
+	}
+	return s.Tables
+}
+
+func viewsOf(s *model.Schema) []*model.View {
+	if s == nil {
+		return nil
+	}
+	return s.Views
+}
+
+func matViewsOf(s *model.Schema) []*model.MaterializedView {
+	if s == nil {
+		return nil
+	}
+	return s.MatViews
+}
+
+// sameOwner compares two optional sequence owners.
+func sameOwner(a, b *model.ColumnRef) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}

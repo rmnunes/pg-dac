@@ -60,7 +60,7 @@ func ObjectScripts(db *model.Database) []ObjectScript {
 			emit("04-functions", f.Schema+"."+f.Signature(), objectCanonical(db, f.Ref()))
 		}
 		for _, sq := range s.Sequences {
-			if isIdentitySequence(db, sq) {
+			if db.IsIdentitySequence(sq) {
 				continue // created implicitly with its GENERATED ... AS IDENTITY column
 			}
 			emit("05-sequences", sq.Schema+"."+sq.Name, sequenceCreateSQL(db, sq))
@@ -222,31 +222,6 @@ func sequenceCreateSQL(db *model.Database, sq *model.Sequence) string {
 		parts = append(parts, s.SQL)
 	}
 	return strings.Join(parts, "\n")
-}
-
-// isIdentitySequence reports whether a sequence is the implicit sequence of a
-// GENERATED ... AS IDENTITY column (which must not be emitted standalone, since
-// the identity column re-creates it). Serial-backed sequences return false.
-func isIdentitySequence(db *model.Database, seq *model.Sequence) bool {
-	if seq.OwnedBy == nil {
-		return false
-	}
-	for _, s := range db.Schemas {
-		if s.Name != seq.OwnedBy.Schema {
-			continue
-		}
-		for _, t := range s.Tables {
-			if t.Name != seq.OwnedBy.Table {
-				continue
-			}
-			for _, c := range t.Columns {
-				if c.Name == seq.OwnedBy.Column {
-					return c.Identity != ""
-				}
-			}
-		}
-	}
-	return false
 }
 
 func sanitizeFilename(s string) string {

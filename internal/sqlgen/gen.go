@@ -114,6 +114,8 @@ func renderOp(op diff.Op, opts Options) ([]Statement, error) {
 		return one("DROP SEQUENCE "+op.Sequence.QualifiedName()+";", "", nil), nil
 	case diff.OpAlterSequence:
 		return one(renderAlterSequence(op.Sequence), "", nil), nil
+	case diff.OpSetSequenceOwner:
+		return one(renderSequenceOwner(op.Sequence), "", nil), nil
 
 	case diff.OpCreateTable:
 		return renderCreateTable(op.Table), nil
@@ -147,6 +149,12 @@ func renderOp(op diff.Op, opts Options) ([]Statement, error) {
 	case diff.OpDropConstraint:
 		return haz("ALTER TABLE "+op.Table.QualifiedName()+" DROP CONSTRAINT "+model.QuoteIdent(op.Constraint.Name)+";",
 			"", safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table")), nil
+	case diff.OpValidateConstraint:
+		return []Statement{{
+			SQL:           "ALTER TABLE " + op.Table.QualifiedName() + " VALIDATE CONSTRAINT " + model.QuoteIdent(op.Constraint.Name) + ";",
+			Transactional: true,
+			Note:          "validate the existing NOT VALID constraint (SHARE UPDATE EXCLUSIVE — does not block writes)",
+		}}, nil
 
 	case diff.OpCreateIndex:
 		return renderCreateIndex(op, opts), nil

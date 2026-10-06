@@ -112,6 +112,10 @@ func opPriority(op diff.Op) int {
 		return 147
 	case diff.OpSetColumnNotNull, diff.OpDropColumnNotNull:
 		return 148
+	case diff.OpSetSequenceOwner:
+		// OWNED BY needs both the sequence (130) and the owning table/column
+		// (140/145) to exist.
+		return 149
 	case diff.OpAddConstraint:
 		// Foreign keys go in a later band than other constraints so they land
 		// after every referenced table and its primary/unique keys exist.

@@ -23,7 +23,10 @@ func (r *Result) Script(allowHazards bool) string {
 		return b.String()
 	}
 	b.WriteString("-- NOTE: statements are emitted in dependency order; run with autocommit\n")
-	b.WriteString("--       (CONCURRENTLY statements must not run inside a transaction).\n\n")
+	b.WriteString("--       (CONCURRENTLY statements must not run inside a transaction).\n")
+	b.WriteString("-- Function bodies are not validated at CREATE time (as in pg_dump output), so a\n")
+	b.WriteString("-- SQL-language function may reference objects created later in this script.\n")
+	b.WriteString(SessionPreamble + "\n\n")
 
 	for _, s := range r.Statements {
 		if s.Note != "" {
@@ -48,6 +51,13 @@ func (r *Result) Script(allowHazards bool) string {
 	}
 	return b.String()
 }
+
+// SessionPreamble is the session setting every pg-dac migration relies on. It is
+// emitted at the top of scripts and set by the executor before applying: with
+// check_function_bodies off, PostgreSQL does not resolve a SQL-language function
+// body's references at CREATE time, so functions can be created in the
+// "before tables" band even when their bodies query those tables.
+const SessionPreamble = "SET check_function_bodies = false;"
 
 // HasDataLoss reports whether the migration contains any data-loss hazard.
 func (r *Result) HasDataLoss() bool {

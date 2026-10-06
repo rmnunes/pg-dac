@@ -8,6 +8,12 @@ import "github.com/rodrigonunes/pg-dac/internal/model"
 // Drops for objects present in "from" but absent from "to" are always emitted
 // here; whether they are actually applied is governed by deploy options
 // (DropObjectsNotInSource etc.) applied downstream, not by the differ.
+//
+// The walk is deterministic: every collection is visited in model order (the
+// model sorts its collections by name; columns stay in attnum order) and never
+// by ranging over a Go map. The planner uses discovery order as its tie-breaker
+// within a priority band, so a non-deterministic walk here would make scripts —
+// and the artifact's canonical SQL, hence its Merkle root — differ run to run.
 func Diff(from, to *model.Database) *ChangeSet {
 	cs := &ChangeSet{}
 
@@ -17,13 +23,13 @@ func Diff(from, to *model.Database) *ChangeSet {
 	fromSchemas := indexSchemas(from)
 	toSchemas := indexSchemas(to)
 
-	// Per-schema object diffing. Iterate the union of schema names.
+	// Per-schema object diffing. Iterate the sorted union of schema names.
 	for _, name := range unionKeys(fromSchemas, toSchemas) {
 		fs := fromSchemas[name]
 		ts := toSchemas[name]
 		diffEnums(cs, fs, ts)
 		diffCollations(cs, fs, ts)
-		diffSequences(cs, fs, ts)
+		diffSequences(cs, from, to, fs, ts)
 		diffFunctions(cs, fs, ts)
 		diffTables(cs, fs, ts)
 		diffViews(cs, fs, ts)
@@ -35,15 +41,15 @@ func Diff(from, to *model.Database) *ChangeSet {
 func diffFunctions(cs *ChangeSet, from, to *model.Schema) {
 	fromF := indexFunctions(from)
 	toF := indexFunctions(to)
-	for sig, f := range toF {
-		prev, ok := fromF[sig]
+	for _, f := range functionsOf(to) {
+		prev, ok := fromF[f.Signature()]
 		if !ok || prev.Definition != f.Definition {
 			// CREATE OR REPLACE covers both create and body change.
 			cs.add(Op{Type: OpCreateFunction, Owner: f.Ref(), Sub: f.IdentityArgs, Function: f})
 		}
 	}
-	for sig, f := range fromF {
-		if _, ok := toF[sig]; !ok {
+	for _, f := range functionsOf(from) {
+		if _, ok := toF[f.Signature()]; !ok {
 			cs.add(Op{Type: OpDropFunction, Owner: f.Ref(), Sub: f.IdentityArgs, Function: f})
 		}
 	}
@@ -78,13 +84,13 @@ func diffExtensions(cs *ChangeSet, from, to *model.Database) {
 func diffSchemas(cs *ChangeSet, from, to *model.Database) {
 	fromS := indexSchemas(from)
 	toS := indexSchemas(to)
-	for name, s := range toS {
-		if _, ok := fromS[name]; !ok {
+	for _, s := range to.Schemas {
+		if _, ok := fromS[s.Name]; !ok {
 			cs.add(Op{Type: OpCreateSchema, Owner: schemaRef(s), Schema: s})
 		}
 	}
-	for name, s := range fromS {
-		if _, ok := toS[name]; !ok {
+	for _, s := range from.Schemas {
+		if _, ok := toS[s.Name]; !ok {
 			cs.add(Op{Type: OpDropSchema, Owner: schemaRef(s), Schema: s})
 		}
 	}
@@ -93,8 +99,8 @@ func diffSchemas(cs *ChangeSet, from, to *model.Database) {
 func diffEnums(cs *ChangeSet, from, to *model.Schema) {
 	fromE := indexEnums(from)
 	toE := indexEnums(to)
-	for name, e := range toE {
-		prev, ok := fromE[name]
+	for _, e := range enumsOf(to) {
+		prev, ok := fromE[e.Name]
 		if !ok {
 			cs.add(Op{Type: OpCreateEnum, Owner: e.Ref(), Enum: e})
 			continue
@@ -103,8 +109,8 @@ func diffEnums(cs *ChangeSet, from, to *model.Schema) {
 			cs.add(Op{Type: OpAddEnumValue, Owner: e.Ref(), Enum: e, EnumValues: added})
 		}
 	}
-	for name, e := range fromE {
-		if _, ok := toE[name]; !ok {
+	for _, e := range enumsOf(from) {
+		if _, ok := toE[e.Name]; !ok {
 			cs.add(Op{Type: OpDropEnum, Owner: e.Ref(), Enum: e})
 		}
 	}
@@ -113,8 +119,8 @@ func diffEnums(cs *ChangeSet, from, to *model.Schema) {
 func diffCollations(cs *ChangeSet, from, to *model.Schema) {
 	fromC := indexCollations(from)
 	toC := indexCollations(to)
-	for name, c := range toC {
-		prev, ok := fromC[name]
+	for _, c := range collationsOf(to) {
+		prev, ok := fromC[c.Name]
 		if !ok {
 			cs.add(Op{Type: OpCreateCollation, Owner: c.Ref(), Collation: c})
 			continue
@@ -125,44 +131,62 @@ func diffCollations(cs *ChangeSet, from, to *model.Schema) {
 			cs.add(Op{Type: OpCreateCollation, Owner: c.Ref(), Collation: c})
 		}
 	}
-	for name, c := range fromC {
-		if _, ok := toC[name]; !ok {
+	for _, c := range collationsOf(from) {
+		if _, ok := toC[c.Name]; !ok {
 			cs.add(Op{Type: OpDropCollation, Owner: c.Ref(), Collation: c})
 		}
 	}
 }
 
-func diffSequences(cs *ChangeSet, from, to *model.Schema) {
+// diffSequences handles standalone and serial-backed sequences. Identity
+// columns' implicit sequences are skipped on both sides (PostgreSQL creates and
+// drops them with the column). A serial-backed sequence is explicit: it must be
+// created before the table whose DEFAULT calls nextval on it, and attached with
+// OWNED BY once the table exists — so a new owned sequence yields two ops.
+func diffSequences(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Schema) {
 	fromSeq := indexSequences(from)
 	toSeq := indexSequences(to)
-	for name, s := range toSeq {
-		if s.IsOwned() {
-			continue // created implicitly with its owning identity/serial column
+	for _, s := range sequencesOf(to) {
+		if toDB.IsIdentitySequence(s) {
+			continue // created implicitly with its GENERATED ... AS IDENTITY column
 		}
-		prev, ok := fromSeq[name]
-		if !ok {
+		prev, ok := fromSeq[s.Name]
+		if !ok || fromDB.IsIdentitySequence(prev) {
 			cs.add(Op{Type: OpCreateSequence, Owner: s.Ref(), Sequence: s})
+			if s.OwnedBy != nil {
+				cs.add(Op{Type: OpSetSequenceOwner, Owner: s.Ref(), Sequence: s})
+			}
 			continue
 		}
 		if sequenceChanged(prev, s) {
 			cs.add(Op{Type: OpAlterSequence, Owner: s.Ref(), Sequence: s, PrevSeq: prev})
 		}
+		if !sameOwner(prev.OwnedBy, s.OwnedBy) {
+			cs.add(Op{Type: OpSetSequenceOwner, Owner: s.Ref(), Sequence: s, PrevSeq: prev})
+		}
 	}
-	for name, s := range fromSeq {
-		if s.IsOwned() {
+	for _, s := range sequencesOf(from) {
+		if fromDB.IsIdentitySequence(s) {
 			continue
 		}
-		if _, ok := toSeq[name]; !ok {
-			cs.add(Op{Type: OpDropSequence, Owner: s.Ref(), Sequence: s})
+		if cur, ok := toSeq[s.Name]; ok && !toDB.IsIdentitySequence(cur) {
+			continue // present on both sides; handled above
 		}
+		// Gone from the desired state (or turned into an implicit identity
+		// sequence there). If its owning column is itself going away, PostgreSQL
+		// drops the owned sequence with the column — an explicit DROP would fail.
+		if s.OwnedBy != nil && !toDB.HasColumn(*s.OwnedBy) {
+			continue
+		}
+		cs.add(Op{Type: OpDropSequence, Owner: s.Ref(), Sequence: s})
 	}
 }
 
 func diffTables(cs *ChangeSet, from, to *model.Schema) {
 	fromT := indexTables(from)
 	toT := indexTables(to)
-	for name, t := range toT {
-		prev, ok := fromT[name]
+	for _, t := range tablesOf(to) {
+		prev, ok := fromT[t.Name]
 		if !ok {
 			// New table: emit the table (columns only) plus its constraints and
 			// indexes as separate ops so the planner can order FKs after all
@@ -192,8 +216,8 @@ func diffTables(cs *ChangeSet, from, to *model.Schema) {
 		diffTablePolicies(cs, prev, t)
 		diffTableRLS(cs, prev, t)
 	}
-	for name, t := range fromT {
-		if _, ok := toT[name]; !ok {
+	for _, t := range tablesOf(from) {
+		if _, ok := toT[t.Name]; !ok {
 			cs.add(Op{Type: OpDropTable, Owner: t.Ref(), Table: t})
 		}
 	}
@@ -245,21 +269,26 @@ func diffColumn(cs *ChangeSet, t *model.Table, prev, cur *model.Column) {
 func diffTableConstraints(cs *ChangeSet, from, to *model.Table) {
 	fromCon := indexConstraints(from)
 	toCon := indexConstraints(to)
-	for name, con := range toCon {
-		prev, ok := fromCon[name]
+	for _, con := range to.Constraints {
+		prev, ok := fromCon[con.Name]
 		if !ok {
-			cs.add(Op{Type: OpAddConstraint, Owner: to.Ref(), Sub: name, Table: to, Constraint: con})
+			cs.add(Op{Type: OpAddConstraint, Owner: to.Ref(), Sub: con.Name, Table: to, Constraint: con})
 			continue
 		}
 		if prev.Definition != con.Definition {
 			// Constraints are not alterable in place: drop then re-add.
-			cs.add(Op{Type: OpDropConstraint, Owner: to.Ref(), Sub: name, Table: to, Constraint: prev})
-			cs.add(Op{Type: OpAddConstraint, Owner: to.Ref(), Sub: name, Table: to, Constraint: con})
+			cs.add(Op{Type: OpDropConstraint, Owner: to.Ref(), Sub: con.Name, Table: to, Constraint: prev})
+			cs.add(Op{Type: OpAddConstraint, Owner: to.Ref(), Sub: con.Name, Table: to, Constraint: con})
+			continue
+		}
+		if !prev.Validated && con.Validated {
+			// Same body, but the target still holds it NOT VALID: validate in place.
+			cs.add(Op{Type: OpValidateConstraint, Owner: to.Ref(), Sub: con.Name, Table: to, Constraint: con})
 		}
 	}
-	for name, con := range fromCon {
-		if _, ok := toCon[name]; !ok {
-			cs.add(Op{Type: OpDropConstraint, Owner: to.Ref(), Sub: name, Table: to, Constraint: con})
+	for _, con := range from.Constraints {
+		if _, ok := toCon[con.Name]; !ok {
+			cs.add(Op{Type: OpDropConstraint, Owner: to.Ref(), Sub: con.Name, Table: to, Constraint: con})
 		}
 	}
 }
@@ -267,20 +296,20 @@ func diffTableConstraints(cs *ChangeSet, from, to *model.Table) {
 func diffTableIndexes(cs *ChangeSet, from, to *model.Table) {
 	fromIdx := indexIndexes(from)
 	toIdx := indexIndexes(to)
-	for name, idx := range toIdx {
-		prev, ok := fromIdx[name]
+	for _, idx := range to.Indexes {
+		prev, ok := fromIdx[idx.Name]
 		if !ok {
-			cs.add(Op{Type: OpCreateIndex, Owner: to.Ref(), Sub: name, Table: to, Index: idx})
+			cs.add(Op{Type: OpCreateIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: idx})
 			continue
 		}
 		if prev.Definition != idx.Definition {
-			cs.add(Op{Type: OpDropIndex, Owner: to.Ref(), Sub: name, Table: to, Index: prev})
-			cs.add(Op{Type: OpCreateIndex, Owner: to.Ref(), Sub: name, Table: to, Index: idx})
+			cs.add(Op{Type: OpDropIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: prev})
+			cs.add(Op{Type: OpCreateIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: idx})
 		}
 	}
-	for name, idx := range fromIdx {
-		if _, ok := toIdx[name]; !ok {
-			cs.add(Op{Type: OpDropIndex, Owner: to.Ref(), Sub: name, Table: to, Index: idx})
+	for _, idx := range from.Indexes {
+		if _, ok := toIdx[idx.Name]; !ok {
+			cs.add(Op{Type: OpDropIndex, Owner: to.Ref(), Sub: idx.Name, Table: to, Index: idx})
 		}
 	}
 }
@@ -288,21 +317,21 @@ func diffTableIndexes(cs *ChangeSet, from, to *model.Table) {
 func diffTableTriggers(cs *ChangeSet, from, to *model.Table) {
 	fromT := indexTriggers(from)
 	toT := indexTriggers(to)
-	for name, tr := range toT {
-		prev, ok := fromT[name]
+	for _, tr := range to.Triggers {
+		prev, ok := fromT[tr.Name]
 		if !ok {
-			cs.add(Op{Type: OpCreateTrigger, Owner: to.Ref(), Sub: name, Table: to, Trigger: tr})
+			cs.add(Op{Type: OpCreateTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: tr})
 			continue
 		}
 		if prev.Definition != tr.Definition {
 			// Triggers are recreated on change (CREATE OR REPLACE TRIGGER is PG14+).
-			cs.add(Op{Type: OpDropTrigger, Owner: to.Ref(), Sub: name, Table: to, Trigger: prev})
-			cs.add(Op{Type: OpCreateTrigger, Owner: to.Ref(), Sub: name, Table: to, Trigger: tr})
+			cs.add(Op{Type: OpDropTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: prev})
+			cs.add(Op{Type: OpCreateTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: tr})
 		}
 	}
-	for name, tr := range fromT {
-		if _, ok := toT[name]; !ok {
-			cs.add(Op{Type: OpDropTrigger, Owner: to.Ref(), Sub: name, Table: to, Trigger: tr})
+	for _, tr := range from.Triggers {
+		if _, ok := toT[tr.Name]; !ok {
+			cs.add(Op{Type: OpDropTrigger, Owner: to.Ref(), Sub: tr.Name, Table: to, Trigger: tr})
 		}
 	}
 }
@@ -310,20 +339,20 @@ func diffTableTriggers(cs *ChangeSet, from, to *model.Table) {
 func diffTablePolicies(cs *ChangeSet, from, to *model.Table) {
 	fromP := indexPolicies(from)
 	toP := indexPolicies(to)
-	for name, pol := range toP {
-		prev, ok := fromP[name]
+	for _, pol := range to.Policies {
+		prev, ok := fromP[pol.Name]
 		if !ok {
-			cs.add(Op{Type: OpCreatePolicy, Owner: to.Ref(), Sub: name, Table: to, Policy: pol})
+			cs.add(Op{Type: OpCreatePolicy, Owner: to.Ref(), Sub: pol.Name, Table: to, Policy: pol})
 			continue
 		}
 		if policyChanged(prev, pol) {
-			cs.add(Op{Type: OpDropPolicy, Owner: to.Ref(), Sub: name, Table: to, Policy: prev})
-			cs.add(Op{Type: OpCreatePolicy, Owner: to.Ref(), Sub: name, Table: to, Policy: pol})
+			cs.add(Op{Type: OpDropPolicy, Owner: to.Ref(), Sub: pol.Name, Table: to, Policy: prev})
+			cs.add(Op{Type: OpCreatePolicy, Owner: to.Ref(), Sub: pol.Name, Table: to, Policy: pol})
 		}
 	}
-	for name, pol := range fromP {
-		if _, ok := toP[name]; !ok {
-			cs.add(Op{Type: OpDropPolicy, Owner: to.Ref(), Sub: name, Table: to, Policy: pol})
+	for _, pol := range from.Policies {
+		if _, ok := toP[pol.Name]; !ok {
+			cs.add(Op{Type: OpDropPolicy, Owner: to.Ref(), Sub: pol.Name, Table: to, Policy: pol})
 		}
 	}
 }
@@ -341,15 +370,15 @@ func diffTableRLS(cs *ChangeSet, from, to *model.Table) {
 func diffViews(cs *ChangeSet, from, to *model.Schema) {
 	fromV := indexViews(from)
 	toV := indexViews(to)
-	for name, v := range toV {
-		prev, ok := fromV[name]
+	for _, v := range viewsOf(to) {
+		prev, ok := fromV[v.Name]
 		if !ok || prev.Definition != v.Definition || prev.CheckOption != v.CheckOption {
 			// CREATE OR REPLACE handles both create and compatible body changes.
 			cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v})
 		}
 	}
-	for name, v := range fromV {
-		if _, ok := toV[name]; !ok {
+	for _, v := range viewsOf(from) {
+		if _, ok := toV[v.Name]; !ok {
 			cs.add(Op{Type: OpDropView, Owner: v.Ref(), View: v})
 		}
 	}
@@ -358,8 +387,8 @@ func diffViews(cs *ChangeSet, from, to *model.Schema) {
 func diffMatViews(cs *ChangeSet, from, to *model.Schema) {
 	fromM := indexMatViews(from)
 	toM := indexMatViews(to)
-	for name, m := range toM {
-		prev, ok := fromM[name]
+	for _, m := range matViewsOf(to) {
+		prev, ok := fromM[m.Name]
 		if !ok {
 			cs.add(Op{Type: OpCreateMatView, Owner: m.Ref(), MatView: m})
 			continue
@@ -370,8 +399,8 @@ func diffMatViews(cs *ChangeSet, from, to *model.Schema) {
 			cs.add(Op{Type: OpCreateMatView, Owner: m.Ref(), MatView: m})
 		}
 	}
-	for name, m := range fromM {
-		if _, ok := toM[name]; !ok {
+	for _, m := range matViewsOf(from) {
+		if _, ok := toM[m.Name]; !ok {
 			cs.add(Op{Type: OpDropMatView, Owner: m.Ref(), MatView: m})
 		}
 	}

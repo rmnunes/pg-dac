@@ -28,9 +28,10 @@ const (
 	OpCreateCollation OpType = "createCollation"
 	OpDropCollation   OpType = "dropCollation"
 
-	OpCreateSequence OpType = "createSequence"
-	OpDropSequence   OpType = "dropSequence"
-	OpAlterSequence  OpType = "alterSequence"
+	OpCreateSequence   OpType = "createSequence"
+	OpDropSequence     OpType = "dropSequence"
+	OpAlterSequence    OpType = "alterSequence"
+	OpSetSequenceOwner OpType = "alterSequenceOwnedBy" // ALTER SEQUENCE ... OWNED BY (after the owning table exists)
 
 	OpCreateTable OpType = "createTable"
 	OpDropTable   OpType = "dropTable"

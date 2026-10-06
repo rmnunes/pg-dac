@@ -31,7 +31,7 @@ func buildDesired() *model.Database {
 			{
 				Name: "orders_user_fk", Type: model.ConstraintForeignKey,
 				Definition: `FOREIGN KEY ("user_id") REFERENCES "app"."users" ("id")`,
-				Columns:    []string{"user_id"}, RefSchema: "app", RefTable: "users", RefColumns: []string{"id"},
+				Columns:    []string{"user_id"}, RefSchema: "app", RefTable: "users", RefColumns: []string{"id"}, Validated: true,
 			},
 		},
 		Indexes: []*model.Index{

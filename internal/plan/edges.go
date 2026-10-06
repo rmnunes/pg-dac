@@ -7,25 +7,38 @@ import (
 
 // deriveEdges builds the "must come before" edges between operations. Edges
 // refine the coarse priority bands for cases where two operations share a band
-// or where a real dependency must be respected within a band (view-on-view,
+// or where a real dependency must be respected across bands: view-on-view,
 // foreign keys to tables created in the same migration, sub-objects of a newly
-// created table). edges[a] = nodes that must come after a.
+// created table, a function whose signature uses a row type created later, a
+// trigger or view that calls such a function, and a serial sequence's OWNED BY
+// that needs its table. edges[a] = nodes that must come after a.
 func deriveEdges(ops []diff.Op) map[int][]int {
 	edges := map[int][]int{}
 
-	// Index object-create ops by their object key, and PK/unique constraint adds
-	// by the table they belong to, and drop ops by object key.
+	// Index object creates/drops by object key, PK/unique constraint adds by
+	// table, and column-level ops by (table, column).
 	createByObj := map[string]int{}
 	dropByObj := map[string]int{}
 	pkUniqueAddByTable := map[string][]int{}
+	addColumnByCol := map[string]int{}
+	defaultOpsByCol := map[string][]int{}
+	colKey := func(table model.ObjRef, col string) string { return table.Key() + "#" + col }
+
 	for i, op := range ops {
 		switch op.Type {
-		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView,
-			diff.OpCreateEnum, diff.OpCreateSequence, diff.OpCreateSchema, diff.OpCreateExtension:
+		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateEnum,
+			diff.OpCreateCollation, diff.OpCreateSequence, diff.OpCreateFunction,
+			diff.OpCreateSchema, diff.OpCreateExtension:
 			createByObj[op.Owner.Key()] = i
-		case diff.OpDropTable, diff.OpDropView, diff.OpDropMatView,
-			diff.OpDropEnum, diff.OpDropSequence, diff.OpDropSchema, diff.OpDropExtension:
+		case diff.OpDropTable, diff.OpDropView, diff.OpDropMatView, diff.OpDropEnum,
+			diff.OpDropCollation, diff.OpDropSequence, diff.OpDropFunction,
+			diff.OpDropSchema, diff.OpDropExtension:
 			dropByObj[op.Owner.Key()] = i
+		case diff.OpAddColumn:
+			addColumnByCol[colKey(op.Owner, op.Sub)] = i
+		case diff.OpSetColumnDefault, diff.OpDropColumnDefault, diff.OpAlterColumnIdentity:
+			k := colKey(op.Owner, op.Sub)
+			defaultOpsByCol[k] = append(defaultOpsByCol[k], i)
 		}
 		if op.Type == diff.OpAddConstraint && op.Constraint != nil &&
 			(op.Constraint.Type == model.ConstraintPrimaryKey || op.Constraint.Type == model.ConstraintUnique) {
@@ -39,16 +52,42 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 			edges[a] = append(edges[a], b)
 		}
 	}
+	// afterCreates adds "create dep -> i" for every dependency being created here.
+	afterCreates := func(i int, deps []model.ObjRef) {
+		for _, dep := range deps {
+			if c, ok := createByObj[dep.Key()]; ok {
+				add(c, i)
+			}
+		}
+	}
+	// beforeDrops adds "i -> drop dep" so a dependent is dropped before its dependency.
+	beforeDrops := func(i int, deps []model.ObjRef) {
+		for _, dep := range deps {
+			if d, ok := dropByObj[dep.Key()]; ok {
+				add(i, d)
+			}
+		}
+	}
 
 	for i, op := range ops {
 		switch op.Type {
 		case diff.OpAddColumn, diff.OpAlterColumnType, diff.OpSetColumnDefault,
 			diff.OpDropColumnDefault, diff.OpSetColumnNotNull, diff.OpDropColumnNotNull,
-			diff.OpCreateIndex, diff.OpCreateTrigger, diff.OpCreatePolicy, diff.OpEnableRLS:
+			diff.OpAlterColumnIdentity, diff.OpCreateIndex, diff.OpCreatePolicy, diff.OpEnableRLS,
+			diff.OpValidateConstraint:
 			// Sub-object operations must follow their owning table's creation.
 			if c, ok := createByObj[op.Owner.Key()]; ok {
 				add(c, i)
 			}
+
+		case diff.OpCreateTrigger:
+			if c, ok := createByObj[op.Owner.Key()]; ok {
+				add(c, i)
+			}
+			afterCreates(i, dependsOn(op)) // ...and after the function it executes
+
+		case diff.OpDropTrigger:
+			beforeDrops(i, dependsOn(op)) // before the function it executes is dropped
 
 		case diff.OpAddConstraint:
 			// Constraint must follow its own table's creation.
@@ -67,22 +106,14 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 				}
 			}
 
-		case diff.OpCreateView, diff.OpCreateMatView:
-			// Views/matviews must follow creation of everything they reference.
-			for _, dep := range dependsOn(op) {
-				if c, ok := createByObj[dep.Key()]; ok {
-					add(c, i)
-				}
-			}
+		case diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateFunction:
+			// Must follow creation of everything referenced (relations, enums,
+			// functions — including a function's return/argument row types).
+			afterCreates(i, dependsOn(op))
 
-		case diff.OpDropView, diff.OpDropMatView:
-			// A dropped view must be dropped before any object it depends on that
-			// is also being dropped (dependents first).
-			for _, dep := range dependsOn(op) {
-				if d, ok := dropByObj[dep.Key()]; ok {
-					add(i, d)
-				}
-			}
+		case diff.OpDropView, diff.OpDropMatView, diff.OpDropFunction:
+			// Dependents first: drop before any dependency that is also dropped.
+			beforeDrops(i, dependsOn(op))
 
 		case diff.OpDropConstraint:
 			// A dropped foreign key must be dropped before the referenced table
@@ -93,18 +124,49 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 					add(i, d)
 				}
 			}
+
+		case diff.OpSetSequenceOwner:
+			// OWNED BY needs the sequence and the owning table/column to exist.
+			if c, ok := createByObj[op.Owner.Key()]; ok {
+				add(c, i)
+			}
+			if op.Sequence != nil && op.Sequence.OwnedBy != nil {
+				tbl := model.ObjRef{Kind: model.KindTable, Schema: op.Sequence.OwnedBy.Schema, Name: op.Sequence.OwnedBy.Table}
+				if c, ok := createByObj[tbl.Key()]; ok {
+					add(c, i)
+				}
+				if ac, ok := addColumnByCol[colKey(tbl, op.Sequence.OwnedBy.Column)]; ok {
+					add(ac, i)
+				}
+			}
+
+		case diff.OpDropSequence:
+			// A sequence still owned by a surviving column can only go once that
+			// column no longer defaults to it (serial -> identity, default change):
+			// run after the column's default/identity ops even though drops
+			// normally precede alters.
+			if op.Sequence != nil && op.Sequence.OwnedBy != nil {
+				tbl := model.ObjRef{Kind: model.KindTable, Schema: op.Sequence.OwnedBy.Schema, Name: op.Sequence.OwnedBy.Table}
+				for _, c := range defaultOpsByCol[colKey(tbl, op.Sequence.OwnedBy.Column)] {
+					add(c, i)
+				}
+			}
 		}
 	}
 	return edges
 }
 
-// dependsOn returns the dependency references carried by a view/matview op.
+// dependsOn returns the dependency references carried by an op's payload.
 func dependsOn(op diff.Op) []model.ObjRef {
 	switch {
 	case op.View != nil:
 		return op.View.DependsOn
 	case op.MatView != nil:
 		return op.MatView.DependsOn
+	case op.Function != nil:
+		return op.Function.DependsOn
+	case op.Trigger != nil:
+		return op.Trigger.DependsOn
 	}
 	return nil
 }

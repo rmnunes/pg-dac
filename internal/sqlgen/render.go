@@ -164,6 +164,15 @@ func renderAddConstraint(op diff.Op, opts Options) []Statement {
 
 	switch con.Type {
 	case model.ConstraintForeignKey, model.ConstraintCheck:
+		if !con.Validated {
+			// The desired state itself keeps the constraint unvalidated.
+			return []Statement{{
+				SQL:           base + " NOT VALID;",
+				Transactional: true,
+				Note:          "the source holds this constraint NOT VALID; it is added unvalidated and not validated",
+				Hazards:       []safety.Hazard{safety.New(safety.ShareRowExclusiveLock, "brief lock to add the constraint (no scan)")},
+			}}
+		}
 		if opts.Online {
 			lock := safety.ShareRowExclusiveLock
 			if con.Type == model.ConstraintCheck {
@@ -287,6 +296,16 @@ func renderAlterSequence(s *model.Sequence) string {
 		b.WriteString(" NO CYCLE")
 	}
 	return b.String() + ";"
+}
+
+// renderSequenceOwner attaches (or detaches) a sequence to the column that
+// owns it, so the sequence is dropped with the column like a serial's.
+func renderSequenceOwner(s *model.Sequence) string {
+	if s.OwnedBy == nil {
+		return "ALTER SEQUENCE " + s.QualifiedName() + " OWNED BY NONE;"
+	}
+	return "ALTER SEQUENCE " + s.QualifiedName() + " OWNED BY " +
+		model.QualifiedName(s.OwnedBy.Schema, s.OwnedBy.Table) + "." + model.QuoteIdent(s.OwnedBy.Column) + ";"
 }
 
 func concurrentIndexDef(def string) string {
