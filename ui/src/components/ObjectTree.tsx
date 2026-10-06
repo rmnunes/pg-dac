@@ -9,7 +9,11 @@ const sevClass = (sev?: Severity) =>
   sev === "error" ? "sev-error" : sev === "warning" ? "sev-warn" : "";
 
 export function ObjectTree() {
-  const { plan, excluded, selectedId, select, toggleExclude } = useStore();
+  const { plan, excluded, autoExcluded, selectedId, select, toggleExclude } = useStore();
+  const nameOf = (id: string) => {
+    const c = plan?.changes.find((x) => x.id === id);
+    return c ? `${c.objectType} ${c.schema ? c.schema + "." : ""}${c.name}` : id;
+  };
   const [hazardsOnly, setHazardsOnly] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -35,7 +39,11 @@ export function ObjectTree() {
   return (
     <div className="tree">
       <div className="tree-toolbar">
-        <span>{changes.length} change(s){excluded.size > 0 ? ` · ${excluded.size} excluded` : ""}</span>
+        <span>
+          {changes.length} change(s)
+          {excluded.size + autoExcluded.size > 0 ? ` · ${excluded.size + autoExcluded.size} excluded` : ""}
+          {autoExcluded.size > 0 ? ` (${autoExcluded.size} by dependency)` : ""}
+        </span>
         <label>
           <input type="checkbox" checked={hazardsOnly} onChange={(e) => setHazardsOnly(e.target.checked)} /> hazards only
         </label>
@@ -44,16 +52,20 @@ export function ObjectTree() {
         <div style={{ height: rv.getTotalSize(), position: "relative", width: "100%" }}>
           {rv.getVirtualItems().map((vi) => {
             const c = changes[vi.index];
+            const gatedBy = autoExcluded.get(c.id);
+            const isExcluded = excluded.has(c.id) || gatedBy !== undefined;
             return (
               <div
                 key={c.id}
-                className={"tree-row" + (c.id === selectedId ? " selected" : "") + (excluded.has(c.id) ? " excluded" : "")}
+                className={"tree-row" + (c.id === selectedId ? " selected" : "") + (isExcluded ? " excluded" : "")}
                 style={{ position: "absolute", top: 0, left: 0, right: 0, height: vi.size, transform: `translateY(${vi.start}px)` }}
                 onClick={() => select(c.id)}
+                title={gatedBy ? `Excluded because it depends on ${nameOf(gatedBy)}, which is excluded` : undefined}
               >
                 <input
                   type="checkbox"
-                  checked={!excluded.has(c.id)}
+                  checked={!isExcluded}
+                  disabled={gatedBy !== undefined}
                   onClick={(e) => e.stopPropagation()}
                   onChange={() => toggleExclude(c.id)}
                 />

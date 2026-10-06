@@ -22,6 +22,9 @@ export function SourceBar() {
           <label>Target PG major <input value={s.targetMajor} onChange={(e) => s.set({ targetMajor: e.target.value })} placeholder="16" /></label>
           <label><input type="checkbox" checked={s.online} onChange={(e) => s.set({ online: e.target.checked })} /> Online (lock-safe)</label>
           <label className="danger"><input type="checkbox" checked={s.dropObjects} onChange={(e) => s.set({ dropObjects: e.target.checked })} /> Drop objects not in source</label>
+          <label>Require signer key <input value={s.requireKey} onChange={(e) => s.set({ requireKey: e.target.value })} placeholder="fingerprint of a .pgdac signer" /></label>
+          <label><input type="checkbox" checked={s.skipDeployScripts} onChange={(e) => s.set({ skipDeployScripts: e.target.checked })} /> Skip pre/post-deploy scripts</label>
+          <label className="danger"><input type="checkbox" checked={s.allowDrift} onChange={(e) => s.set({ allowDrift: e.target.checked })} /> Allow drift (publish even if the Target changed outside pg-dac)</label>
         </div>
       </details>
 

@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Tag matches the pinned version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pin.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pin
+        run: |
+          PIN=$(tr -d ' \n\r' < ui/PGDAC_VERSION)
+          TAG=${GITHUB_REF_NAME#v}
+          if [ "$PIN" != "$TAG" ]; then
+            echo "tag v$TAG does not match ui/PGDAC_VERSION ($PIN)"; exit 1
+          fi
+          echo "version=$PIN" >> "$GITHUB_OUTPUT"
+
+  cli:
+    name: CLI / sidecar (${{ matrix.triple }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            triple: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            triple: aarch64-unknown-linux-gnu
+            ext: ""
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            triple: x86_64-pc-windows-msvc
+            ext: ".exe"
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            triple: aarch64-apple-darwin
+            ext: ""
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            triple: x86_64-apple-darwin
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${{ needs.version.outputs.version }}" \
+            -o "dist/pg-dac-${{ matrix.triple }}${{ matrix.ext }}" ./cmd/pg-dac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg-dac-${{ matrix.triple }}
+          path: dist/*
+
+  desktop:
+    name: Desktop app (${{ matrix.os }})
+    needs: [version, cli]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            ext: ".exe"
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui/src-tauri
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Sidecar for this platform
+        uses: actions/download-artifact@v4
+        with:
+          name: pg-dac-${{ matrix.triple }}
+          path: ui/src-tauri/binaries
+      - name: Make the sidecar executable
+        if: runner.os != 'Windows'
+        run: chmod +x ui/src-tauri/binaries/pg-dac-${{ matrix.triple }}
+      - run: pnpm install --frozen-lockfile
+        working-directory: ui
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ui
+          tagName: ${{ github.ref_name }}
+          releaseName: "pg-dac ${{ github.ref_name }}"
+          releaseBody: "pg-dac ${{ needs.version.outputs.version }} — CLI binaries and desktop installers. See STATUS.md for what is covered."
+          releaseDraft: true
+
+  cli-assets:
+    name: Attach CLI binaries to the release
+    needs: [version, cli, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pg-dac-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*

@@ -43,7 +43,12 @@ export interface PlanDoc {
   dataLoss: boolean;
   changes: ObjectChange[];
   hazardSummary?: HazardCount[];
+  /** Refactorlog renames that run before the migration. */
+  prelude?: Statement[];
 }
+
+/** The PlanDoc format this UI understands (engine.PlanFormatVersion). */
+export const EXPECTED_FORMAT_VERSION = 1;
 
 export interface PlanResponse {
   plan: PlanDoc;
@@ -81,6 +86,12 @@ export interface CompareRequest {
   dropObjectsNotInSource?: boolean;
   includeIds?: string[];
   excludeIds?: string[];
+  /** Fail unless a .pgdac source is signed by this key fingerprint. */
+  requireKey?: string;
+  /** Do not run the source's pre/post-deploy scripts on publish. */
+  skipDeployScripts?: boolean;
+  /** Publish even if the target changed outside pg-dac since its last baseline. */
+  allowDrift?: boolean;
 }
 
 // Compare SSE payloads, re-emitted by the Rust supervisor as {event, data}.
@@ -114,5 +125,9 @@ export interface PublishEvent {
     sql?: string;
     applied?: number;
     message?: string;
+    deployScripts?: number;
+    baselineRecorded?: boolean;
+    /** Set on an error event when the publish was refused because of drift. */
+    drift?: boolean;
   };
 }

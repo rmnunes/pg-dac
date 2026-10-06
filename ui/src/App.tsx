@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { onCompare, onPublish } from "./ipc/client";
+import { health, onCompare, onPublish } from "./ipc/client";
+import { EXPECTED_FORMAT_VERSION } from "./ipc/types";
+import pinnedVersion from "../PGDAC_VERSION?raw";
 import { useStore } from "./state/store";
 import { SourceBar } from "./components/SourceBar";
 import { ObjectTree } from "./components/ObjectTree";
@@ -35,9 +37,25 @@ export default function App() {
     document.body.classList.add("resizing");
   };
 
+  const [engineNote, setEngineNote] = useState<string | null>(null);
+
   useEffect(() => {
     const subs = [onPublish(handlePublishEvent), onCompare(handleCompareEvent)];
     void loadProfiles();
+    // Handshake with the bundled engine: the plan format must be the one this
+    // UI understands, and the sidecar should be the pinned version.
+    health()
+      .then((h) => {
+        if (h.formatVersion !== EXPECTED_FORMAT_VERSION) {
+          setEngineNote(`The pg-dac engine reports plan format ${h.formatVersion}; this UI expects ${EXPECTED_FORMAT_VERSION}. Rebuild the sidecar to match.`);
+          return;
+        }
+        const pinned = pinnedVersion.trim();
+        if (h.version.replace(/-dev$/, "") !== pinned) {
+          setEngineNote(`Engine ${h.version} differs from the UI's pinned ${pinned}; results may differ from a release build.`);
+        }
+      })
+      .catch((e) => setEngineNote(`pg-dac engine not reachable: ${String(e)}`));
     return () => {
       subs.forEach((un) => un.then((f) => f()));
     };
@@ -89,6 +107,7 @@ export default function App() {
           ))}
         </div>
       )}
+      {engineNote && <div className="warnings"><div>⚠ {engineNote}</div></div>}
       {error && <div className="error-banner">{error}</div>}
 
       <div className="workspace">
@@ -108,7 +127,7 @@ export default function App() {
       <footer className="statusbar">
         <span>
           {plan
-            ? `${plan.statementCount} statement(s)${plan.dataLoss ? " · ⚠ DATA LOSS" : ""}`
+            ? `${plan.statementCount} statement(s)${plan.prelude?.length ? ` · ${plan.prelude.length} refactorlog rename(s)` : ""}${plan.dataLoss ? " · ⚠ DATA LOSS" : ""}`
             : "No comparison yet"}
         </span>
         <div className="actions">

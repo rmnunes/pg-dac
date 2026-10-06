@@ -38,13 +38,20 @@ interface State {
   online: boolean;
   allowHazards: boolean;
   dropObjects: boolean;
+  requireKey: string;
+  skipDeployScripts: boolean;
+  allowDrift: boolean;
 
   // results
   status: Status;
   error?: string;
   plan?: PlanDoc;
   warnings: string[];
+  // Objects the user unchecked.
   excluded: Set<string>;
+  // Objects excluded because something they depend on is excluded (SSDT-style
+  // dependency gating): id -> the excluded dependency that caused it.
+  autoExcluded: Map<string, string>;
   selectedId?: string;
 
   publish: PublishState;
@@ -78,6 +85,48 @@ interface State {
 const splitSchemas = (s: string): string[] =>
   s.split(",").map((x) => x.trim()).filter(Boolean);
 
+// computeAutoExcluded derives the dependency-gated exclusions: a non-drop
+// change whose dependsOn names an excluded change (manually or in turn
+// automatically) cannot be applied on its own, so it is excluded too — the
+// SSDT Schema Compare behavior. Dependencies that are not part of the plan are
+// already present in the Target and never gate anything.
+export function computeAutoExcluded(plan: PlanDoc | undefined, manual: Set<string>): Map<string, string> {
+  const auto = new Map<string, string>();
+  if (!plan) return auto;
+  const inPlan = new Set(plan.changes.map((c) => c.id));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const c of plan.changes) {
+      if (c.changeKind === "drop" || manual.has(c.id) || auto.has(c.id)) continue;
+      const cause = (c.dependsOn ?? []).find((d) => inPlan.has(d) && (manual.has(d) || auto.has(d)));
+      if (cause) {
+        auto.set(c.id, cause);
+        changed = true;
+      }
+    }
+  }
+  return auto;
+}
+
+// dependenciesOf returns the transitive plan dependencies of a change (ids in
+// the plan only).
+function dependenciesOf(plan: PlanDoc, id: string): Set<string> {
+  const byId = new Map(plan.changes.map((c) => [c.id, c]));
+  const out = new Set<string>();
+  const stack = [id];
+  while (stack.length) {
+    const cur = byId.get(stack.pop()!);
+    for (const d of cur?.dependsOn ?? []) {
+      if (byId.has(d) && !out.has(d)) {
+        out.add(d);
+        stack.push(d);
+      }
+    }
+  }
+  return out;
+}
+
 // Persisted change-list width (the draggable divider between the change list and
 // the results). Kept in localStorage so it survives restarts.
 const TREE_WIDTH_KEY = "pgdac.treeWidth";
@@ -95,10 +144,14 @@ export const useStore = create<State>((set, get) => ({
   online: true,
   allowHazards: false,
   dropObjects: false,
+  requireKey: "",
+  skipDeployScripts: false,
+  allowDrift: false,
 
   status: "idle",
   warnings: [],
   excluded: new Set<string>(),
+  autoExcluded: new Map<string, string>(),
 
   publish: { running: false, total: 0, applied: 0, log: [], done: false },
   compareProgress: { running: false, from: "", to: "", message: "", steps: [] },
@@ -153,7 +206,7 @@ export const useStore = create<State>((set, get) => ({
     const s = get();
     const schemas = splitSchemas(s.schemas);
     const major = parseInt(s.targetMajor, 10);
-    const excludeIds = [...s.excluded];
+    const excludeIds = [...new Set([...s.excluded, ...s.autoExcluded.keys()])];
     return {
       // Resolve profile refs to the real value the daemon needs (the secret
       // travels only here, at send time — it's never bound to a visible input).
@@ -165,6 +218,9 @@ export const useStore = create<State>((set, get) => ({
       allowHazards: s.allowHazards,
       dropObjectsNotInSource: s.dropObjects,
       excludeIds: excludeIds.length ? excludeIds : undefined,
+      requireKey: s.requireKey.trim() || undefined,
+      skipDeployScripts: s.skipDeployScripts || undefined,
+      allowDrift: s.allowDrift || undefined,
     };
   },
 
@@ -177,6 +233,7 @@ export const useStore = create<State>((set, get) => ({
       plan: undefined,
       warnings: [],
       excluded: new Set(),
+      autoExcluded: new Map(),
       selectedId: undefined,
       compareProgress: {
         running: true,
@@ -257,12 +314,18 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  // Excluding an object also excludes everything in the plan that depends on
+  // it; including one brings its plan dependencies back (SSDT behavior).
   toggleExclude: (id) =>
     set((s) => {
       const next = new Set(s.excluded);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return { excluded: next };
+      if (next.has(id) || s.autoExcluded.has(id)) {
+        next.delete(id);
+        if (s.plan) for (const dep of dependenciesOf(s.plan, id)) next.delete(dep);
+      } else {
+        next.add(id);
+      }
+      return { excluded: next, autoExcluded: computeAutoExcluded(s.plan, next) };
     }),
 
   select: (id) => set({ selectedId: id }),
