@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // BuildOptions configures writing a .pgdac.

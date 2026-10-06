@@ -16,7 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // Execer is the subset of pgx used to run individual statements.

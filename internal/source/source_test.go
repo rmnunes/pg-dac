@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/source"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/source"
 )
 
 func buildArtifact(t *testing.T, key ed25519.PrivateKey) string {

@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/devdb"
 )
 
 // version is overridable at build time with -ldflags "-X main.version=...".

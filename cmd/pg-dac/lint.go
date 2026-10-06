@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/safety"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/safety"
 )
 
 // exitLint is the exit code `lint` returns when a hazard at or above the

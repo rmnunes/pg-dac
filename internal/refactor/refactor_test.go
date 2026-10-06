@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/refactor"
 )
 
 // fixture: app.t(id serial pk, b int) with index/trigger, app.u with an FK to

@@ -8,9 +8,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/drift"
-	"github.com/rodrigonunes/pg-dac/internal/introspect"
-	"github.com/rodrigonunes/pg-dac/internal/source"
+	"github.com/rmnunes/pg-dac/internal/drift"
+	"github.com/rmnunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/source"
 )
 
 // exitDrift is the exit code `drift` returns when the target has drifted, so a

@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rodrigonunes/pg-dac/internal/diff"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/safety"
+	"github.com/rmnunes/pg-dac/internal/diff"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/safety"
 )
 
 // columnDef renders a single column definition for CREATE TABLE / ADD COLUMN.

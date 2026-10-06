@@ -1,6 +1,6 @@
 package diff
 
-import "github.com/rodrigonunes/pg-dac/internal/model"
+import "github.com/rmnunes/pg-dac/internal/model"
 
 // Diff computes the operations required to transform the "from" database
 // (current/target state) into the "to" database (desired state).

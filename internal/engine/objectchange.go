@@ -3,9 +3,9 @@ package engine
 import (
 	"strings"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/safety"
-	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/safety"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // PlanFormatVersion is the schema version of PlanDoc / the daemon API. The GUI

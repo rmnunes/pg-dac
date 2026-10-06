@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rodrigonunes/pg-dac/internal/diff"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/plan"
-	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+	"github.com/rmnunes/pg-dac/internal/diff"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/plan"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // Options controls comparison and generation. The defaults mirror the

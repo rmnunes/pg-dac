@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/refactor"
 )
 
 // newRefactorCmd manages a project's refactorlog.json: the renames that

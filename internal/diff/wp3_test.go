@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 func dbWith(s *model.Schema) *model.Database { return &model.Database{Schemas: []*model.Schema{s}} }

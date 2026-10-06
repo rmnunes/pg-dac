@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // Querier is the subset of pgx used by the introspector. Both *pgx.Conn and

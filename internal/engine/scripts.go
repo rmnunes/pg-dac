@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rodrigonunes/pg-dac/internal/diff"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+	"github.com/rmnunes/pg-dac/internal/diff"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // ExtractSection is the folder an extracted project's scripts are written to.

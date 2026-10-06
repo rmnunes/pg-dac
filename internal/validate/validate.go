@@ -10,11 +10,11 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/execute"
-	"github.com/rodrigonunes/pg-dac/internal/introspect"
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/execute"
+	"github.com/rmnunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // Result reports the outcome of validating a migration.

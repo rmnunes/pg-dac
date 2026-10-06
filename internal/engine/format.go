@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rodrigonunes/pg-dac/internal/diff"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/safety"
+	"github.com/rmnunes/pg-dac/internal/diff"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/safety"
 )
 
 // Script renders the migration as runnable SQL. When allowHazards is false,

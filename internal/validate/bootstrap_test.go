@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/build"
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/project"
-	"github.com/rodrigonunes/pg-dac/internal/validate"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/build"
+	"github.com/rmnunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/validate"
 )
 
 // bootstrapSQL is a deliberately awkward schema: serial AND identity columns,

@@ -7,14 +7,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/deploy"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/refactor"
-	"github.com/rodrigonunes/pg-dac/internal/source"
-	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
-	"github.com/rodrigonunes/pg-dac/internal/validate"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/deploy"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/source"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
+	"github.com/rmnunes/pg-dac/internal/validate"
 )
 
 // commonFlags holds the flags shared by the comparison verbs.

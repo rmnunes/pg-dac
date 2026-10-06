@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/project"
 )
 
 func newInitCmd() *cobra.Command {

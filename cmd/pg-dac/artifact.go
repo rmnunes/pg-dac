@@ -8,12 +8,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/deploy"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/project"
-	"github.com/rodrigonunes/pg-dac/internal/source"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/deploy"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/source"
 )
 
 func newBuildCmd() *cobra.Command {

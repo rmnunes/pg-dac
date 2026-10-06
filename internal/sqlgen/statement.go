@@ -4,7 +4,7 @@
 // the diff and plan packages remain SQL-agnostic.
 package sqlgen
 
-import "github.com/rodrigonunes/pg-dac/internal/safety"
+import "github.com/rmnunes/pg-dac/internal/safety"
 
 // Statement is one generated SQL statement plus its execution metadata.
 type Statement struct {

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
-	"github.com/rodrigonunes/pg-dac/internal/drift"
-	"github.com/rodrigonunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/drift"
+	"github.com/rmnunes/pg-dac/internal/introspect"
 )
 
 func TestDrift_RecordAndCheck(t *testing.T) {

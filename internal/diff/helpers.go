@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 func extRef(e *model.Extension) model.ObjRef {

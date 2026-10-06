@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/deploy"
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/deploy"
+	"github.com/rmnunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/project"
 )
 
 func writeFile(t *testing.T, path, content string) {

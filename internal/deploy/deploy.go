@@ -14,11 +14,11 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/execute"
-	"github.com/rodrigonunes/pg-dac/internal/project"
-	"github.com/rodrigonunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/execute"
+	"github.com/rmnunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/refactor"
 )
 
 // Script is one deployment script: a display name and its SQL.

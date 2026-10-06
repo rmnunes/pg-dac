@@ -13,10 +13,10 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/artifact"
-	"github.com/rodrigonunes/pg-dac/internal/build"
-	"github.com/rodrigonunes/pg-dac/internal/introspect"
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/build"
+	"github.com/rmnunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // Options configures resolution.

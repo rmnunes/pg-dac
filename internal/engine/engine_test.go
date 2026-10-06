@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // buildDesired constructs a desired database: a new schema "app" containing an

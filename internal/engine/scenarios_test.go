@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rodrigonunes/pg-dac/internal/build"
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/validate"
+	"github.com/rmnunes/pg-dac/internal/build"
+	"github.com/rmnunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/validate"
 )
 
 // Expectation of a migration scenario against a real PostgreSQL:

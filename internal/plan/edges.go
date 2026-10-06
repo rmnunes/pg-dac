@@ -1,8 +1,8 @@
 package plan
 
 import (
-	"github.com/rodrigonunes/pg-dac/internal/diff"
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/diff"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // deriveEdges builds the "must come before" edges between operations. Edges

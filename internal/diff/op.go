@@ -6,7 +6,7 @@
 // separate is what lets the same ChangeSet drive a script, a report, and an apply.
 package diff
 
-import "github.com/rodrigonunes/pg-dac/internal/model"
+import "github.com/rmnunes/pg-dac/internal/model"
 
 // OpType enumerates the concrete schema-change operations pg-dac emits. Each
 // value maps to one (sometimes a small staged sequence of) SQL statements in

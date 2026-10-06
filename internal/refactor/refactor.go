@@ -17,9 +17,9 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/model"
-	"github.com/rodrigonunes/pg-dac/internal/safety"
-	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/safety"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // LogName is the refactorlog file at a project's root.

@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // depFixture: table app.t(a <colType>, b text), view v reading t.a, view w on v.

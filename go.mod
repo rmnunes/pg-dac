@@ -1,4 +1,4 @@
-module github.com/rodrigonunes/pg-dac
+module github.com/rmnunes/pg-dac
 
 go 1.25.0
 

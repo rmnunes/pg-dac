@@ -7,12 +7,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/rodrigonunes/pg-dac/internal/build"
-	"github.com/rodrigonunes/pg-dac/internal/devdb"
-	"github.com/rodrigonunes/pg-dac/internal/engine"
-	"github.com/rodrigonunes/pg-dac/internal/execute"
-	"github.com/rodrigonunes/pg-dac/internal/introspect"
-	"github.com/rodrigonunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/build"
+	"github.com/rmnunes/pg-dac/internal/devdb"
+	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/execute"
+	"github.com/rmnunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/refactor"
 )
 
 // A rename recorded in the refactorlog must be applied as ALTER ... RENAME so

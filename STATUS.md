@@ -219,7 +219,7 @@ pg-dac/
   ui/                   Tauri GUI (src/ React, src-tauri/ Rust supervisor, binaries/ sidecar)
   testdata/             demo project + fixtures
 ```
-Module: `github.com/rodrigonunes/pg-dac` (Go 1.25). License Apache-2.0.
+Module: `github.com/rmnunes/pg-dac` (Go 1.25). License Apache-2.0.
 
 ---
 
