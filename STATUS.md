@@ -1,6 +1,6 @@
 # pg-dac — Project Status & Roadmap
 
-_Last updated: 2026-10-06 (after WP0–WP3; see the audit notes for the audit)_
+_Last updated: 2026-10-07 — **roadmap complete** (WP0–WP4; see the audit notes for the audit and per-WP addenda)_
 
 A **DACPAC / SqlPackage-equivalent for PostgreSQL**: compare schemas, generate dependency-ordered
 lock-safe migration scripts, package a schema into a portable **signed `.pgdac` artifact**, and
@@ -25,7 +25,12 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Project model (`pgdac.yaml`, `init`) | ✅ `include`/`exclude`/`schemas`/`targetMajor`/`preDeploy`/`postDeploy`/`dropPolicy` all honored |
 | Tauri GUI | ✅ Builds and type-checks; previously confirmed working visually |
 | Object coverage | ✅ Partitioning, domains, composite types, matview indexes, view triggers/options, trigger state, UNLOGGED, storage parameters, column storage/compression/statistics, comments (WP3); grants are warned about |
-| Version control / CI | ⚠️ Git initialized in WP0; no CI yet (WP4) |
+| Refactorlog (renames without drop + create) | ✅ `refactorlog.json` + `pg-dac refactor rename`; applied as `ALTER … RENAME`, recorded per target in `pgdac.refactorlog` (WP4) |
+| Drift detection / `BlockWhenDriftDetected` | ✅ Every publish records a baseline in `pgdac.baseline`; `pg-dac drift` (exit 2 on drift), `pg-dac baseline`; publish refuses a drifted target unless `--allow-drift` (WP4) |
+| Lint | ✅ `pg-dac lint` — hazards by code/severity/object, exit 2 at or above `--fail-on` (WP4) |
+| GUI dependency-gated include/exclude | ✅ Excluding an object excludes what depends on it; including brings dependencies back; new options (signer key, deploy scripts, drift); engine format/version handshake (WP4) |
+| CLI + GUI coexistence (embedded PostgreSQL) | ✅ Complete binaries cache is reused, not re-extracted (the library's `pg_ctl` check missed `.exe` on Windows) (WP4) |
+| Version control / CI / release | ✅ Git; GitHub Actions CI (Go matrix, embedded-PG integration, GUI type-check/build, cargo check) and tag-driven release (CLI per triple + Tauri installers); versions pinned and test-enforced (WP4) |
 
 ---
 
@@ -111,6 +116,20 @@ comments), and ~30 scenario entries (lossy ones now verified, misses flipped to 
 
 ---
 
+## WP4 (2026-10-07) — what changed
+
+| Roadmap item | Delivered |
+|---|---|
+| N4 refactorlog | `internal/refactor`: `refactorlog.json` (`operations[]` with stable ids: table, column, view, matview, sequence, function, index, constraint, trigger, policy, enum, domain, compositeType, schema; optional `toSchema`). `pg-dac refactor rename/list`. Compare verbs apply pending renames to the target model and emit the `ALTER … RENAME` statements as a prelude; `publish` runs them, records the ids in the target's `pgdac.refactorlog`, re-reads the target and then migrates — data and dependents survive. Carried inside the artifact (`project/refactorlog.json`) |
+| N5 drift | `internal/drift`: `pgdac.baseline` (gzipped canonical model + SHA-256, source, time). `publish` checks the target against its latest baseline before touching it and refuses on drift (`--allow-drift` overrides; `--no-baseline` skips recording); every successful publish records a fresh baseline. `pg-dac drift` explains the drift as a plan (exit 2), `pg-dac baseline` records one explicitly; daemon `/drift` and `allowDrift`/`recordBaseline` on publish |
+| N8 lint | `pg-dac lint --from --to [--fail-on error|warning|none] [--format json]` — hazards grouped by code with severity, count and objects; exit 2 when the threshold is hit |
+| N2 GUI gating | Excluding a change auto-excludes every plan change that depends on it (transitively, non-drop), shown disabled with the cause; including a change re-includes its plan dependencies. Options panel gained signer key, skip deploy scripts, allow drift. On start the UI checks the engine's plan format and pinned version |
+| N9 embedded-PG coexistence | Root cause found: the library decides to extract by stat'ing `bin/pg_ctl` without `.exe`, so on Windows every start re-extracted over a running instance's files. The cache now gets an executable `pg_ctl` copy plus a completion marker; incomplete caches are wiped and rebuilt. Test: a second server starts while the first runs |
+| N3 CI / release | `.github/workflows/ci.yml` (Go build/vet/unit on Linux/Windows/macOS, full embedded-PG suite, GUI `tsc` + `vite build`, `cargo check`) and `release.yml` on `v*` tags (tag must equal `ui/PGDAC_VERSION`; CLI for 5 triples with the version stamped; `tauri-action` installers with the matching sidecar; checksummed release assets). `TestVersionsAgree` keeps `ui/PGDAC_VERSION`, `package.json`, `tauri.conf.json`, `Cargo.toml` and the Go default in step |
+| Reserved schema | pg-dac's bookkeeping lives in schema `pgdac` (PostgreSQL reserves `pg_*`), which introspection never includes in a model |
+
+---
+
 ## Object coverage
 
 **Managed (introspected, diffed, generated, published):** schemas, extensions, enums (labels added
@@ -159,9 +178,18 @@ types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
 
 ## Roadmap
 
-- **WP4 — DACPAC parity.** Refactorlog (renames without data loss), drift baseline +
-  `BlockWhenDriftDetected`, GUI dependency-gated include/exclude, CI + release pipeline
-  (Go sidecar matrix → `tauri-action` installers; enforce `ui/PGDAC_VERSION`).
+**All planned work packages (WP0–WP4) and the audit's N1–N9 items are complete.** What remains
+is explicitly out of scope for v1 or deferred:
+
+- **Not managed (warned):** grants/ACLs/ownership, attaching/detaching *existing* partitions,
+  `INHERITS` inheritance, aggregate/window functions, range/multirange types, foreign tables and
+  servers, rules, event triggers, publications/subscriptions.
+- **Reported as `UNSUPPORTED_CHANGE` rather than applied:** removing/reordering enum values,
+  altering a domain or composite type definition, re-partitioning a table.
+- **Deferred:** a `.pgbac` data artifact (schema + table data, the BACPAC analog); a GUI for
+  authoring the refactorlog (today: `pg-dac refactor rename`); dependents other than views,
+  materialized views and triggers when a function is recreated (policies, defaults, CHECKs,
+  index expressions — PostgreSQL's own error surfaces).
 
 ---
 
@@ -169,7 +197,8 @@ types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
 
 ```
 pg-dac/
-  cmd/pg-dac/            CLI + verbs: diff script report plan publish build extract inspect serve init
+  cmd/pg-dac/            CLI + verbs: diff script report plan lint publish build extract inspect serve init refactor drift baseline
+  .github/workflows/     CI (Go matrix + embedded-PG integration + GUI + cargo) and tag-driven release
   internal/
     model/              canonical schema model (+ JSON); lookups, identity-sequence predicate
     introspect/         live DB → model (pg_catalog via pgx); search_path pinned; dependency edges
@@ -182,7 +211,9 @@ pg-dac/
     execute/            apply (session preamble, lock_timeout + retry; ApplyStream for SSE)
     engine/             Compare(), Result (+Warnings), dependents.go (drop/recreate dependents), ObjectChanges()/PlanDoc(), ObjectScripts (plan-ordered extract)
     artifact/           .pgdac read/write (format 3: signed manifest, deploy parts), Merkle, Ed25519 signing, trusted_keys
-    deploy/             pre/post-deploy scripts + dropPolicy from a project or artifact; publish runs them
+    deploy/             pre/post-deploy scripts, dropPolicy and refactorlog from a project or artifact; publish runs them
+    refactor/           refactorlog.json: renames applied as ALTER … RENAME, recorded in pgdac.refactorlog
+    drift/              baselines in pgdac.baseline; drift detection and explanation
     project/            pgdac.yaml manifest (+ doublestar globs)
     source/             resolve any source spec → model
   ui/                   Tauri GUI (src/ React, src-tauri/ Rust supervisor, binaries/ sidecar)
@@ -206,6 +237,9 @@ pg-dac extract --from "postgres://…/db" --out app.pgdac           # or --to-pr
 pg-dac build   --from ./project --out app.pgdac --target-major 18
 pg-dac init    --dir ./project --name myapp
 pg-dac inspect app.pgdac
+pg-dac refactor rename --dir ./project --kind table --schema app --from customers --to clients
+pg-dac drift   --from "postgres://…/db"                           # exit 2 when the target changed outside pg-dac
+pg-dac lint    --from "postgres://…/db" --to ./project --fail-on error
 ```
 > Connection strings: `.NET` form (`Host=…;Database=…;SSL Mode=Require`) → libpq form
 > `host=… dbname=… sslmode=require` (or `postgres://…?sslmode=require`); pass the password via

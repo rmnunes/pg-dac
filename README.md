@@ -57,8 +57,9 @@ target ─┘
 
 The engine, daemon, project model, artifact, and GUI are built and exercised against real
 PostgreSQL (embedded 16, Docker 16/18, and a ~290-object production schema). An independent audit
-on 2026-10-06 (the audit notes) found the from-empty bootstrap broken; the first
-work package since then fixed it. The current gates, all in `go test ./...`:
+on 2026-10-06 (the audit notes) drove four work packages; the roadmap in
+[STATUS.md](STATUS.md) is complete, including the refactorlog, drift detection, lint, and a CI /
+release pipeline. The current gates, all in `go test ./...`:
 
 - **From-empty bootstrap** (`internal/validate/bootstrap_test.go`): a comprehensive schema is
   built, published into an empty scratch database, re-introspected, and must show no residual;
@@ -82,11 +83,11 @@ tables and materialized views, triggers on tables and views (incl. enabled state
 policies and table RLS enable/force, views (incl. check option and security options), materialized
 views, and comments on all of them.
 
-**Known gaps** (details and plan in [STATUS.md](STATUS.md)): grants are warned about but not
-published; policies, defaults and constraints that call a function being recreated are not yet
+**Out of scope for v1** (details in [STATUS.md](STATUS.md)): grants are warned about but not
+published; policies, defaults and constraints that call a function being recreated are not
 recreated around it; changes PostgreSQL cannot make in place (removing enum values, altering a
 domain or composite type, re-partitioning) are reported as an `UNSUPPORTED_CHANGE` hazard rather
-than applied.
+than applied; a `.pgbac` data artifact is deferred.
 
 ## Usage
 
@@ -123,9 +124,19 @@ project's `dropPolicy`), `--validate`, `--dry-run`, `--lock-timeout` and `--no-d
 (publish), `--no-sign` (build/extract), `--require-key <fingerprint>` (every verb that reads a
 `.pgdac`; a `trusted_keys` file under the pg-dac config directory does the same for all runs).
 
-A project's `pgdac.yaml` `preDeploy`/`postDeploy` scripts and `dropPolicy` travel inside the
-artifact and are honored by `publish`: pre-deploy scripts run before the migration, post-deploy
-scripts after it, and the drop policy is the default drop behavior.
+A project's `pgdac.yaml` `preDeploy`/`postDeploy` scripts, `dropPolicy` and `refactorlog.json`
+travel inside the artifact and are honored by `publish`: pending renames run first as
+`ALTER … RENAME` (recorded per target so they run once), pre-deploy scripts before the migration,
+post-deploy scripts after it, and the drop policy is the default drop behavior. Every publish
+records the resulting schema as the target's baseline; a target that later changed outside pg-dac
+is refused until `--allow-drift` (or `pg-dac baseline`) accepts the change — `pg-dac drift` shows
+what changed.
+
+```bash
+pg-dac refactor rename --dir ./schema --kind column --schema app --table users --from name --to full_name
+pg-dac drift --from "postgres://...target"            # exit 2 when drift is detected
+pg-dac lint  --from "postgres://...target" --to ./schema --fail-on error
+```
 
 > The first run downloads the embedded PostgreSQL binaries (cached per major version), so any
 > command that uses a project/`.sql` source or `--validate` takes longer the first time.
@@ -166,9 +177,12 @@ Point a project source at the directory that holds only schema DDL (psql meta-co
 
 ```bash
 go test -short ./...       # fast unit tests, no database required
-go test -p 1 ./...         # + embedded-PostgreSQL integration tests (downloads binaries once);
-                           #   -p 1 keeps packages from racing on the embedded binaries
+go test -p 1 ./...         # + embedded-PostgreSQL integration tests (downloads binaries once)
 ```
+
+CI runs the same on every push (`.github/workflows/ci.yml`); a `v*` tag matching
+`ui/PGDAC_VERSION` builds the CLI for every platform and the desktop installers
+(`.github/workflows/release.yml`).
 
 Set `PG_DAC_TEST_DSN` to also run the self-idempotence check against a real database.
 
