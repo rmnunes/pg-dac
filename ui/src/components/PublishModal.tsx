@@ -47,6 +47,17 @@ export function PublishModal({ onClose }: { onClose: () => void }) {
           </p>
         )}
 
+        {!isProject && (
+          <label className="ack" title="Consecutive transactional statements run in one transaction and roll back together on failure; CONCURRENTLY statements run on their own between transactions (disable Online for a single transaction).">
+            <input
+              type="checkbox"
+              checked={useStore.getState().singleTransaction}
+              onChange={(e) => set({ singleTransaction: e.target.checked })}
+            />
+            Single transaction (as atomic as PostgreSQL allows)
+          </label>
+        )}
+
         {plan?.dataLoss && (
           <label className="ack danger">
             <input type="checkbox" checked={allowHazards} onChange={(e) => set({ allowHazards: e.target.checked })} />

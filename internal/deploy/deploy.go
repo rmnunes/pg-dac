@@ -38,6 +38,9 @@ type Plan struct {
 	Refactor *refactor.Log
 	// Compare holds the project's comparison defaults (pgdac.yaml compare:).
 	Compare *project.CompareSettings
+	// Variables are the project's default values for the $(name) placeholders
+	// its deploy scripts use (pgdac.yaml variables:); the command line overrides.
+	Variables map[string]string
 }
 
 // Empty reports whether the plan carries nothing.
@@ -67,7 +70,7 @@ func ForSource(spec string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := &Plan{DropPolicy: m.DropPolicy, Compare: m.Compare}
+	plan := &Plan{DropPolicy: m.DropPolicy, Compare: m.Compare, Variables: m.Variables}
 	if plan.ManifestYAML, err = os.ReadFile(filepath.Join(spec, project.ManifestName)); err != nil {
 		return nil, err
 	}
@@ -109,6 +112,7 @@ func fromArtifact(o *artifact.Opened) *Plan {
 	if len(plan.ManifestYAML) > 0 {
 		if m, err := project.Parse(plan.ManifestYAML); err == nil {
 			plan.Compare = m.Compare
+			plan.Variables = m.Variables
 		}
 	}
 	if data, ok := o.Parts[artifact.PartRefactorLog]; ok {
@@ -167,6 +171,68 @@ func (p *Plan) ArtifactParts() ([]artifact.ExtraPart, *artifact.DeployInfo) {
 	return parts, info
 }
 
+// Substitute replaces every $(name) placeholder in a deploy script with its
+// value (SQLCMD-style variables: environment names, role names, retention
+// values). A placeholder without a value is an error that names it, so a
+// script never runs with a literal "$(name)" in it. Schema files are never
+// substituted: a model must not depend on the environment.
+func Substitute(sql string, vars map[string]string) (string, error) {
+	var out strings.Builder
+	var missing []string
+	i := 0
+	for i < len(sql) {
+		if sql[i] == '$' && i+1 < len(sql) && sql[i+1] == '(' {
+			j := i + 2
+			// A variable name starts with a letter or underscore; "$(1x)" is text.
+			if j < len(sql) && (sql[j] == '_' || (sql[j] >= 'a' && sql[j] <= 'z') || (sql[j] >= 'A' && sql[j] <= 'Z')) {
+				for j < len(sql) && (sql[j] == '_' || (sql[j] >= 'a' && sql[j] <= 'z') || (sql[j] >= 'A' && sql[j] <= 'Z') || (sql[j] >= '0' && sql[j] <= '9')) {
+					j++
+				}
+			}
+			if j > i+2 && j < len(sql) && sql[j] == ')' {
+				name := sql[i+2 : j]
+				if v, ok := vars[name]; ok {
+					out.WriteString(v)
+				} else {
+					missing = append(missing, name)
+					out.WriteString(sql[i : j+1])
+				}
+				i = j + 1
+				continue
+			}
+		}
+		out.WriteByte(sql[i])
+		i++
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return "", fmt.Errorf("undefined variable(s) %s: define them in %s variables: or pass --var name=value", strings.Join(uniq(missing), ", "), project.ManifestName)
+	}
+	return out.String(), nil
+}
+
+func uniq(ss []string) []string {
+	var out []string
+	for i, s := range ss {
+		if i == 0 || s != ss[i-1] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// MergeVariables layers overrides (the command line) over a project's defaults.
+func MergeVariables(defaults, overrides map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for k, v := range overrides {
+		out[k] = v
+	}
+	return out
+}
+
 // ApplyCompareSettings maps a project's compare block onto the engine options;
 // fields the project leaves unset keep the options' current values.
 func ApplyCompareSettings(opts *engine.Options, cs *project.CompareSettings) {
@@ -184,6 +250,9 @@ func ApplyCompareSettings(opts *engine.Options, cs *project.CompareSettings) {
 	}
 	if cs.IgnoreComments != nil {
 		opts.IgnoreComments = *cs.IgnoreComments
+	}
+	if len(cs.ExcludeObjectTypes) > 0 {
+		opts.ExcludeObjectTypes = append([]string{}, cs.ExcludeObjectTypes...)
 	}
 }
 
@@ -212,14 +281,19 @@ func ApplyDropPolicy(opts *engine.Options, policy string) {
 }
 
 // Run executes scripts in order, each as one multi-statement script in its own
-// implicit transaction (simple query protocol). Scripts are plain SQL — psql
-// meta-commands such as \i cannot run server-side.
-func Run(ctx context.Context, conn *pgx.Conn, scripts []Script, onScript func(name string)) error {
+// implicit transaction (simple query protocol), after substituting its $(name)
+// variables. Scripts are plain SQL — psql meta-commands such as \i cannot run
+// server-side.
+func Run(ctx context.Context, conn *pgx.Conn, scripts []Script, vars map[string]string, onScript func(name string)) error {
 	for _, s := range scripts {
 		if onScript != nil {
 			onScript(s.Name)
 		}
-		if err := execute.ApplyScript(ctx, conn, s.SQL); err != nil {
+		sql, err := Substitute(s.SQL, vars)
+		if err != nil {
+			return fmt.Errorf("%s: %w", s.Name, err)
+		}
+		if err := execute.ApplyScript(ctx, conn, sql); err != nil {
 			return fmt.Errorf("deploy script %s: %w", s.Name, err)
 		}
 	}

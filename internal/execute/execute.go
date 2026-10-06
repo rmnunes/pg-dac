@@ -36,6 +36,18 @@ type Options struct {
 	// retries (backoff = random in [0, min(MaxBackoff, BaseBackoff*2^attempt)]).
 	BaseBackoff time.Duration
 	MaxBackoff  time.Duration
+	// StatementTimeout is set as the session statement_timeout. 0 leaves it
+	// unbounded (long index builds and constraint validations must not be killed).
+	StatementTimeout time.Duration
+	// SingleTransaction runs consecutive transactional statements in one
+	// transaction (SqlPackage's IncludeTransactionalScripts): a failure rolls the
+	// open batch back, and a lock timeout inside it is retried as a whole. A
+	// statement that cannot run inside a transaction block (CREATE INDEX
+	// CONCURRENTLY, ...) commits what precedes it, runs on its own, and a new
+	// batch starts after it — so with lock-safe rewrites disabled the whole
+	// migration is one transaction, and with them enabled it is as atomic as
+	// PostgreSQL allows.
+	SingleTransaction bool
 }
 
 // DefaultOptions returns sensible production defaults: a short lock_timeout with
@@ -75,6 +87,14 @@ func ApplyStream(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opt
 			return 0, fmt.Errorf("set lock_timeout: %w", err)
 		}
 	}
+	if opts.StatementTimeout > 0 {
+		if _, err := conn.Exec(ctx, fmt.Sprintf("SET statement_timeout = %d", opts.StatementTimeout.Milliseconds())); err != nil {
+			return 0, fmt.Errorf("set statement_timeout: %w", err)
+		}
+	}
+	if opts.SingleTransaction {
+		return applyBatched(ctx, conn, stmts, opts, onStmt)
+	}
 	applied := 0
 	for i, s := range stmts {
 		if onStmt != nil {
@@ -86,6 +106,72 @@ func ApplyStream(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opt
 		applied++
 	}
 	return applied, nil
+}
+
+// applyBatched is ApplyStream in single-transaction mode (see
+// Options.SingleTransaction). Returns the number of statements committed.
+func applyBatched(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opts Options, onStmt Progress) (int, error) {
+	applied := 0
+	i := 0
+	for i < len(stmts) {
+		if !stmts[i].Transactional {
+			if onStmt != nil {
+				onStmt(i+1, len(stmts), stmts[i])
+			}
+			if err := runWithRetry(ctx, conn, stmts[i].SQL, opts); err != nil {
+				return applied, fmt.Errorf("statement failed: %s: %w", firstLine(stmts[i].SQL), err)
+			}
+			applied++
+			i++
+			continue
+		}
+		j := i
+		for j < len(stmts) && stmts[j].Transactional {
+			j++
+		}
+		if err := runBatch(ctx, conn, stmts, i, j, opts, onStmt); err != nil {
+			return applied, err
+		}
+		applied += j - i
+		i = j
+	}
+	return applied, nil
+}
+
+// runBatch runs stmts[from:to] inside one transaction, retrying the whole
+// batch after a rollback when a lock timeout aborts it.
+func runBatch(ctx context.Context, conn Execer, stmts []sqlgen.Statement, from, to int, opts Options, onStmt Progress) error {
+	for attempt := 0; ; attempt++ {
+		if _, err := conn.Exec(ctx, "BEGIN"); err != nil {
+			return fmt.Errorf("begin transaction: %w", err)
+		}
+		var failed error
+		var failedAt int
+		for k := from; k < to; k++ {
+			if onStmt != nil {
+				onStmt(k+1, len(stmts), stmts[k])
+			}
+			if _, err := conn.Exec(ctx, stmts[k].SQL); err != nil {
+				failed, failedAt = err, k
+				break
+			}
+		}
+		if failed == nil {
+			if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
+				return fmt.Errorf("commit transaction: %w", err)
+			}
+			return nil
+		}
+		_, _ = conn.Exec(ctx, "ROLLBACK")
+		if !isLockTimeout(failed) || attempt >= opts.MaxRetries {
+			return fmt.Errorf("statement failed (transaction rolled back, nothing from this batch applied): %s: %w", firstLine(stmts[failedAt].SQL), failed)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff(opts, attempt)):
+		}
+	}
 }
 
 func runWithRetry(ctx context.Context, conn Execer, sql string, opts Options) error {

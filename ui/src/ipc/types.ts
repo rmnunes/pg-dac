@@ -118,6 +118,12 @@ export interface CompareRequest {
   ignoreComments?: boolean;
   /** Compare routine bodies as exact text (whitespace counts). */
   compareWhitespace?: boolean;
+  /** Object types left out of the comparison (SSDT ExcludeObjectTypes). */
+  excludeObjectTypes?: string[];
+  /** Values for $(name) placeholders in pre/post-deploy scripts. */
+  variables?: Record<string, string>;
+  /** Run consecutive transactional statements in one transaction (publish). */
+  singleTransaction?: boolean;
 }
 
 // Compare SSE payloads, re-emitted by the Rust supervisor as {event, data}.

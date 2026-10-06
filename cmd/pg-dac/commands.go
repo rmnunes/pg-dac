@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
@@ -36,6 +37,8 @@ type commonFlags struct {
 	columnOrder       string
 	ignoreComments    bool
 	compareWhitespace bool
+	excludeTypes      []string
+	vars              []string
 	cmd               *cobra.Command
 
 	// dropPolicy is the desired-state source's manifest drop policy, applied as
@@ -60,6 +63,8 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 	fl.StringVar(&f.columnOrder, "column-order", "", "when a table's declared column order differs from the target's: ignore | warn (default) | rebuild the table in the declared order")
 	fl.BoolVar(&f.ignoreComments, "ignore-comments", false, "treat comment-only changes inside routine bodies as no change")
 	fl.BoolVar(&f.compareWhitespace, "compare-whitespace", false, "compare routine bodies as exact text (by default whitespace and line endings are ignored)")
+	fl.StringArrayVar(&f.excludeTypes, "exclude-object-type", nil, "leave an object type out of the comparison (repeatable): "+strings.Join(project.ObjectTypes, "|"))
+	fl.StringArrayVar(&f.vars, "var", nil, "value for a $(name) placeholder in pre/post-deploy scripts, as name=value (repeatable; overrides pgdac.yaml variables:)")
 	f.cmd = cmd
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
@@ -70,6 +75,14 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 func (f *commonFlags) sourceOptions() (source.Options, error) {
 	if f.columnOrder != "" && !project.ValidColumnOrder(f.columnOrder) {
 		return source.Options{}, fmt.Errorf("--column-order must be one of %v, got %q", project.ColumnOrderPolicies, f.columnOrder)
+	}
+	for _, t := range f.excludeTypes {
+		if !project.ValidObjectType(t) {
+			return source.Options{}, fmt.Errorf("--exclude-object-type %q is not one of %v", t, project.ObjectTypes)
+		}
+	}
+	if _, err := f.variables(); err != nil {
+		return source.Options{}, err
 	}
 	opts := source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor, RequireKey: f.requireKey}
 	if f.requireKey == "" {
@@ -223,12 +236,34 @@ func (f *commonFlags) options() engine.Options {
 		if fl.Changed("compare-whitespace") {
 			opts.CompareWhitespace = f.compareWhitespace
 		}
+		if fl.Changed("exclude-object-type") {
+			opts.ExcludeObjectTypes = f.excludeTypes
+		}
 	}
 	return opts
 }
 
+// variables parses --var name=value pairs and layers them over the desired
+// state's pgdac.yaml variables.
+func (f *commonFlags) variables() (map[string]string, error) {
+	overrides := map[string]string{}
+	for _, kv := range f.vars {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("--var expects name=value, got %q", kv)
+		}
+		overrides[name] = value
+	}
+	var defaults map[string]string
+	if f.plan != nil {
+		defaults = f.plan.Variables
+	}
+	return deploy.MergeVariables(defaults, overrides), nil
+}
+
 func newScriptCmd() *cobra.Command {
 	f := &commonFlags{}
+	var singleTx bool
 	cmd := &cobra.Command{
 		Use:   "script",
 		Short: "Generate the migration SQL that transforms --from into --to",
@@ -237,11 +272,12 @@ func newScriptCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(cmd.OutOrStdout(), res.Script(f.allowHaz))
+			fmt.Fprint(cmd.OutOrStdout(), res.ScriptWith(engine.ScriptOptions{AllowHazards: f.allowHaz, SingleTransaction: singleTx}))
 			return nil
 		},
 	}
 	f.bind(cmd)
+	cmd.Flags().BoolVar(&singleTx, "single-transaction", false, "wrap runs of transactional statements in BEGIN/COMMIT (CONCURRENTLY statements stay outside)")
 	return cmd
 }
 

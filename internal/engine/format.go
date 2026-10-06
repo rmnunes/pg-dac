@@ -11,11 +11,29 @@ import (
 	"github.com/rmnunes/pg-dac/internal/safety"
 )
 
+// ScriptOptions tunes Script output.
+type ScriptOptions struct {
+	// AllowHazards emits blocking (data-loss / unsupported) statements instead
+	// of commenting them out.
+	AllowHazards bool
+	// SingleTransaction wraps runs of transactional statements in BEGIN/COMMIT,
+	// leaving statements that cannot run inside a transaction block
+	// (CONCURRENTLY) between the runs — the shape `publish --single-transaction`
+	// executes.
+	SingleTransaction bool
+}
+
 // Script renders the migration as runnable SQL. When allowHazards is false,
 // data-loss statements are emitted commented-out with an explanation, so the
 // default script is safe to run (the BlockOnPossibleDataLoss posture). Each
 // statement is annotated with its note and hazards as SQL comments.
 func (r *Result) Script(allowHazards bool) string {
+	return r.ScriptWith(ScriptOptions{AllowHazards: allowHazards})
+}
+
+// ScriptWith is Script with explicit options.
+func (r *Result) ScriptWith(so ScriptOptions) string {
+	allowHazards := so.AllowHazards
 	var b strings.Builder
 	fmt.Fprintf(&b, "-- pg-dac migration script\n")
 	fmt.Fprintf(&b, "-- %d statement(s)\n", len(r.Statements)+len(r.Prelude))
@@ -44,7 +62,18 @@ func (r *Result) Script(allowHazards bool) string {
 		b.WriteString("\n")
 	}
 
+	inTx := false
 	for _, s := range r.Statements {
+		if so.SingleTransaction {
+			switch {
+			case s.Transactional && !inTx:
+				b.WriteString("BEGIN;\n\n")
+				inTx = true
+			case !s.Transactional && inTx:
+				b.WriteString("COMMIT;\n\n")
+				inTx = false
+			}
+		}
 		if s.Note != "" {
 			fmt.Fprintf(&b, "-- %s\n", s.Note)
 		}
@@ -64,6 +93,9 @@ func (r *Result) Script(allowHazards bool) string {
 		}
 		b.WriteString(s.SQL)
 		b.WriteString("\n\n")
+	}
+	if inTx {
+		b.WriteString("COMMIT;\n")
 	}
 	return b.String()
 }

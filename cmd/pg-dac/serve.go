@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
@@ -189,10 +190,16 @@ type compareReq struct {
 	RecordBaseline         *bool    `json:"recordBaseline"` // default true
 	// Comparison semantics; nil / "" defers to the desired-state project's
 	// pgdac.yaml compare: block.
-	IgnorePrivileges  *bool  `json:"ignorePrivileges"`
-	ColumnOrder       string `json:"columnOrder"`
-	IgnoreComments    *bool  `json:"ignoreComments"`
-	CompareWhitespace *bool  `json:"compareWhitespace"`
+	IgnorePrivileges   *bool             `json:"ignorePrivileges"`
+	ColumnOrder        string            `json:"columnOrder"`
+	IgnoreComments     *bool             `json:"ignoreComments"`
+	CompareWhitespace  *bool             `json:"compareWhitespace"`
+	ExcludeObjectTypes []string          `json:"excludeObjectTypes"`
+	Variables          map[string]string `json:"variables"`
+	// Publish execution.
+	SingleTransaction  bool `json:"singleTransaction"`
+	LockTimeoutMs      int  `json:"lockTimeoutMs"`
+	StatementTimeoutMs int  `json:"statementTimeoutMs"`
 }
 
 // sideWarning is a warning tagged with the side of the comparison it concerns:
@@ -244,6 +251,9 @@ func (r compareReq) engineOptions(dplan *deploy.Plan) engine.Options {
 	}
 	if r.CompareWhitespace != nil {
 		opts.CompareWhitespace = *r.CompareWhitespace
+	}
+	if len(r.ExcludeObjectTypes) > 0 {
+		opts.ExcludeObjectTypes = r.ExcludeObjectTypes
 	}
 	opts.IncludeIDs = toSet(r.IncludeIDs)
 	opts.ExcludeIDs = toSet(r.ExcludeIDs)
@@ -521,6 +531,13 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 	if req.SkipDeployScripts {
 		pre, post = nil, nil
 	}
+	vars := deploy.MergeVariables(dplan.Variables, req.Variables)
+	for _, s := range append(append([]deploy.Script{}, pre...), post...) {
+		if _, err := deploy.Substitute(s.SQL, vars); err != nil {
+			send("error", map[string]any{"message": s.Name + ": " + err.Error()})
+			return
+		}
+	}
 	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(),
 		"deployScripts": len(pre) + len(post),
 		"warnings":      mergeWarnings(tagWarnings("source", warns), tagWarnings("target", canonWarns), tagWarnings("plan", res.Warnings))})
@@ -543,7 +560,7 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 	// Missing roles are the one blocker a pre-deploy script may remove: run the
 	// scripts and re-check before refusing (the schema is untouched so far).
 	if res.HasBlocking() && !opts.AllowHazards && res.OnlyMissingRoles() && len(pre) > 0 {
-		if err := deploy.Run(d.ctx, conn, pre, announce("pre")); err != nil {
+		if err := deploy.Run(d.ctx, conn, pre, vars, announce("pre")); err != nil {
 			send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})
 			return
 		}
@@ -568,11 +585,19 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": "refusing to publish: data-loss or unsupported changes present; set allowHazards to proceed"})
 		return
 	}
-	if err := deploy.Run(d.ctx, conn, pre, announce("pre")); err != nil {
+	if err := deploy.Run(d.ctx, conn, pre, vars, announce("pre")); err != nil {
 		send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})
 		return
 	}
-	applied, err := execute.ApplyStream(d.ctx, conn, res.Statements, execute.DefaultOptions(),
+	execOpts := execute.DefaultOptions()
+	execOpts.SingleTransaction = req.SingleTransaction
+	if req.LockTimeoutMs > 0 {
+		execOpts.LockTimeout = time.Duration(req.LockTimeoutMs) * time.Millisecond
+	}
+	if req.StatementTimeoutMs > 0 {
+		execOpts.StatementTimeout = time.Duration(req.StatementTimeoutMs) * time.Millisecond
+	}
+	applied, err := execute.ApplyStream(d.ctx, conn, res.Statements, execOpts,
 		func(index, total int, s sqlgen.Statement) {
 			send("progress", map[string]any{"index": index, "total": total, "sql": s.SQL})
 		})
@@ -580,7 +605,7 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
 		return
 	}
-	if err := deploy.Run(d.ctx, conn, post, announce("post")); err != nil {
+	if err := deploy.Run(d.ctx, conn, post, vars, announce("post")); err != nil {
 		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
 		return
 	}

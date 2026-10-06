@@ -22,8 +22,8 @@ import (
 
 func newPublishCmd() *cobra.Command {
 	f := &commonFlags{}
-	var lockTimeout time.Duration
-	var dryRun, noDeployScripts, allowDrift, noBaseline bool
+	var lockTimeout, statementTimeout time.Duration
+	var dryRun, noDeployScripts, allowDrift, noBaseline, singleTx bool
 
 	cmd := &cobra.Command{
 		Use:   "publish",
@@ -133,6 +133,16 @@ func newPublishCmd() *cobra.Command {
 			if noDeployScripts {
 				pre, post = nil, nil
 			}
+			vars, err := f.variables()
+			if err != nil {
+				return err
+			}
+			// Every placeholder must resolve before anything runs.
+			for _, s := range append(append([]deploy.Script{}, pre...), post...) {
+				if _, err := deploy.Substitute(s.SQL, vars); err != nil {
+					return fmt.Errorf("%s: %w", s.Name, err)
+				}
+			}
 			if res.Empty() && len(pre) == 0 && len(post) == 0 {
 				fmt.Fprintln(out, "Target is already up to date.")
 				if !dryRun && !noBaseline && len(f.schemas) == 0 && (drifted || !hadBaseline) {
@@ -161,7 +171,7 @@ func newPublishCmd() *cobra.Command {
 			// re-check before refusing — nothing of the schema has been touched yet.
 			if res.HasBlocking() && !f.allowHaz && !dryRun && res.OnlyMissingRoles() && len(pre) > 0 {
 				fmt.Fprintf(cmd.ErrOrStderr(), "roles %v are missing from the target; running the pre-deploy scripts first in case they provision them\n", res.MissingRoles())
-				if err := deploy.Run(ctx, conn, pre, announce("pre")); err != nil {
+				if err := deploy.Run(ctx, conn, pre, vars, announce("pre")); err != nil {
 					return err
 				}
 				pre = nil
@@ -181,11 +191,13 @@ func newPublishCmd() *cobra.Command {
 			}
 			if dryRun {
 				for _, s := range pre {
-					fmt.Fprintf(out, "-- pre-deploy script: %s\n%s\n\n", s.Name, s.SQL)
+					sql, _ := deploy.Substitute(s.SQL, vars)
+					fmt.Fprintf(out, "-- pre-deploy script: %s\n%s\n\n", s.Name, sql)
 				}
-				fmt.Fprint(out, res.Script(f.allowHaz))
+				fmt.Fprint(out, res.ScriptWith(engine.ScriptOptions{AllowHazards: f.allowHaz, SingleTransaction: singleTx}))
 				for _, s := range post {
-					fmt.Fprintf(out, "\n-- post-deploy script: %s\n%s\n", s.Name, s.SQL)
+					sql, _ := deploy.Substitute(s.SQL, vars)
+					fmt.Fprintf(out, "\n-- post-deploy script: %s\n%s\n", s.Name, sql)
 				}
 				return nil
 			}
@@ -201,17 +213,19 @@ func newPublishCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "validation: OK")
 			}
 
-			if err := deploy.Run(ctx, conn, pre, announce("pre")); err != nil {
+			if err := deploy.Run(ctx, conn, pre, vars, announce("pre")); err != nil {
 				return err
 			}
 			execOpts := execute.DefaultOptions()
 			execOpts.LockTimeout = lockTimeout
+			execOpts.StatementTimeout = statementTimeout
+			execOpts.SingleTransaction = singleTx
 			applied, err := execute.Apply(ctx, conn, res.Statements, execOpts)
 			if err != nil {
 				return fmt.Errorf("applied %d of %d statement(s) before failure (re-run publish to resume from the new state): %w",
 					applied, len(res.Statements), err)
 			}
-			if err := deploy.Run(ctx, conn, post, announce("post")); err != nil {
+			if err := deploy.Run(ctx, conn, post, vars, announce("post")); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "Applied %d statement(s)", applied)
@@ -236,6 +250,8 @@ func newPublishCmd() *cobra.Command {
 	}
 	f.bind(cmd)
 	cmd.Flags().DurationVar(&lockTimeout, "lock-timeout", 3*time.Second, "session lock_timeout for blocking DDL (0 = unset)")
+	cmd.Flags().DurationVar(&statementTimeout, "statement-timeout", 0, "session statement_timeout for every statement (0 = unbounded)")
+	cmd.Flags().BoolVar(&singleTx, "single-transaction", false, "run consecutive transactional statements in one transaction (CONCURRENTLY statements split it; with --no-online the whole migration is one transaction)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the migration SQL (and deploy scripts) instead of applying")
 	cmd.Flags().BoolVar(&noDeployScripts, "no-deploy-scripts", false, "do not run the source's pre/post-deploy scripts")
 	cmd.Flags().BoolVar(&allowDrift, "allow-drift", false, "publish even if the target changed outside pg-dac since its last baseline")

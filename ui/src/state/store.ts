@@ -59,6 +59,9 @@ interface State {
   columnOrder: ColumnOrderMode;
   comments: CommentsMode;
   whitespace: WhitespaceMode;
+  excludeTypes: string; // comma-separated object types left out of the comparison
+  variables: string; // name=value per line, for $(name) in deploy scripts
+  singleTransaction: boolean;
 
   // results
   status: Status;
@@ -102,6 +105,27 @@ interface State {
 
 const splitSchemas = (s: string): string[] =>
   s.split(",").map((x) => x.trim()).filter(Boolean);
+
+// splitList → a comma-separated option as a list, or undefined when empty so
+// the daemon falls back to the project's default.
+const splitList = (s: string): string[] | undefined => {
+  const items = splitSchemas(s);
+  return items.length ? items : undefined;
+};
+
+// parseVariables → "name=value" lines as a map (blank lines and lines without
+// "=" are ignored), or undefined when nothing was entered.
+const parseVariables = (s: string): Record<string, string> | undefined => {
+  const out: Record<string, string> = {};
+  let any = false;
+  for (const line of s.split("\n")) {
+    const i = line.indexOf("=");
+    if (i <= 0) continue;
+    out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    any = true;
+  }
+  return any ? out : undefined;
+};
 
 // computeAutoExcluded derives the dependency-gated exclusions: a non-drop
 // change whose dependsOn names an excluded change (manually or in turn
@@ -169,6 +193,9 @@ export const useStore = create<State>((set, get) => ({
   columnOrder: "",
   comments: "",
   whitespace: "",
+  excludeTypes: "",
+  variables: "",
+  singleTransaction: false,
 
   status: "idle",
   warnings: [],
@@ -248,6 +275,9 @@ export const useStore = create<State>((set, get) => ({
       columnOrder: s.columnOrder || undefined,
       ignoreComments: s.comments === "" ? undefined : s.comments === "ignore",
       compareWhitespace: s.whitespace === "" ? undefined : s.whitespace === "compare",
+      excludeObjectTypes: splitList(s.excludeTypes),
+      variables: parseVariables(s.variables),
+      singleTransaction: s.singleTransaction || undefined,
     };
   },
 

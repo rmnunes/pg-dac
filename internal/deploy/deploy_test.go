@@ -123,7 +123,7 @@ func TestRunScripts(t *testing.T) {
 	err = deploy.Run(ctx, conn, []deploy.Script{
 		{Name: "a", SQL: "CREATE TABLE seed(x int); INSERT INTO seed VALUES (1), (2);"},
 		{Name: "b", SQL: "INSERT INTO seed SELECT x + 10 FROM seed;"},
-	}, func(name string) { ran = append(ran, name) })
+	}, nil, func(name string) { ran = append(ran, name) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestRunScripts(t *testing.T) {
 	if strings.Join(ran, ",") != "a,b" {
 		t.Errorf("ran %v", ran)
 	}
-	if err := deploy.Run(ctx, conn, []deploy.Script{{Name: "bad", SQL: "SELECT * FROM nowhere;"}}, nil); err == nil || !strings.Contains(err.Error(), "bad") {
+	if err := deploy.Run(ctx, conn, []deploy.Script{{Name: "bad", SQL: "SELECT * FROM nowhere;"}}, nil, nil); err == nil || !strings.Contains(err.Error(), "bad") {
 		t.Errorf("a failing script must report its name, got %v", err)
 	}
 }

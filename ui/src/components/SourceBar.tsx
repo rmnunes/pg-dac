@@ -59,6 +59,14 @@ export function SourceBar() {
               <option value="ignore">ignore</option>
             </select>
           </label>
+          <label title="Object types left out of the comparison (SSDT ExcludeObjectTypes): table, view, matview, sequence, function, enum, domain, compositeType, collation, schema, extension, index, constraint, trigger, policy, privilege, comment">
+            Exclude object types{" "}
+            <input value={s.excludeTypes} onChange={(e) => s.set({ excludeTypes: e.target.value })} placeholder="trigger, comment" />
+          </label>
+          <label title="Values for $(name) placeholders in the project's pre/post-deploy scripts, one name=value per line (overrides pgdac.yaml variables:)">
+            Deploy variables{" "}
+            <textarea value={s.variables} onChange={(e) => s.set({ variables: e.target.value })} placeholder={"deploy_environment=dev"} rows={2} />
+          </label>
         </div>
       </details>
 

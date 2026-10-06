@@ -53,6 +53,13 @@ type Options struct {
 	// table in the declared order (see diff.Options).
 	ColumnOrder string
 
+	// ExcludeObjectTypes leaves whole kinds of object out of the comparison
+	// (SSDT's ExcludeObjectTypes): table, view, matview, sequence, function,
+	// enum, domain, compositeType, collation, schema, extension, index,
+	// constraint, trigger, policy, privilege, comment. An excluded kind is
+	// neither created, altered nor dropped; everything else proceeds.
+	ExcludeObjectTypes []string
+
 	// IncludeIDs / ExcludeIDs restrict the comparison to a chosen set of objects,
 	// keyed by object ID (model.ObjRef.Key() — what ObjectChange.ID reports). When
 	// IncludeIDs is non-empty, only those objects are changed; ExcludeIDs always
@@ -99,11 +106,13 @@ func (r *Result) Empty() bool { return len(r.Statements) == 0 }
 func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	cs := diff.DiffWith(from, to, opts.diffOptions())
 	diffWarnings := cs.Warnings
+	cs = filterByType(cs, opts)
 	cs = applyRebuildPolicy(cs, opts)
 	cs = filterDrops(cs, opts)
 	cs = filterByObject(cs, opts)
 	cs = expandDependents(cs, from, to)
 	cs = expandPrivileges(cs, from, to, opts)
+	cs = filterByType(cs, opts) // privileges and dependents added above obey the exclusion too
 
 	p := plan.Build(cs)
 
@@ -140,6 +149,50 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 // diffOptions maps the comparison options onto the differ's.
 func (o Options) diffOptions() diff.Options {
 	return diff.Options{CompareWhitespace: o.CompareWhitespace, IgnoreComments: o.IgnoreComments, ColumnOrder: o.ColumnOrder}
+}
+
+// filterByType drops every op of an excluded object type (see
+// Options.ExcludeObjectTypes). Sub-object ops are classified by the sub-object
+// (an index, a constraint, a trigger, a policy, a privilege, a comment), other
+// ops by the kind of the object they act on.
+func filterByType(cs *diff.ChangeSet, opts Options) *diff.ChangeSet {
+	if len(opts.ExcludeObjectTypes) == 0 {
+		return cs
+	}
+	excluded := map[string]bool{}
+	for _, t := range opts.ExcludeObjectTypes {
+		excluded[t] = true
+	}
+	out := &diff.ChangeSet{Warnings: cs.Warnings}
+	for _, op := range cs.Ops {
+		// An excluded kind takes its sub-objects, comments and privileges with
+		// it (excluding "view" excludes a view's comment too), and an excluded
+		// sub-object kind is excluded on every owner.
+		if !excluded[objectTypeOf(op)] && !excluded[string(op.Owner.Kind)] {
+			out.Ops = append(out.Ops, op)
+		}
+	}
+	return out
+}
+
+// objectTypeOf names the object type an op changes, in the vocabulary of
+// Options.ExcludeObjectTypes.
+func objectTypeOf(op diff.Op) string {
+	switch op.Type {
+	case diff.OpCreateIndex, diff.OpDropIndex:
+		return "index"
+	case diff.OpAddConstraint, diff.OpDropConstraint, diff.OpValidateConstraint:
+		return "constraint"
+	case diff.OpCreateTrigger, diff.OpDropTrigger, diff.OpSetTriggerEnabled:
+		return "trigger"
+	case diff.OpCreatePolicy, diff.OpDropPolicy, diff.OpEnableRLS, diff.OpDisableRLS:
+		return "policy"
+	case diff.OpGrant, diff.OpRevoke:
+		return "privilege"
+	case diff.OpSetComment:
+		return "comment"
+	}
+	return string(op.Owner.Kind)
 }
 
 // filterByObject keeps only ops whose owning object passes the include/exclude

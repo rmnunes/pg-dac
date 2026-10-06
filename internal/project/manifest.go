@@ -46,6 +46,9 @@ type Manifest struct {
 	// in the scratch database so the project builds, and a publish refuses a
 	// target that lacks one.
 	Roles []string `yaml:"roles,omitempty"`
+	// Variables are default values for the $(name) placeholders the project's
+	// pre/post-deploy scripts use (SQLCMD variables); --var overrides them.
+	Variables map[string]string `yaml:"variables,omitempty"`
 }
 
 // CompareSettings are the SSDT-style comparison options a project can pin.
@@ -61,6 +64,11 @@ type CompareSettings struct {
 	// IgnoreComments: a comment-only change in a routine body is not a change
 	// (default false).
 	IgnoreComments *bool `yaml:"ignoreComments,omitempty"`
+	// ExcludeObjectTypes leaves whole kinds of object out of the comparison
+	// (SSDT's ExcludeObjectTypes): table, view, matview, sequence, function,
+	// enum, domain, compositeType, collation, schema, extension, index,
+	// constraint, trigger, policy, privilege, comment.
+	ExcludeObjectTypes []string `yaml:"excludeObjectTypes,omitempty"`
 }
 
 // ColumnOrderPolicies are the accepted values of compare.columnOrder.
@@ -163,7 +171,28 @@ func Parse(data []byte) (*Manifest, error) {
 	if m.Compare != nil && m.Compare.ColumnOrder != "" && !ValidColumnOrder(m.Compare.ColumnOrder) {
 		return nil, fmt.Errorf("%s: compare.columnOrder must be one of %v, got %q", ManifestName, ColumnOrderPolicies, m.Compare.ColumnOrder)
 	}
+	if m.Compare != nil {
+		for _, t := range m.Compare.ExcludeObjectTypes {
+			if !ValidObjectType(t) {
+				return nil, fmt.Errorf("%s: compare.excludeObjectTypes has unknown type %q (valid: %v)", ManifestName, t, ObjectTypes)
+			}
+		}
+	}
 	return &m, nil
+}
+
+// ObjectTypes are the kinds compare.excludeObjectTypes / --exclude-object-type accept.
+var ObjectTypes = []string{"table", "view", "matview", "sequence", "function", "enum", "domain", "compositeType",
+	"collation", "schema", "extension", "index", "constraint", "trigger", "policy", "privilege", "comment"}
+
+// ValidObjectType reports whether t names an excludable object type.
+func ValidObjectType(t string) bool {
+	for _, v := range ObjectTypes {
+		if v == t {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidColumnOrder reports whether p is an accepted column-order policy.
