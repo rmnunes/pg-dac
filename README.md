@@ -69,19 +69,24 @@ work package since then fixed it. The current gates, all in `go test ./...`:
   modeled). A gap that starts passing makes the test tell you to flip its tag.
 - **Introspection invariants** (`internal/introspect`): the model is independent of the session
   `search_path`; `NOT VALID` is a flag, not definition text; function, trigger and view dependency
-  edges are recorded.
+  edges are recorded; partitioning, view options, trigger state, storage attributes, domains and
+  composite types are read.
+- **Artifact trust** (`internal/artifact`, `internal/source`): the signature covers the whole
+  manifest, and a required or trusted signer is enforced on every artifact source.
 
-**Managed objects:** schemas, extensions, enums, collations, sequences (standalone, serial, and
-identity), functions and procedures, tables (columns incl. identity/generated/defaults/not-null,
-comments on create), primary/foreign/unique/check/exclude constraints (incl. `NOT VALID` state),
-indexes, triggers, row-level-security policies and table RLS enable/force, views, materialized views.
+**Managed objects:** schemas, extensions, enums, domains, composite types, collations, sequences
+(standalone, serial, and identity), functions and procedures, tables (columns incl.
+identity/generated/defaults/not-null/storage/compression/statistics, `UNLOGGED`, storage parameters,
+partitioning), primary/foreign/unique/check/exclude constraints (incl. `NOT VALID` state), indexes on
+tables and materialized views, triggers on tables and views (incl. enabled state), row-level-security
+policies and table RLS enable/force, views (incl. check option and security options), materialized
+views, and comments on all of them.
 
-**Known gaps** (details and plan in [STATUS.md](STATUS.md)): partitioning, materialized-view
-indexes, view triggers, check options, trigger enable state, storage parameters, comment changes,
-enum value removal and grants are not modeled yet and are **silently dropped** on publish; policies,
-defaults and constraints that call a function being recreated are not yet recreated around it; the
-artifact's signature covers the content but not yet the manifest metadata; domains/composite/range
-types are reported as warnings only.
+**Known gaps** (details and plan in [STATUS.md](STATUS.md)): grants are warned about but not
+published; policies, defaults and constraints that call a function being recreated are not yet
+recreated around it; changes PostgreSQL cannot make in place (removing enum values, altering a
+domain or composite type, re-partitioning) are reported as an `UNSUPPORTED_CHANGE` hazard rather
+than applied.
 
 ## Usage
 
@@ -113,8 +118,14 @@ pg-dac extract --from "postgres://...prod" --to-project ./schema       # schema/
 
 Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
 the PostgreSQL major used to normalize a project source; a project's `pgdac.yaml` `targetMajor`
-is the default), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source`, `--validate`,
-`--dry-run` and `--lock-timeout` (publish), `--no-sign` (build/extract), `--require-key` (inspect).
+is the default), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source` (overrides the
+project's `dropPolicy`), `--validate`, `--dry-run`, `--lock-timeout` and `--no-deploy-scripts`
+(publish), `--no-sign` (build/extract), `--require-key <fingerprint>` (every verb that reads a
+`.pgdac`; a `trusted_keys` file under the pg-dac config directory does the same for all runs).
+
+A project's `pgdac.yaml` `preDeploy`/`postDeploy` scripts and `dropPolicy` travel inside the
+artifact and are honored by `publish`: pre-deploy scripts run before the migration, post-deploy
+scripts after it, and the drop policy is the default drop behavior.
 
 > The first run downloads the embedded PostgreSQL binaries (cached per major version), so any
 > command that uses a project/`.sql` source or `--validate` takes longer the first time.

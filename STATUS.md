@@ -1,6 +1,6 @@
 # pg-dac — Project Status & Roadmap
 
-_Last updated: 2026-10-06 (after WP0, WP1 and WP2; see the audit notes for the audit)_
+_Last updated: 2026-10-06 (after WP0–WP3; see the audit notes for the audit)_
 
 A **DACPAC / SqlPackage-equivalent for PostgreSQL**: compare schemas, generate dependency-ordered
 lock-safe migration scripts, package a schema into a portable **signed `.pgdac` artifact**, and
@@ -19,11 +19,12 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Publish into an **empty** database (bootstrap) | ✅ Fixed in WP1; regression-gated by `TestBootstrap_FromEmpty` |
 | Deterministic output / stable artifact hash | ✅ Fixed in WP1 (differ walks model order) |
 | Model independent of session `search_path` | ✅ Fixed in WP1 (introspection pins `search_path = ''`) |
-| Signed `.pgdac` artifact (Merkle + Ed25519), format v2 | ✅ Signature covers content; manifest metadata not yet signed (WP3) |
+| Signed `.pgdac` artifact (Merkle + Ed25519), format v3 | ✅ Signature covers the whole manifest; `--require-key` on every verb and the daemon; optional `trusted_keys` file (WP3) |
+| Artifact as a deployment unit | ✅ Carries `pgdac.yaml`, pre/post-deploy scripts and the drop policy; `publish` runs them (WP3) |
 | `pg-dac serve` daemon (warm Postgres, HTTP/SSE, cancel) | ✅ |
-| Project model (`pgdac.yaml`, `init`) | ⚠️ `include`/`exclude`/`schemas`/`targetMajor` wired; `preDeploy`/`postDeploy`/`dropPolicy` parsed but not executed (WP3) |
+| Project model (`pgdac.yaml`, `init`) | ✅ `include`/`exclude`/`schemas`/`targetMajor`/`preDeploy`/`postDeploy`/`dropPolicy` all honored |
 | Tauri GUI | ✅ Builds and type-checks; previously confirmed working visually |
-| Object coverage | ⚠️ See "Object coverage" — several attributes are silently dropped (WP3) |
+| Object coverage | ✅ Partitioning, domains, composite types, matview indexes, view triggers/options, trigger state, UNLOGGED, storage parameters, column storage/compression/statistics, comments (WP3); grants are warned about |
 | Version control / CI | ⚠️ Git initialized in WP0; no CI yet (WP4) |
 
 ---
@@ -85,23 +86,49 @@ function→procedure, append-only view replace, …).
 
 ---
 
+## WP3 (2026-10-06) — what changed
+
+| Audit finding | Fix |
+|---|---|
+| §4.2 partitioning created as plain tables | `Table.PartitionKey` (PARTITION BY) and `Table.PartitionOf` (PARTITION OF … bound) introspected and rendered; partitions keep only their local objects; parent-before-child / child-before-parent edges; a re-bound partition is recreated (data-loss gated) |
+| §4.2 matview indexes, view triggers, `WITH CHECK OPTION` dropped | `MaterializedView.Indexes`, `View.Triggers`, `View.CheckOption`/`SecurityBarrier`/`SecurityInvoker` introspected, diffed and rendered; recreated views/matviews get their triggers/indexes back |
+| §4.2 trigger state, `UNLOGGED`, storage parameters, column storage/compression/statistics | `Trigger.Enabled`, `Table.Persistence`, `Table.RelOptions` (incl. `toast.*`), `Column.Storage`/`Compression`/`StatsTarget` diffed with dedicated ops |
+| §4.2 comments on existing objects | `setComment` op for every managed object and sub-object (ROUTINE/COLUMN/CONSTRAINT/INDEX/TRIGGER/POLICY/…); comments on constraints, indexes and policies are now emitted on create too |
+| §4.2 enum value removal/reorder, generated-expression change | New labels are inserted in position (`ADD VALUE … BEFORE/AFTER`); removal/reorder, domain/composite changes and re-partitioning are emitted as an **`UNSUPPORTED_CHANGE`** hazard (error severity, `RAISE WARNING` statement) so the script says it will not converge; generated columns use `SET EXPRESSION` (PG17+), `DROP EXPRESSION` (PG13+) or drop + re-add |
+| §4.2 domains and composite types caused hard failures | Both are managed (create/drop; a changed definition is an unsupported-change hazard) |
+| §4.2 grants | Counted and warned (`objects with explicit privileges … privileges are not published`); still not managed |
+| §4.3 signature covered only the Merkle root | Format **3**: the signature covers the canonical JSON of the whole manifest (older artifacts verify with their scheme) |
+| §4.3 no authenticity on compare/publish | `--require-key` on diff/script/report/plan/publish/build/extract and the daemon's `requireKey`; a `trusted_keys` file (`<UserConfigDir>/pg-dac/trusted_keys`) gates every artifact source when present; otherwise the signer fingerprint (or "unsigned") is reported as a warning |
+| §4.3 artifact not a deployment unit; `preDeploy`/`postDeploy`/`dropPolicy` dead | `build` embeds `project/pgdac.yaml` and `deploy/pre|post/NNNN_*.sql`; `publish` runs pre-deploy scripts before and post-deploy scripts after the migration (`--no-deploy-scripts` to skip); `dropPolicy` (`none`/`safe`/`all`) is the default drop behavior for compare and publish unless `--drop-objects-not-in-source` is given |
+| Publish gate | `HasBlocking` (any error-severity hazard: data loss or unsupported change) replaces the data-loss-only gate |
+
+Regression gates added: `TestDiff_*` for every new op, `TestSignatureCoversManifestMetadata`,
+`TestResolveArtifactTrust`, deploy package tests (plan from project, artifact parts, drop policy,
+script execution), introspection invariants for the new attributes, the bootstrap fixture extended
+with every formerly-lossy attribute (partitions, domain, composite, matview index, view trigger,
+check option, security barrier, disabled trigger, UNLOGGED + fillfactor, storage/statistics,
+comments), and ~30 scenario entries (lossy ones now verified, misses flipped to `ok`, two `noconv`).
+
+---
+
 ## Object coverage
 
-**Managed (introspected, diffed, generated, published):** schemas, extensions, enums, collations,
-sequences (standalone, serial-owned, identity-implicit), functions & procedures, tables (columns incl.
-identity/generated/defaults/not-null, comments on create), PK/FK/unique/check/exclude constraints
-(incl. `NOT VALID` state), indexes, triggers, RLS policies (+ table RLS enable/force), views,
-materialized views.
+**Managed (introspected, diffed, generated, published):** schemas, extensions, enums (labels added
+in position), domains, composite types, collations, sequences (standalone, serial-owned,
+identity-implicit), functions & procedures (incl. result-type changes), tables (columns incl.
+identity/generated/defaults/not-null/storage/compression/statistics; `UNLOGGED`; storage parameters;
+partitioning — `PARTITION BY` parents and `PARTITION OF` children), PK/FK/unique/check/exclude
+constraints (incl. `NOT VALID` state), indexes (on tables and materialized views), triggers (on
+tables and views, incl. enabled state), RLS policies (+ table RLS enable/force), views (incl. column
+list, `CHECK OPTION`, `security_barrier`/`security_invoker`), materialized views, and comments on
+all of the above.
 
-**Not modeled — silently dropped on publish, `--validate` still reports convergence (WP3):**
-partitioning (parent and children are created as plain tables), indexes on materialized views,
-triggers on views (`INSTEAD OF`), `WITH CHECK OPTION`, trigger enabled/disabled state, `UNLOGGED`,
-storage parameters (`fillfactor`, autovacuum…), column `STORAGE`/`COMPRESSION`/statistics target,
-comment changes on existing objects, enum value removal/reorder, generated-expression changes,
-grants/ACLs/ownership.
+**Reported as `UNSUPPORTED_CHANGE` (error-severity hazard; the script will not converge until done by
+hand):** removing or reordering enum values, changing a domain or composite type definition,
+changing a table's partitioning.
 
-**Warned about, not managed:** domains, composite/range types, aggregate/window functions, foreign
-tables, non-view rules. A table that uses an unmanaged type fails to publish.
+**Warned about, not managed:** grants/ACLs/ownership, aggregate/window functions, range/multirange
+types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
 
 ---
 
@@ -112,11 +139,12 @@ tables, non-view rules. A table that uses an unmanaged type fails to publish.
    function being dropped/recreated, and generated columns that read an altered column, are not —
    PostgreSQL's own error surfaces at publish time. A recreated materialized view is rebuilt
    (`WITH DATA`), which recomputes its contents.
-2. **Silently dropped attributes** — see "Object coverage". Rule to adopt: anything introspectable
-   but unmanaged must warn; anything that would be created *wrong* (partitions) must error.
-3. **Artifact trust (WP3).** The Ed25519 signature covers the Merkle root of the parts, not the
-   manifest's name/version/targetMajor; `--require-key` exists only on `inspect`; the artifact does
-   not carry pre/post-deploy scripts or the project manifest.
+2. **Grants are not published.** Explicit privileges are counted and warned about; ownership is
+   not modeled either. Partitions can be created and dropped but existing tables are not
+   attached/detached, and `INHERITS` inheritance is not modeled.
+3. **Deploy scripts are plain SQL.** psql meta-commands (`\i`, `\echo`) cannot run server-side;
+   pre/post-deploy scripts run as one implicit transaction each and are re-run on every publish,
+   so they must be idempotent.
 4. **`USING` casts are plain conversions.** `ALTER COLUMN TYPE` emits `USING "col"::type`; when
    values need a real transformation (parsing, defaults for unconvertible rows) the script must be
    edited by hand. The hazard note says so.
@@ -131,11 +159,6 @@ tables, non-view rules. A table that uses an unmanaged type fails to publish.
 
 ## Roadmap
 
-- **WP3 — Honesty & trust.** Model partitioning, matview indexes, view triggers, check option,
-  trigger state, comments, enum-removal hazard, unlogged, reloptions/storage; warn on grants; error
-  on unmanaged types in use. Sign the canonical manifest; trusted keys + `--require-key` on every
-  verb and the daemon; carry `pgdac.yaml` and pre/post-deploy scripts in the artifact and run them
-  on publish; wire `dropPolicy`.
 - **WP4 — DACPAC parity.** Refactorlog (renames without data loss), drift baseline +
   `BlockWhenDriftDetected`, GUI dependency-gated include/exclude, CI + release pipeline
   (Go sidecar matrix → `tauri-action` installers; enforce `ui/PGDAC_VERSION`).
@@ -158,7 +181,8 @@ pg-dac/
     safety/             hazard taxonomy + severity + version gating
     execute/            apply (session preamble, lock_timeout + retry; ApplyStream for SSE)
     engine/             Compare(), Result (+Warnings), dependents.go (drop/recreate dependents), ObjectChanges()/PlanDoc(), ObjectScripts (plan-ordered extract)
-    artifact/           .pgdac read/write (format 2), Merkle, Ed25519 signing
+    artifact/           .pgdac read/write (format 3: signed manifest, deploy parts), Merkle, Ed25519 signing, trusted_keys
+    deploy/             pre/post-deploy scripts + dropPolicy from a project or artifact; publish runs them
     project/            pgdac.yaml manifest (+ doublestar globs)
     source/             resolve any source spec → model
   ui/                   Tauri GUI (src/ React, src-tauri/ Rust supervisor, binaries/ sidecar)
@@ -176,7 +200,8 @@ Module: `github.com/rodrigonunes/pg-dac` (Go 1.25). License Apache-2.0.
 go build -o bin/pg-dac ./cmd/pg-dac
 pg-dac diff    --from "postgres://…/db" --to ./project
 pg-dac script  --from "postgres://…/db" --to ./project --validate > migrate.sql
-pg-dac publish --from "postgres://…/db" --to ./project            # data loss refused w/o --allow-hazards
+pg-dac publish --from "postgres://…/db" --to ./project            # runs pre-deploy, migration, post-deploy; blocking hazards refused w/o --allow-hazards
+pg-dac publish --from "postgres://…/db" --to app.pgdac --require-key <fingerprint>
 pg-dac extract --from "postgres://…/db" --out app.pgdac           # or --to-project ./dir (schema/NNNN_*.sql in dependency order)
 pg-dac build   --from ./project --out app.pgdac --target-major 18
 pg-dac init    --dir ./project --name myapp
