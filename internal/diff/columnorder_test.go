@@ -38,7 +38,7 @@ func TestColumnOrderPolicy(t *testing.T) {
 
 	// default (warn): a warning naming the table and both orders, no rebuild
 	cs := Diff(from, inserted)
-	if len(cs.Warnings) != 1 || !strings.Contains(cs.Warnings[0], `"app"."t"`) || !strings.Contains(cs.Warnings[0], "a, c, b") || !strings.Contains(cs.Warnings[0], "a, b, c") {
+	if len(cs.Warnings) != 1 || !strings.Contains(cs.Warnings[0], `"app"."t"`) || !strings.Contains(cs.Warnings[0], "column b declared") {
 		t.Fatalf("warn: got warnings %v", cs.Warnings)
 	}
 	if containsOp(cs, OpCreateTable) || !containsOp(cs, OpAddColumn) {

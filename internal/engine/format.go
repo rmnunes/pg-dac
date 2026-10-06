@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/rmnunes/pg-dac/internal/diff"
@@ -112,6 +113,40 @@ func hasBlocking(hz []safety.Hazard) bool {
 		}
 	}
 	return false
+}
+
+// MissingRoles lists the roles the migration grants to that the target lacks
+// (the grantees of GRANTs carrying a MISSING_ROLE hazard), sorted.
+func (r *Result) MissingRoles() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, op := range r.ChangeSet.Ops {
+		if op.Type == diff.OpGrant && op.MissingRole && op.Grant != nil && !seen[op.Grant.Grantee] {
+			seen[op.Grant.Grantee] = true
+			out = append(out, op.Grant.Grantee)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// OnlyMissingRoles reports whether every blocking hazard of the migration is a
+// MISSING_ROLE — the one blocker a project's pre-deploy scripts may remove by
+// provisioning the role, so publish runs them and re-checks before refusing.
+func (r *Result) OnlyMissingRoles() bool {
+	any := false
+	for _, s := range r.Statements {
+		for _, h := range s.Hazards {
+			if h.Severity != safety.SeverityError {
+				continue
+			}
+			if h.Type != safety.MissingRole {
+				return false
+			}
+			any = true
+		}
+	}
+	return any
 }
 
 // Report is a machine-readable summary of the migration (the DeployReport analog).

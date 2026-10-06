@@ -172,8 +172,8 @@ ORDER BY 1, 2, 3, 4`, schemas)
 	return nil
 }
 
-// readRoles returns every role name in the cluster.
-func readRoles(ctx context.Context, q Querier) ([]string, error) {
+// ReadRoles returns every role name in the cluster.
+func ReadRoles(ctx context.Context, q Querier) ([]string, error) {
 	rows, err := q.Query(ctx, `SELECT rolname FROM pg_catalog.pg_roles ORDER BY 1`)
 	if err != nil {
 		return nil, fmt.Errorf("read roles: %w", err)

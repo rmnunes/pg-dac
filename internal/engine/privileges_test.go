@@ -142,6 +142,34 @@ func TestPrivileges_RecreatedObjectKeepsGrants(t *testing.T) {
 	}
 }
 
+// CREATE OR REPLACE keeps an object's ACL, so a body change must not re-grant
+// anything; only a real drop + create does.
+func TestPrivileges_ReplaceDoesNotRegrant(t *testing.T) {
+	mk := func(body string) *model.Database {
+		f := &model.Function{Schema: "app", Name: "f", Kind: "function", Language: "sql", ReturnType: "integer",
+			Definition: "CREATE OR REPLACE FUNCTION app.f()\n RETURNS integer\n LANGUAGE sql\nAS $function$" + body + "$function$",
+			Grants:     []model.Grant{{Grantee: "", Privileges: []model.Privilege{{Type: "EXECUTE"}}}}}
+		return &model.Database{TargetVersion: 160000, Schemas: []*model.Schema{{Name: "app", Functions: []*model.Function{f}}}}
+	}
+	res, err := Compare(mk("SELECT 1"), mk("SELECT 2"), DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Script(true), "GRANT") {
+		t.Fatalf("CREATE OR REPLACE must not re-grant:\n%s", res.Script(true))
+	}
+	// Same for a view replaced in place (a column appended).
+	from := privFixture(nil, []model.Grant{sel("reader", false)})
+	to := privFixture(nil, []model.Grant{sel("reader", false)}, model.ViewColumn{Name: "a", Type: "integer"}, model.ViewColumn{Name: "b", Type: "text"})
+	res, err = Compare(from, to, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Script(true), "GRANT") || strings.Contains(res.Script(true), "DROP VIEW") {
+		t.Fatalf("appending a view column is CREATE OR REPLACE and must not re-grant:\n%s", res.Script(true))
+	}
+}
+
 // Column privileges are modeled per column and granted after the column exists.
 func TestPrivileges_ColumnGrants(t *testing.T) {
 	from := privFixture(nil, nil)

@@ -144,6 +144,11 @@ compare:
 roles: [app_readers]      # roles the project's GRANTs name but does not create
 ```
 
+Roles are cluster objects pg-dac never creates. A GRANT to a role the target lacks is a blocking
+`MISSING_ROLE` hazard; when that is the only blocker and the project has pre-deploy scripts,
+`publish` runs them first (that is where a project provisions its roles) and re-checks before
+refusing.
+
 Every side of a comparison — a live database included — is first brought to the same canonical
 form through a scratch PostgreSQL, so an expression never compares as different only because of
 how PostgreSQL deparsed it when the object was created.

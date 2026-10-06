@@ -524,16 +524,39 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("done", map[string]any{"applied": 0, "baselineRecorded": baselineRecorded})
 		return
 	}
-	if res.HasBlocking() && !opts.AllowHazards {
-		send("error", map[string]any{"message": "refusing to publish: data-loss or unsupported changes present; set allowHazards to proceed"})
-		return
-	}
-
 	total := len(res.Statements)
 	announce := func(phase string) func(string) {
 		return func(name string) {
 			send("progress", map[string]any{"index": 0, "total": total, "sql": "-- " + phase + "-deploy script: " + name})
 		}
+	}
+	// Missing roles are the one blocker a pre-deploy script may remove: run the
+	// scripts and re-check before refusing (the schema is untouched so far).
+	if res.HasBlocking() && !opts.AllowHazards && res.OnlyMissingRoles() && len(pre) > 0 {
+		if err := deploy.Run(d.ctx, conn, pre, announce("pre")); err != nil {
+			send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})
+			return
+		}
+		pre = nil
+		roles, err := introspect.ReadRoles(d.ctx, conn)
+		if err != nil {
+			send("error", map[string]any{"message": err.Error()})
+			return
+		}
+		canonFrom.Roles = roles
+		if res, err = engine.Compare(canonFrom, toModel, opts); err != nil {
+			send("error", map[string]any{"message": err.Error()})
+			return
+		}
+		total = len(res.Statements)
+	}
+	if res.HasBlocking() && !opts.AllowHazards {
+		if missing := res.MissingRoles(); len(missing) > 0 {
+			send("error", map[string]any{"message": fmt.Sprintf("refusing to publish: the source grants privileges to role(s) %v that do not exist in the target; create them (a pre-deploy script is the place) or remove the grants", missing)})
+			return
+		}
+		send("error", map[string]any{"message": "refusing to publish: data-loss or unsupported changes present; set allowHazards to proceed"})
+		return
 	}
 	if err := deploy.Run(d.ctx, conn, pre, announce("pre")); err != nil {
 		send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})

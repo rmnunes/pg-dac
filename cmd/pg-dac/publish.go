@@ -147,7 +147,30 @@ func newPublishCmd() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Deploy scripts: %d pre-deploy, %d post-deploy\n", len(pre), len(post))
 			}
 
+			announce := func(phase string) func(string) {
+				return func(name string) { fmt.Fprintf(cmd.ErrOrStderr(), "%s-deploy: %s\n", phase, name) }
+			}
+			// Roles are the environment's: a project provisions them in a pre-deploy
+			// script. When missing roles are the only blocker, run those scripts and
+			// re-check before refusing — nothing of the schema has been touched yet.
+			if res.HasBlocking() && !f.allowHaz && !dryRun && res.OnlyMissingRoles() && len(pre) > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "roles %v are missing from the target; running the pre-deploy scripts first in case they provision them\n", res.MissingRoles())
+				if err := deploy.Run(ctx, conn, pre, announce("pre")); err != nil {
+					return err
+				}
+				pre = nil
+				if canonFrom.Roles, err = introspect.ReadRoles(ctx, conn); err != nil {
+					return err
+				}
+				if res, err = engine.Compare(canonFrom, toModel, opts); err != nil {
+					return err
+				}
+				res.Prelude = prelude
+			}
 			if res.HasBlocking() && !f.allowHaz {
+				if missing := res.MissingRoles(); len(missing) > 0 {
+					return fmt.Errorf("refusing to publish: the source grants privileges to role(s) %v that do not exist in the target; create them (a pre-deploy script is the place) or remove the grants", missing)
+				}
 				return fmt.Errorf("refusing to publish: the migration contains data-loss or unsupported changes; review the hazards and re-run with --allow-hazards to proceed")
 			}
 			if dryRun {
@@ -172,9 +195,6 @@ func newPublishCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "validation: OK")
 			}
 
-			announce := func(phase string) func(string) {
-				return func(name string) { fmt.Fprintf(cmd.ErrOrStderr(), "%s-deploy: %s\n", phase, name) }
-			}
 			if err := deploy.Run(ctx, conn, pre, announce("pre")); err != nil {
 				return err
 			}

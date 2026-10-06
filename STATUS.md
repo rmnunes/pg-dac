@@ -156,8 +156,11 @@ grant silently.
   and table columns. GRANT for what the source adds; REVOKE only under drop policy `all`
   (SSDT's `DropPermissionsNotInSource`); an object pg-dac drops and recreates always gets its
   privileges back, even with `--ignore-privileges`. A GRANT to a role the live target lacks is a
-  blocking `MISSING_ROLE` hazard. Projects list environment roles in `pgdac.yaml` `roles:` (created
-  in the scratch database so the project builds); `extract` writes them.
+  blocking `MISSING_ROLE` hazard; when it is the only blocker, `publish` runs the project's
+  pre-deploy scripts (where roles are provisioned) and re-checks before refusing. Projects list
+  environment roles in `pgdac.yaml` `roles:` (created in the scratch database so the project
+  builds); `extract` writes them. A `CREATE OR REPLACE` keeps an object's ACL, so only a real
+  drop + create re-grants.
 - **Column order policy** (`compare.columnOrder` / `--column-order`): `warn` (default) reports a
   declared order PostgreSQL cannot reach by appending; `ignore` is silent; `rebuild` performs the
   SSDT table rebuild as one atomic `DO` block with the drop policy deciding what happens to

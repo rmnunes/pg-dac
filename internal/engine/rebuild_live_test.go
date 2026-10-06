@@ -80,7 +80,7 @@ ALTER SEQUENCE n_seq OWNED BY t.n;` + common
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !warnOnly.Empty() || len(warnOnly.Warnings) != 1 || !strings.Contains(warnOnly.Warnings[0], "column order") {
+	if !warnOnly.Empty() || len(warnOnly.Warnings) != 1 || !strings.Contains(warnOnly.Warnings[0], "declared in a position the target does not have") {
 		t.Fatalf("default policy must only warn; ops:\n%s\nwarnings: %v", warnOnly.Script(true), warnOnly.Warnings)
 	}
 

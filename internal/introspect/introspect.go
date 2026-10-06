@@ -174,7 +174,7 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 	if err := readPrivileges(ctx, q, names, byName, tables, views, mviews); err != nil {
 		return nil, err
 	}
-	if db.Roles, err = readRoles(ctx, q); err != nil {
+	if db.Roles, err = ReadRoles(ctx, q); err != nil {
 		return nil, err
 	}
 

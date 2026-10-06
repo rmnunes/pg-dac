@@ -29,17 +29,27 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 	if to == nil {
 		return cs
 	}
+	// An object loses its privileges only when it is actually dropped and
+	// created again (or did not exist). A CREATE OR REPLACE of a view or a
+	// function keeps its ACL, so a body change must not re-grant anything.
 	created := map[string]bool{}
+	dropped := map[string]bool{}
 	addedCols := map[string]bool{}
 	for _, op := range cs.Ops {
 		switch op.Type {
 		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateSequence,
 			diff.OpCreateFunction, diff.OpCreateSchema, diff.OpCreateEnum, diff.OpCreateDomain, diff.OpCreateCompositeType:
 			created[op.Owner.Key()] = true
+		case diff.OpDropTable, diff.OpDropView, diff.OpDropMatView, diff.OpDropSequence,
+			diff.OpDropFunction, diff.OpDropSchema, diff.OpDropEnum, diff.OpDropDomain, diff.OpDropCompositeType:
+			dropped[op.Owner.Key()] = true
 		case diff.OpAddColumn:
 			addedCols[colKey(op.Owner, op.Sub)] = true
 		}
 	}
+	// fresh reports whether the object named by key holds no privileges after
+	// the migration's own operations: new, or dropped and created again.
+	fresh := func(key string, exists bool) bool { return created[key] && (!exists || dropped[key]) }
 	var roles map[string]bool
 	if from != nil && len(from.Roles) > 0 {
 		roles = map[string]bool{}
@@ -93,7 +103,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 		if fs != nil {
 			fsGrants = fs.Grants
 		}
-		emit(sref, "", nil, fsGrants, s.Grants, fs != nil, created[sref.Key()])
+		emit(sref, "", nil, fsGrants, s.Grants, fs != nil, fresh(sref.Key(), fs != nil))
 
 		for _, t := range s.Tables {
 			var ft *model.Table
@@ -105,7 +115,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 				ftGrants = ft.Grants
 			}
 			key := t.Ref().Key()
-			emit(t.Ref(), "", nil, ftGrants, t.Grants, ft != nil, created[key])
+			emit(t.Ref(), "", nil, ftGrants, t.Grants, ft != nil, fresh(key, ft != nil))
 			for _, c := range t.Columns {
 				var fc *model.Column
 				if ft != nil {
@@ -115,7 +125,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 				if fc != nil {
 					fcGrants = fc.Grants
 				}
-				emit(t.Ref(), c.Name, nil, fcGrants, c.Grants, fc != nil, created[key] || addedCols[colKey(t.Ref(), c.Name)])
+				emit(t.Ref(), c.Name, nil, fcGrants, c.Grants, fc != nil, fresh(key, ft != nil) || addedCols[colKey(t.Ref(), c.Name)])
 			}
 		}
 		for _, v := range s.Views {
@@ -128,7 +138,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(v.Ref(), "", nil, fg, v.Grants, exists, created[v.Ref().Key()])
+			emit(v.Ref(), "", nil, fg, v.Grants, exists, fresh(v.Ref().Key(), exists))
 		}
 		for _, m := range s.MatViews {
 			var fg []model.Grant
@@ -140,7 +150,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(m.Ref(), "", nil, fg, m.Grants, exists, created[m.Ref().Key()])
+			emit(m.Ref(), "", nil, fg, m.Grants, exists, fresh(m.Ref().Key(), exists))
 		}
 		for _, q := range s.Sequences {
 			if to.IsIdentitySequence(q) {
@@ -155,7 +165,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(q.Ref(), "", nil, fg, q.Grants, exists, created[q.Ref().Key()])
+			emit(q.Ref(), "", nil, fg, q.Grants, exists, fresh(q.Ref().Key(), exists))
 		}
 		for _, f := range s.Functions {
 			var fg []model.Grant
@@ -167,7 +177,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(f.Ref(), "", f, fg, f.Grants, exists, created[f.Ref().Key()])
+			emit(f.Ref(), "", f, fg, f.Grants, exists, fresh(f.Ref().Key(), exists))
 		}
 		for _, e := range s.Enums {
 			var fg []model.Grant
@@ -179,7 +189,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(e.Ref(), "", nil, fg, e.Grants, exists, created[e.Ref().Key()])
+			emit(e.Ref(), "", nil, fg, e.Grants, exists, fresh(e.Ref().Key(), exists))
 		}
 		for _, d := range s.Domains {
 			var fg []model.Grant
@@ -191,7 +201,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(d.Ref(), "", nil, fg, d.Grants, exists, created[d.Ref().Key()])
+			emit(d.Ref(), "", nil, fg, d.Grants, exists, fresh(d.Ref().Key(), exists))
 		}
 		for _, c := range s.Composites {
 			var fg []model.Grant
@@ -203,7 +213,7 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 					}
 				}
 			}
-			emit(c.Ref(), "", nil, fg, c.Grants, exists, created[c.Ref().Key()])
+			emit(c.Ref(), "", nil, fg, c.Grants, exists, fresh(c.Ref().Key(), exists))
 		}
 	}
 	if len(added) == 0 {

@@ -35,7 +35,55 @@ func columnOrderMismatch(prev, cur *model.Table) string {
 	if strings.Join(reachable, "\x00") == strings.Join(declared, "\x00") {
 		return ""
 	}
-	return "declared column order (" + strings.Join(declared, ", ") + ") differs from the target's (" + strings.Join(reachable, ", ") + ")"
+	moved := misplaced(declared, reachable)
+	noun := "column"
+	if len(moved) > 1 {
+		noun = "columns"
+	}
+	return noun + " " + strings.Join(moved, ", ") + " declared in a position the target does not have (the target appended " +
+		map[bool]string{true: "them", false: "it"}[len(moved) > 1] + " later)"
+}
+
+// misplaced returns the smallest set of columns that would have to move for the
+// target's order to become the declared one: the columns outside a longest
+// common subsequence of the two orders (both are permutations of one set).
+func misplaced(declared, reachable []string) []string {
+	n, m := len(declared), len(reachable)
+	lcs := make([][]int, n+1)
+	for i := range lcs {
+		lcs[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if declared[i] == reachable[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+	kept := map[string]bool{}
+	for i, j := 0, 0; i < n && j < m; {
+		switch {
+		case declared[i] == reachable[j]:
+			kept[declared[i]] = true
+			i++
+			j++
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			i++
+		default:
+			j++
+		}
+	}
+	var out []string
+	for _, c := range declared {
+		if !kept[c] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // rebuildBlocker returns why a table cannot be rebuilt ("" when it can):
