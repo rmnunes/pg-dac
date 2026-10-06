@@ -114,6 +114,11 @@ type Op struct {
 
 	// EnumValues holds the new labels for OpAddEnumValue.
 	EnumValues []string
+
+	// Reason, when set, explains why this op exists beyond the plain diff (e.g.
+	// a view recreated because CREATE OR REPLACE cannot drop its columns, or a
+	// dependent recreated around a blocking change). Rendered as a SQL comment.
+	Reason string
 }
 
 // ChangeSet is the ordered-by-discovery list of operations a diff produced.

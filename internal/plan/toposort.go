@@ -12,11 +12,10 @@ import "container/heap"
 // priority[i] and ordinal[i] are the sort keys. n is the node count.
 //
 // If a dependency cycle prevents a complete ordering, the remaining nodes are
-// appended in (priority, ordinal) order so the caller still gets every node;
-// cycles among real PostgreSQL objects (mutual FKs, view/rule loops) are rare in
-// a single migration and are handled structurally elsewhere (FKs are emitted in a
-// later priority band than their tables).
-func toposort(n int, edges map[int][]int, priority, ordinal []int) []int {
+// appended in (priority, ordinal) order so the caller still gets every node, and
+// returned separately as cyclic so the caller can warn: such a migration will
+// most likely fail to apply, and the objects named are the ones to look at.
+func toposort(n int, edges map[int][]int, priority, ordinal []int) (order, cyclic []int) {
 	indeg := make([]int, n)
 	for _, outs := range edges {
 		for _, b := range outs {
@@ -58,8 +57,9 @@ func toposort(n int, edges map[int][]int, priority, ordinal []int) []int {
 		}
 		sortByKey(rest, priority, ordinal)
 		out = append(out, rest...)
+		cyclic = rest
 	}
-	return out
+	return out, cyclic
 }
 
 func sortByKey(idx, priority, ordinal []int) {

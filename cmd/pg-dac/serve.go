@@ -254,7 +254,7 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	send("result", map[string]any{"plan": res.PlanDoc(), "warnings": append(fw, tw...)})
+	send("result", map[string]any{"plan": res.PlanDoc(), "warnings": append(append(fw, tw...), res.Warnings...)})
 }
 
 // objectCount is a rough size of a model, shown in the compare progress dialog.
@@ -289,7 +289,7 @@ func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards), "warnings": append(fw, tw...)})
+	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards), "warnings": append(append(fw, tw...), res.Warnings...)})
 }
 
 // publish streams a live apply over Server-Sent Events: a "start" event, one
@@ -341,7 +341,7 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(), "warnings": warns})
+	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(), "warnings": append(warns, res.Warnings...)})
 	if res.Empty() {
 		send("done", map[string]any{"applied": 0})
 		return

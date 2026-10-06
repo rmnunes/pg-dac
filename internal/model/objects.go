@@ -1,5 +1,13 @@
 package model
 
+// ViewColumn is one output column of a view (name and canonical type), in
+// position order. CREATE OR REPLACE VIEW may only append columns; a rename,
+// removal, or type change needs DROP + CREATE (and a recreate of dependents).
+type ViewColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // View models a regular view (relkind 'v').
 type View struct {
 	Schema  string `json:"schema"`
@@ -18,6 +26,15 @@ type View struct {
 	// pg_depend/pg_rewrite, so the planner can order view creation after its
 	// dependencies and view drops before them.
 	DependsOn []ObjRef `json:"dependsOn,omitempty"`
+
+	// Columns is the view's output column list (name + type, in order). It
+	// decides whether a changed definition can be applied with CREATE OR REPLACE
+	// (only appended columns) or needs DROP + CREATE.
+	Columns []ViewColumn `json:"columns,omitempty"`
+	// ColumnDeps lists the specific columns this view references (pg_depend
+	// refobjsubid > 0). A type change or drop of one of them is blocked by the
+	// view, so the engine drops and recreates the view around that change.
+	ColumnDeps []ColumnRef `json:"columnDeps,omitempty"`
 }
 
 // Ref returns a dependency-graph reference to this view.
@@ -33,10 +50,11 @@ type MaterializedView struct {
 	Owner   string `json:"owner,omitempty"`
 	Comment string `json:"comment,omitempty"`
 
-	Definition string   `json:"definition"`
-	WithData   bool     `json:"withData,omitempty"`
-	DependsOn  []ObjRef `json:"dependsOn,omitempty"`
-	Indexes    []*Index `json:"indexes,omitempty"`
+	Definition string      `json:"definition"`
+	WithData   bool        `json:"withData,omitempty"`
+	DependsOn  []ObjRef    `json:"dependsOn,omitempty"`
+	ColumnDeps []ColumnRef `json:"columnDeps,omitempty"`
+	Indexes    []*Index    `json:"indexes,omitempty"`
 }
 
 // Ref returns a dependency-graph reference to this materialized view.
@@ -97,6 +115,15 @@ type Function struct {
 	Definition string `json:"definition"`
 	Language   string `json:"language,omitempty"`
 	Comment    string `json:"comment,omitempty"`
+
+	// ReturnType is pg_get_function_result (e.g. "integer", "SETOF app.t",
+	// "TABLE(a integer)"); empty for procedures. CREATE OR REPLACE cannot change
+	// it, so a change means DROP + CREATE (and recreating dependents).
+	ReturnType string `json:"returnType,omitempty"`
+	// Arguments is the full pg_get_function_arguments text (modes, names,
+	// defaults). OUT-parameter changes alter the result row type and likewise
+	// force DROP + CREATE.
+	Arguments string `json:"arguments,omitempty"`
 
 	// DependsOn lists objects that must exist before the function can be
 	// created: relation row types and user types (enums) used in its signature,

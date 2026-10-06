@@ -43,10 +43,20 @@ func diffFunctions(cs *ChangeSet, from, to *model.Schema) {
 	toF := indexFunctions(to)
 	for _, f := range functionsOf(to) {
 		prev, ok := fromF[f.Signature()]
-		if !ok || prev.Definition != f.Definition {
-			// CREATE OR REPLACE covers both create and body change.
-			cs.add(Op{Type: OpCreateFunction, Owner: f.Ref(), Sub: f.IdentityArgs, Function: f})
+		if ok && prev.Definition == f.Definition {
+			continue
 		}
+		if ok {
+			if reason := functionRecreateReason(prev, f); reason != "" {
+				// CREATE OR REPLACE cannot change the result type or kind: drop first.
+				// Dependents (views, triggers) are recreated by the engine.
+				cs.add(Op{Type: OpDropFunction, Owner: f.Ref(), Sub: f.IdentityArgs, Function: prev, Reason: reason})
+				cs.add(Op{Type: OpCreateFunction, Owner: f.Ref(), Sub: f.IdentityArgs, Function: f, Reason: reason})
+				continue
+			}
+		}
+		// CREATE OR REPLACE covers both create and body change.
+		cs.add(Op{Type: OpCreateFunction, Owner: f.Ref(), Sub: f.IdentityArgs, Function: f})
 	}
 	for _, f := range functionsOf(from) {
 		if _, ok := toF[f.Signature()]; !ok {
@@ -372,10 +382,19 @@ func diffViews(cs *ChangeSet, from, to *model.Schema) {
 	toV := indexViews(to)
 	for _, v := range viewsOf(to) {
 		prev, ok := fromV[v.Name]
-		if !ok || prev.Definition != v.Definition || prev.CheckOption != v.CheckOption {
-			// CREATE OR REPLACE handles both create and compatible body changes.
-			cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v})
+		if ok && prev.Definition == v.Definition && prev.CheckOption == v.CheckOption {
+			continue
 		}
+		if ok && !viewReplaceCompatible(prev, v) {
+			// CREATE OR REPLACE VIEW may only append columns; dependents are
+			// recreated by the engine.
+			reason := "view columns were dropped, renamed, or retyped — CREATE OR REPLACE VIEW cannot do that, so the view is recreated"
+			cs.add(Op{Type: OpDropView, Owner: v.Ref(), View: prev, Reason: reason})
+			cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v, Reason: reason})
+			continue
+		}
+		// CREATE OR REPLACE handles both create and compatible body changes.
+		cs.add(Op{Type: OpCreateView, Owner: v.Ref(), View: v})
 	}
 	for _, v := range viewsOf(from) {
 		if _, ok := toV[v.Name]; !ok {

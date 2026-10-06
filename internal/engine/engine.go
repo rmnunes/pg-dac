@@ -6,6 +6,9 @@
 package engine
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/rodrigonunes/pg-dac/internal/diff"
 	"github.com/rodrigonunes/pg-dac/internal/model"
 	"github.com/rodrigonunes/pg-dac/internal/plan"
@@ -61,6 +64,10 @@ type Result struct {
 	Plan       *plan.Plan
 	Groups     []sqlgen.OpStatements // per-op statements, preserving the op<->SQL link
 	Statements []sqlgen.Statement    // flattened, in plan order (script/apply consume this)
+	// Warnings are problems with the generated migration itself (e.g. a
+	// dependency cycle the planner could not order); callers show them to the
+	// user alongside the script.
+	Warnings []string
 
 	from, to *model.Database // retained for per-object before/after definition rendering
 	online   bool
@@ -75,6 +82,7 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	cs := diff.Diff(from, to)
 	cs = filterDrops(cs, opts)
 	cs = filterByObject(cs, opts)
+	cs = expandDependents(cs, from, to)
 
 	p := plan.Build(cs)
 
@@ -94,7 +102,17 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	for _, g := range groups {
 		stmts = append(stmts, g.Statements...)
 	}
-	return &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, from: from, to: to, online: opts.Online}, nil
+	res := &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, from: from, to: to, online: opts.Online}
+	if len(p.Cyclic) > 0 {
+		names := make([]string, 0, len(p.Cyclic))
+		for _, op := range p.Cyclic {
+			names = append(names, object(op))
+		}
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"dependency cycle: %d operation(s) could not be ordered and were appended in priority order; the migration may fail to apply — check: %s",
+			len(p.Cyclic), strings.Join(names, "; ")))
+	}
+	return res, nil
 }
 
 // filterByObject keeps only ops whose owning object passes the include/exclude

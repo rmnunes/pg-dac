@@ -105,10 +105,13 @@ func renderAlterColumnType(op diff.Op) []Statement {
 	if c.Collation != "" {
 		sql += " COLLATE " + c.Collation
 	}
+	// An explicit cast lets conversions with no assignment cast (text -> integer,
+	// ...) apply; for binary-coercible changes PostgreSQL still skips the rewrite.
+	sql += " USING " + model.QuoteIdent(c.Name) + "::" + c.Type
 	return []Statement{{
 		SQL:           sql + ";",
 		Transactional: true,
-		Note:          "type changes rewrite the table unless the cast is binary-coercible; a USING clause may be required",
+		Note:          "type changes rewrite the table unless the cast is binary-coercible; the USING cast is a plain conversion — edit it if values need transforming",
 		Hazards: []safety.Hazard{
 			safety.New(safety.TableRewrite, "may rewrite the whole table and its indexes"),
 			safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table"),

@@ -435,6 +435,14 @@ func readViews(ctx context.Context, q Querier, schemas []string, byName map[stri
 	if err != nil {
 		return err
 	}
+	cols, err := readViewColumns(ctx, q, schemas)
+	if err != nil {
+		return err
+	}
+	colDeps, err := readViewColumnDeps(ctx, q, schemas)
+	if err != nil {
+		return err
+	}
 	rows, err := q.Query(ctx, `
 SELECT n.nspname, c.relname,
        pg_catalog.pg_get_userbyid(c.relowner),
@@ -456,6 +464,8 @@ ORDER BY n.nspname, c.relname`, schemas)
 		}
 		v.Definition = trimDef(v.Definition)
 		v.DependsOn = deps[tkey(v.Schema, v.Name)]
+		v.Columns = cols[tkey(v.Schema, v.Name)]
+		v.ColumnDeps = colDeps[tkey(v.Schema, v.Name)]
 		if sc := byName[v.Schema]; sc != nil {
 			sc.Views = append(sc.Views, v)
 		}
@@ -465,6 +475,10 @@ ORDER BY n.nspname, c.relname`, schemas)
 
 func readMatViews(ctx context.Context, q Querier, schemas []string, byName map[string]*model.Schema) error {
 	deps, err := readViewDeps(ctx, q, schemas)
+	if err != nil {
+		return err
+	}
+	colDeps, err := readViewColumnDeps(ctx, q, schemas)
 	if err != nil {
 		return err
 	}
@@ -490,11 +504,73 @@ ORDER BY n.nspname, c.relname`, schemas)
 		}
 		m.Definition = trimDef(m.Definition)
 		m.DependsOn = deps[tkey(m.Schema, m.Name)]
+		m.ColumnDeps = colDeps[tkey(m.Schema, m.Name)]
 		if sc := byName[m.Schema]; sc != nil {
 			sc.MatViews = append(sc.MatViews, m)
 		}
 	}
 	return rows.Err()
+}
+
+// readViewColumns returns each view's output columns (name + canonical type)
+// in position order, keyed by tkey(schema,name).
+func readViewColumns(ctx context.Context, q Querier, schemas []string) (map[string][]model.ViewColumn, error) {
+	rows, err := q.Query(ctx, `
+SELECT n.nspname, c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+WHERE c.relkind = 'v' AND n.nspname = ANY($1)
+ORDER BY n.nspname, c.relname, a.attnum`, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("read view columns: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string][]model.ViewColumn{}
+	for rows.Next() {
+		var vschema, vname string
+		var col model.ViewColumn
+		if err := rows.Scan(&vschema, &vname, &col.Name, &col.Type); err != nil {
+			return nil, err
+		}
+		out[tkey(vschema, vname)] = append(out[tkey(vschema, vname)], col)
+	}
+	return out, rows.Err()
+}
+
+// readViewColumnDeps returns, for each view/matview, the specific columns of
+// other relations it references (pg_depend rows with refobjsubid > 0). These
+// are the columns whose type change or drop PostgreSQL refuses while the view
+// exists, so the engine knows exactly which views to recreate around them.
+func readViewColumnDeps(ctx context.Context, q Querier, schemas []string) (map[string][]model.ColumnRef, error) {
+	rows, err := q.Query(ctx, `
+SELECT DISTINCT vn.nspname, vc.relname, rn.nspname, rc.relname, a.attname, a.attnum
+FROM pg_catalog.pg_rewrite rw
+JOIN pg_catalog.pg_class vc ON vc.oid = rw.ev_class
+JOIN pg_catalog.pg_namespace vn ON vn.oid = vc.relnamespace
+JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass
+     AND d.objid = rw.oid AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjsubid > 0
+JOIN pg_catalog.pg_class rc ON rc.oid = d.refobjid
+JOIN pg_catalog.pg_namespace rn ON rn.oid = rc.relnamespace
+JOIN pg_catalog.pg_attribute a ON a.attrelid = rc.oid AND a.attnum = d.refobjsubid
+WHERE vc.relkind IN ('v', 'm') AND vn.nspname = ANY($1) AND rc.oid <> vc.oid
+ORDER BY 1, 2, 3, 4, 6`, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("read view column deps: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string][]model.ColumnRef{}
+	for rows.Next() {
+		var vschema, vname, rschema, rname, col string
+		var attnum int
+		if err := rows.Scan(&vschema, &vname, &rschema, &rname, &col, &attnum); err != nil {
+			return nil, err
+		}
+		out[tkey(vschema, vname)] = append(out[tkey(vschema, vname)], model.ColumnRef{Schema: rschema, Table: rname, Column: col})
+	}
+	return out, rows.Err()
 }
 
 // readViewDeps returns, for each view/matview keyed by tkey(schema,name), the

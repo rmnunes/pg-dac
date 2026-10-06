@@ -19,6 +19,10 @@ import (
 // Plan is the ordered sequence of operations to apply.
 type Plan struct {
 	Ops []diff.Op
+	// Cyclic lists operations that took part in a dependency cycle and could
+	// not be ordered; they were appended in priority order. Non-empty means the
+	// migration will probably fail to apply as generated.
+	Cyclic []diff.Op
 }
 
 // Empty reports whether the plan has no operations.
@@ -36,13 +40,17 @@ func Build(cs *diff.ChangeSet) *Plan {
 	}
 
 	edges := deriveEdges(ops)
-	order := toposort(n, edges, priority, ordinal)
+	order, cyclic := toposort(n, edges, priority, ordinal)
 
 	out := make([]diff.Op, 0, n)
 	for _, i := range order {
 		out = append(out, ops[i])
 	}
-	return &Plan{Ops: out}
+	p := &Plan{Ops: out}
+	for _, i := range cyclic {
+		p.Cyclic = append(p.Cyclic, ops[i])
+	}
+	return p
 }
 
 // opPriority returns the coarse ordering band for an operation. Drops occupy

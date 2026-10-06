@@ -56,7 +56,24 @@ func Generate(p *plan.Plan, opts Options) ([]Statement, error) {
 	return out, nil
 }
 
+// renderOp renders one op; an op-level Reason (why the op exists beyond the
+// plain diff) becomes the note of its first statement.
 func renderOp(op diff.Op, opts Options) ([]Statement, error) {
+	stmts, err := renderOpInner(op, opts)
+	if err != nil {
+		return nil, err
+	}
+	if op.Reason != "" && len(stmts) > 0 {
+		if stmts[0].Note == "" {
+			stmts[0].Note = op.Reason
+		} else {
+			stmts[0].Note = op.Reason + "; " + stmts[0].Note
+		}
+	}
+	return stmts, nil
+}
+
+func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 	switch op.Type {
 	case diff.OpCreateSchema:
 		return one("CREATE SCHEMA "+model.QuoteIdent(op.Schema.Name)+";", op.Schema.Comment, commentOn("SCHEMA", model.QuoteIdent(op.Schema.Name), op.Schema.Comment)), nil
@@ -176,7 +193,12 @@ func renderOp(op diff.Op, opts Options) ([]Statement, error) {
 			data = " WITH NO DATA"
 		}
 		sql := "CREATE MATERIALIZED VIEW " + op.MatView.QualifiedName() + " AS " + op.MatView.Definition + data + ";"
-		return one(sql, op.MatView.Comment, commentOn("MATERIALIZED VIEW", op.MatView.QualifiedName(), op.MatView.Comment)), nil
+		stmts := one(sql, op.MatView.Comment, commentOn("MATERIALIZED VIEW", op.MatView.QualifiedName(), op.MatView.Comment))
+		if op.Reason != "" && op.MatView.WithData {
+			stmts[0].Hazards = append(stmts[0].Hazards, safety.New(safety.ImpactsPerformance,
+				"the materialized view is rebuilt (its data is recomputed) as part of being recreated"))
+		}
+		return stmts, nil
 	case diff.OpDropMatView:
 		return one("DROP MATERIALIZED VIEW "+op.MatView.QualifiedName()+";", "", nil), nil
 

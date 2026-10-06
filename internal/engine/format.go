@@ -26,6 +26,9 @@ func (r *Result) Script(allowHazards bool) string {
 	b.WriteString("--       (CONCURRENTLY statements must not run inside a transaction).\n")
 	b.WriteString("-- Function bodies are not validated at CREATE time (as in pg_dump output), so a\n")
 	b.WriteString("-- SQL-language function may reference objects created later in this script.\n")
+	for _, w := range r.Warnings {
+		fmt.Fprintf(&b, "-- WARNING: %s\n", w)
+	}
 	b.WriteString(SessionPreamble + "\n\n")
 
 	for _, s := range r.Statements {

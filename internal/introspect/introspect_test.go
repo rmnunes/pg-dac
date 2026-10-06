@@ -162,6 +162,19 @@ func TestIntrospect_Invariants(t *testing.T) {
 			if v.Name == "v2" && !contains(v.DependsOn, model.ObjRef{Kind: model.KindFunction, Schema: "app", Name: "one()"}) {
 				t.Errorf("view v2 should depend on function app.one(), got %v", v.DependsOn)
 			}
+			if v.Name == "v" {
+				if len(v.Columns) != 1 || v.Columns[0] != (model.ViewColumn{Name: "id", Type: "integer"}) {
+					t.Errorf("view v columns: got %+v", v.Columns)
+				}
+				if len(v.ColumnDeps) != 1 || v.ColumnDeps[0] != (model.ColumnRef{Schema: "app", Table: "t", Column: "id"}) {
+					t.Errorf("view v column deps: got %+v", v.ColumnDeps)
+				}
+			}
+		}
+		for _, f := range app.Functions {
+			if f.Name == "f" && (f.ReturnType != "SETOF app.t" || f.Arguments != "x app.status") {
+				t.Errorf("function f: return %q arguments %q", f.ReturnType, f.Arguments)
+			}
 		}
 	})
 }

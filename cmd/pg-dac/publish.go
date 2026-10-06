@@ -54,6 +54,7 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			printWarnings(cmd, "plan", res.Warnings)
 			if res.Empty() {
 				fmt.Fprintln(out, "Target is already up to date.")
 				return nil

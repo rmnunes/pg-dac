@@ -76,6 +76,7 @@ func (f *commonFlags) compare(cmd *cobra.Command) (*engine.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	printWarnings(cmd, "plan", res.Warnings)
 	if f.doValidate {
 		f.printValidation(cmd, from, to)
 	}

@@ -22,7 +22,11 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	pkUniqueAddByTable := map[string][]int{}
 	addColumnByCol := map[string]int{}
 	defaultOpsByCol := map[string][]int{}
+	colChangeByCol := map[string][]int{} // ALTER TYPE / DROP COLUMN, which dependent views must bracket
 	colKey := func(table model.ObjRef, col string) string { return table.Key() + "#" + col }
+	colRefKey := func(c model.ColumnRef) string {
+		return model.ObjRef{Kind: model.KindTable, Schema: c.Schema, Name: c.Table}.Key() + "#" + c.Column
+	}
 
 	for i, op := range ops {
 		switch op.Type {
@@ -39,6 +43,9 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 		case diff.OpSetColumnDefault, diff.OpDropColumnDefault, diff.OpAlterColumnIdentity:
 			k := colKey(op.Owner, op.Sub)
 			defaultOpsByCol[k] = append(defaultOpsByCol[k], i)
+		case diff.OpAlterColumnType, diff.OpDropColumn:
+			k := colKey(op.Owner, op.Sub)
+			colChangeByCol[k] = append(colChangeByCol[k], i)
 		}
 		if op.Type == diff.OpAddConstraint && op.Constraint != nil &&
 			(op.Constraint.Type == model.ConstraintPrimaryKey || op.Constraint.Type == model.ConstraintUnique) {
@@ -108,12 +115,27 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 
 		case diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateFunction:
 			// Must follow creation of everything referenced (relations, enums,
-			// functions — including a function's return/argument row types).
+			// functions — including a function's return/argument row types)...
 			afterCreates(i, dependsOn(op))
+			// ...and any type change / add of a column it reads.
+			for _, c := range columnDepsOf(op) {
+				for _, cc := range colChangeByCol[colRefKey(c)] {
+					add(cc, i)
+				}
+				if ac, ok := addColumnByCol[colRefKey(c)]; ok {
+					add(ac, i)
+				}
+			}
 
 		case diff.OpDropView, diff.OpDropMatView, diff.OpDropFunction:
-			// Dependents first: drop before any dependency that is also dropped.
+			// Dependents first: drop before any dependency that is also dropped...
 			beforeDrops(i, dependsOn(op))
+			// ...and before a type change / drop of a column it reads.
+			for _, c := range columnDepsOf(op) {
+				for _, cc := range colChangeByCol[colRefKey(c)] {
+					add(i, cc)
+				}
+			}
 
 		case diff.OpDropConstraint:
 			// A dropped foreign key must be dropped before the referenced table
@@ -154,6 +176,17 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 		}
 	}
 	return edges
+}
+
+// columnDepsOf returns the column-level dependencies carried by a view/matview op.
+func columnDepsOf(op diff.Op) []model.ColumnRef {
+	switch {
+	case op.View != nil:
+		return op.View.ColumnDeps
+	case op.MatView != nil:
+		return op.MatView.ColumnDeps
+	}
+	return nil
 }
 
 // dependsOn returns the dependency references carried by an op's payload.

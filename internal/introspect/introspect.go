@@ -193,6 +193,8 @@ SELECT n.nspname,
        pg_catalog.pg_get_function_identity_arguments(p.oid),
        pg_catalog.pg_get_functiondef(p.oid),
        l.lanname,
+       COALESCE(pg_catalog.pg_get_function_result(p.oid), ''),
+       pg_catalog.pg_get_function_arguments(p.oid),
        COALESCE(pg_catalog.obj_description(p.oid, 'pg_proc'), '')
 FROM pg_catalog.pg_proc p
 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
@@ -211,7 +213,7 @@ ORDER BY n.nspname, p.proname`, schemas)
 
 	for rows.Next() {
 		f := &model.Function{}
-		if err := rows.Scan(&f.Schema, &f.Name, &f.Kind, &f.IdentityArgs, &f.Definition, &f.Language, &f.Comment); err != nil {
+		if err := rows.Scan(&f.Schema, &f.Name, &f.Kind, &f.IdentityArgs, &f.Definition, &f.Language, &f.ReturnType, &f.Arguments, &f.Comment); err != nil {
 			return err
 		}
 		f.Definition = nlnorm(f.Definition)

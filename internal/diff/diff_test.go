@@ -141,3 +141,53 @@ func TestDiff_ValidatesNotValidConstraintInPlace(t *testing.T) {
 		t.Errorf("identical NOT VALID constraints must compare equal, got %v", opSummary(cs))
 	}
 }
+
+func TestViewReplaceCompatible(t *testing.T) {
+	cols := func(cs ...string) []model.ViewColumn {
+		var out []model.ViewColumn
+		for i := 0; i+1 < len(cs); i += 2 {
+			out = append(out, model.ViewColumn{Name: cs[i], Type: cs[i+1]})
+		}
+		return out
+	}
+	v := func(cs ...string) *model.View { return &model.View{Columns: cols(cs...)} }
+	cases := []struct {
+		name      string
+		prev, cur *model.View
+		want      bool
+	}{
+		{"append column", v("a", "integer"), v("a", "integer", "b", "text"), true},
+		{"identical", v("a", "integer"), v("a", "integer"), true},
+		{"drop column", v("a", "integer", "b", "text"), v("a", "integer"), false},
+		{"rename column", v("a", "integer"), v("b", "integer"), false},
+		{"retype column", v("a", "integer"), v("a", "bigint"), false},
+		{"reorder", v("a", "integer", "b", "text"), v("b", "text", "a", "integer"), false},
+		{"unknown columns (older artifact)", &model.View{}, v("a", "integer"), true},
+	}
+	for _, c := range cases {
+		if got := viewReplaceCompatible(c.prev, c.cur); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestFunctionRecreateReason(t *testing.T) {
+	f := func(kind, ret, args string) *model.Function {
+		return &model.Function{Kind: kind, ReturnType: ret, Arguments: args}
+	}
+	if r := functionRecreateReason(f("function", "integer", "a integer"), f("function", "integer", "a integer, b text DEFAULT 'x'::text")); r != "" {
+		t.Errorf("adding an input parameter with a default is a signature change handled elsewhere, not a recreate: %q", r)
+	}
+	if r := functionRecreateReason(f("function", "integer", ""), f("function", "bigint", "")); r == "" {
+		t.Error("return type change must force a recreate")
+	}
+	if r := functionRecreateReason(f("function", "void", ""), f("procedure", "", "")); r == "" {
+		t.Error("function -> procedure must force a recreate")
+	}
+	if r := functionRecreateReason(f("function", "record", "OUT a integer, OUT b text"), f("function", "record", "OUT a bigint, OUT b text")); r == "" {
+		t.Error("OUT parameter type change must force a recreate")
+	}
+	if r := functionRecreateReason(f("function", "", ""), f("function", "bigint", "")); r != "" {
+		t.Errorf("unknown return type (older artifact) must not force a recreate: %q", r)
+	}
+}

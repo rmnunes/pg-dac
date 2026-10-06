@@ -2,6 +2,7 @@ package diff
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/rodrigonunes/pg-dac/internal/model"
 )
@@ -248,6 +249,48 @@ func matViewsOf(s *model.Schema) []*model.MaterializedView {
 		return nil
 	}
 	return s.MatViews
+}
+
+// viewReplaceCompatible reports whether cur can replace prev with CREATE OR
+// REPLACE VIEW: PostgreSQL allows that only when the existing columns keep their
+// names and types in the same positions and new columns are appended at the
+// end. Unknown column lists (a model from an older artifact) are assumed
+// compatible, which is the pre-WP2 behavior.
+func viewReplaceCompatible(prev, cur *model.View) bool {
+	if len(prev.Columns) == 0 || len(cur.Columns) == 0 {
+		return true
+	}
+	if len(cur.Columns) < len(prev.Columns) {
+		return false
+	}
+	for i, pc := range prev.Columns {
+		if cur.Columns[i] != pc {
+			return false
+		}
+	}
+	return true
+}
+
+// functionRecreateReason returns why a changed function cannot be applied with
+// CREATE OR REPLACE (empty when it can): a different result type, a function
+// turned into a procedure or back, or a change to OUT parameters (which alter
+// the result row type). Unknown metadata (older artifacts) is treated as
+// compatible.
+func functionRecreateReason(prev, cur *model.Function) string {
+	switch {
+	case prev.Kind != cur.Kind:
+		return "routine kind changed (" + prev.Kind + " → " + cur.Kind + "); CREATE OR REPLACE cannot change it, so the routine is recreated"
+	case prev.ReturnType != "" && cur.ReturnType != "" && prev.ReturnType != cur.ReturnType:
+		return "return type changed (" + prev.ReturnType + " → " + cur.ReturnType + "); CREATE OR REPLACE cannot change it, so the function is recreated"
+	case prev.Arguments != "" && cur.Arguments != "" && prev.Arguments != cur.Arguments &&
+		(hasOutParams(prev.Arguments) || hasOutParams(cur.Arguments)):
+		return "OUT parameters changed; CREATE OR REPLACE cannot change the result row type, so the function is recreated"
+	}
+	return ""
+}
+
+func hasOutParams(args string) bool {
+	return strings.Contains(args, "OUT ")
 }
 
 // sameOwner compares two optional sequence owners.
