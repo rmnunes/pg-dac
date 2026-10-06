@@ -7,6 +7,7 @@
 package build
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rodrigonunes/pg-dac/internal/devdb"
+	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/execute"
 	"github.com/rodrigonunes/pg-dac/internal/introspect"
 	"github.com/rodrigonunes/pg-dac/internal/model"
@@ -34,8 +36,81 @@ type Options struct {
 }
 
 // FromSQL materializes authored SQL in a scratch database and returns its model
-// plus any unsupported-object warnings.
+// plus any unsupported-object warnings. The model is then brought to its
+// canonical fixed point (see canonicalize) so it describes what a database
+// published from it will actually contain.
 func FromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database, []string, error) {
+	db, warns, err := fromSQL(ctx, sqlText, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	fixed, warn := canonicalize(ctx, db, opts)
+	if warn != "" {
+		warns = append(warns, warn)
+	}
+	return fixed, warns, nil
+}
+
+// canonicalize re-materializes the model from its own canonical SQL and
+// re-introspects it. PostgreSQL's deparsed text is not always a fixed point:
+// an authored `c IN ('F','FE')` deparses to
+// `= ANY ((ARRAY['F'::varchar, 'FE'::varchar])::text[])`, and parsing THAT text
+// yields `= ANY (ARRAY[('F'::varchar)::text, ('FE'::varchar)::text])`. Since a
+// publish applies the canonical text, a model in the authored form would never
+// converge against the database it produced. One extra round reaches the fixed
+// point in practice; a second is tried if the first still moved. If
+// re-materialization fails (e.g. the schema uses an object type pg-dac does not
+// manage), the authored-form model is kept and a warning explains that a
+// publish will hit the same error.
+func canonicalize(ctx context.Context, db *model.Database, opts Options) (*model.Database, string) {
+	cur := db
+	for round := 0; round < 2; round++ {
+		next, err := rematerialize(ctx, cur, opts)
+		if err != nil {
+			return cur, fmt.Sprintf("could not re-materialize the schema from its canonical SQL (%v); "+
+				"comparing against the authored form — a publish of this schema will likely fail the same way", err)
+		}
+		a, _ := cur.Marshal()
+		b, _ := next.Marshal()
+		if bytes.Equal(a, b) {
+			return cur, ""
+		}
+		cur = next
+	}
+	return cur, ""
+}
+
+// rematerialize applies the model's from-empty canonical SQL to a fresh scratch
+// database and introspects the result.
+func rematerialize(ctx context.Context, db *model.Database, opts Options) (*model.Database, error) {
+	sc, err := devdb.Acquire(ctx, opts.TargetMajor)
+	if err != nil {
+		return nil, err
+	}
+	defer sc.Release()
+	conn, err := pgx.Connect(ctx, sc.ConnString)
+	if err != nil {
+		return nil, fmt.Errorf("connect to scratch db: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	baseline, err := introspect.Introspect(ctx, conn, introspect.Options{})
+	if err != nil {
+		return nil, err
+	}
+	mig, err := engine.Compare(baseline, db, engine.Options{Online: false, AllowHazards: true, DropObjectsNotInSource: true})
+	if err != nil {
+		return nil, err
+	}
+	if err := execute.ApplyStatements(ctx, conn, mig.Statements); err != nil {
+		return nil, err
+	}
+	return introspect.Introspect(ctx, conn, introspect.Options{IncludeSchemas: opts.Schemas})
+}
+
+// fromSQL applies authored SQL to a scratch database and introspects it once
+// (the authored form, before canonicalization).
+func fromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database, []string, error) {
 	sc, err := devdb.Acquire(ctx, opts.TargetMajor)
 	if err != nil {
 		return nil, nil, err
