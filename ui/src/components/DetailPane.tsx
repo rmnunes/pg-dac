@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { DiffEditor, Editor } from "@monaco-editor/react";
 import { AlertTriangle, Info, OctagonAlert } from "lucide-react";
 
+import { THEME } from "../monaco-setup";
 import { useStore } from "../state/store";
 import { hazardInfo, kindLabel, objectName, sortedHazards } from "../vocab";
 
@@ -100,24 +101,24 @@ export function DetailPane() {
       )}
 
       {/* SSDT layout: original (left) = Source (of truth), modified (right) =
-          Target (current). The pgdac-diff theme colours Source-only lines green
+          Target (current). The editor theme colours Source-only lines green
           (added to the Target) and Target-only lines red (removed);
           renderIndicators:false hides the +/- glyphs so they can't contradict
           the colours. */}
       <div className="editor" id={`${uid}-panel-diff`} role="tabpanel" aria-labelledby={`${uid}-tab-diff`} hidden={empty || tab !== "diff" || showResult}>
         <DiffEditor
           language="sql"
-          theme="pgdac-diff"
+          theme={THEME}
           original={change?.newDefinition ?? ""}
           modified={change?.oldDefinition ?? ""}
           options={{ ...monacoOpts, renderSideBySide: true, renderIndicators: false }}
         />
       </div>
       <div className="editor" hidden={empty || tab !== "diff" || !showResult}>
-        <Editor language="sql" theme="pgdac-dark" value={result} options={monacoOpts} />
+        <Editor language="sql" theme={THEME} value={result} options={monacoOpts} />
       </div>
       <div className="editor" id={`${uid}-panel-sql`} role="tabpanel" aria-labelledby={`${uid}-tab-sql`} hidden={empty || tab !== "sql"}>
-        <Editor language="sql" theme="pgdac-dark" value={sql} options={monacoOpts} />
+        <Editor language="sql" theme={THEME} value={sql} options={monacoOpts} />
       </div>
 
       {!empty && tab === "risks" && (

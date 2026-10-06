@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Editor } from "@monaco-editor/react";
 import { Check, Copy } from "lucide-react";
 
+import { THEME } from "../monaco-setup";
 import { Dialog } from "./Dialog";
 
 export function ScriptDialog({ sql, onClose }: { sql: string; onClose: () => void }) {
@@ -35,7 +36,7 @@ export function ScriptDialog({ sql, onClose }: { sql: string; onClose: () => voi
       }
     >
       <div className="editor">
-        <Editor language="sql" theme="pgdac-dark" value={sql} options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13 }} />
+        <Editor language="sql" theme={THEME} value={sql} options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13 }} />
       </div>
       <div className="dialog-actions">
         <span className="hint">Read-only. Copy it into your deployment pipeline or run it with psql.</span>
