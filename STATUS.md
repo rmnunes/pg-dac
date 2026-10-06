@@ -24,7 +24,11 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | `pg-dac serve` daemon (warm Postgres, HTTP/SSE, cancel) | ✅ |
 | Project model (`pgdac.yaml`, `init`) | ✅ `include`/`exclude`/`schemas`/`targetMajor`/`preDeploy`/`postDeploy`/`dropPolicy` all honored |
 | Tauri GUI | ✅ Builds and type-checks; previously confirmed working visually |
-| Object coverage | ✅ Partitioning, domains, composite types, matview indexes, view triggers/options, trigger state, UNLOGGED, storage parameters, column storage/compression/statistics, comments (WP3); grants are warned about |
+| Object coverage | ✅ Partitioning, domains, composite types, matview indexes, view triggers/options, trigger state, UNLOGGED, storage parameters, column storage/compression/statistics, comments (WP3); privileges — GRANT/REVOKE on schemas, tables, views, sequences, routines, types and columns (WP5) |
+| Canonical comparison of live databases | ✅ Every side, a live database included, is brought to PostgreSQL's deparse fixed point through the scratch server before diffing (memoized), so an expression never differs only by how it was deparsed (WP5) |
+| Comparison semantics (SSDT options) | ✅ Routine bodies compared modulo whitespace (`--compare-whitespace`), comments optional (`--ignore-comments`), privileges optional (`--ignore-privileges`; revokes follow the drop policy), column order `ignore`/`warn`/`rebuild` (`--column-order`); defaults per project in `pgdac.yaml` `compare:` (WP5) |
+| Table rebuild (declared column order) | ✅ Opt-in: one atomic block creates the table in the declared order, copies rows, swaps; constraints, indexes, triggers, policies, privileges, owned sequences, foreign keys from other tables and dependent views are recreated; the drop policy decides what the target-only columns do (WP5) |
+| Sequence seeding | ✅ A column that gains an identity or a default on a new sequence on a populated table has the sequence seeded past `max(col)` (WP5) |
 | Refactorlog (renames without drop + create) | ✅ `refactorlog.json` + `pg-dac refactor rename`; applied as `ALTER … RENAME`, recorded per target in `pgdac.refactorlog` (WP4) |
 | Drift detection / `BlockWhenDriftDetected` | ✅ Every publish records a baseline in `pgdac.baseline`; `pg-dac drift` (exit 2 on drift), `pg-dac baseline`; publish refuses a drifted target unless `--allow-drift` (WP4) |
 | Lint | ✅ `pg-dac lint` — hazards by code/severity/object, exit 2 at or above `--fail-on` (WP4) |
@@ -51,8 +55,11 @@ priority)` → `sqlgen (lock-safe SQL + typed hazards)`.
 
 A "source" is resolved to the **same model** regardless of kind — a live DB, a project directory, a
 `.sql` file, or a `.pgdac` — so DB↔DB, project↔DB, artifact↔DB, and artifact↔artifact all use one
-code path. Non-DB sources are normalized through a real (embedded) PostgreSQL of the project's target
-major.
+code path. Every source, a live database included, is brought to its canonical fixed point through
+a real (embedded) PostgreSQL of the target major: the model is rendered to SQL, applied to a scratch
+database and re-introspected until it stops changing, so the text PostgreSQL deparses for an
+expression is the same on both sides whatever created the object. Drift detection keeps the raw
+introspection (baseline and current are read the same way).
 
 ---
 
@@ -130,6 +137,39 @@ comments), and ~30 scenario entries (lossy ones now verified, misses flipped to 
 
 ---
 
+## WP5 (2026-10-07) — what changed
+
+Found while comparing the first real project against its Azure DEV database (see the audit notes,
+WP5 addendum): of seven reported changes, two were deparse-form artifacts, two were whitespace,
+one was comments only, one would have broken inserts, and the view recreate would have dropped a
+grant silently.
+
+- **Live databases are canonicalized too** (`build.Canonicalize`, used by `source.Resolve` and
+  `publish`): the deparse fixed point is now reached on every side. Memoized per model hash;
+  owners and the exact server version are restored from the raw introspection; a failure (an
+  extension the scratch server lacks) falls back to the raw model with an explicit warning.
+- **Routine bodies compare modulo whitespace** (`internal/sqltext`: a lexer that collapses
+  whitespace outside literals, one level into `$function$` bodies for `sql`/`plpgsql` only);
+  `--compare-whitespace` restores exact comparison, `--ignore-comments` also ignores comments.
+- **Privileges are modeled**: effective ACLs (built-in defaults included, owner entry excluded) on
+  schemas, tables, views, materialized views, sequences, routines, enums, domains, composite types
+  and table columns. GRANT for what the source adds; REVOKE only under drop policy `all`
+  (SSDT's `DropPermissionsNotInSource`); an object pg-dac drops and recreates always gets its
+  privileges back, even with `--ignore-privileges`. A GRANT to a role the live target lacks is a
+  blocking `MISSING_ROLE` hazard. Projects list environment roles in `pgdac.yaml` `roles:` (created
+  in the scratch database so the project builds); `extract` writes them.
+- **Column order policy** (`compare.columnOrder` / `--column-order`): `warn` (default) reports a
+  declared order PostgreSQL cannot reach by appending; `ignore` is silent; `rebuild` performs the
+  SSDT table rebuild as one atomic `DO` block with the drop policy deciding what happens to
+  target-only columns, constraints, indexes, triggers, policies and owned sequences.
+- **Sequence seeding**: serial→identity, identity→serial and "new default on a new sequence" seed
+  the sequence past `max(col)`; identity→serial now orders `CREATE SEQUENCE` after `DROP IDENTITY`.
+- **Daemon/GUI**: warnings carry the side they concern (Target / Source / Plan); the options panel
+  exposes privileges, column order, whitespace and comments (project default by default). Plan
+  format 2, artifact format 4.
+
+---
+
 ## Object coverage
 
 **Managed (introspected, diffed, generated, published):** schemas, extensions, enums (labels added
@@ -139,15 +179,18 @@ identity/generated/defaults/not-null/storage/compression/statistics; `UNLOGGED`;
 partitioning — `PARTITION BY` parents and `PARTITION OF` children), PK/FK/unique/check/exclude
 constraints (incl. `NOT VALID` state), indexes (on tables and materialized views), triggers (on
 tables and views, incl. enabled state), RLS policies (+ table RLS enable/force), views (incl. column
-list, `CHECK OPTION`, `security_barrier`/`security_invoker`), materialized views, and comments on
-all of the above.
+list, `CHECK OPTION`, `security_barrier`/`security_invoker`), materialized views, comments on all
+of the above, and privileges (GRANT/REVOKE, incl. `WITH GRANT OPTION` and column privileges) on
+schemas, tables, views, materialized views, sequences, routines, enums, domains and composite types.
 
 **Reported as `UNSUPPORTED_CHANGE` (error-severity hazard; the script will not converge until done by
 hand):** removing or reordering enum values, changing a domain or composite type definition,
-changing a table's partitioning.
+changing a table's partitioning, rebuilding a partitioned table or a partition for column order.
 
-**Warned about, not managed:** grants/ACLs/ownership, aggregate/window functions, range/multirange
-types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
+**Warned about, not managed:** ownership, default privileges (`ALTER DEFAULT PRIVILEGES`),
+column-level privileges on views, database-level grants, aggregate/window functions,
+range/multirange types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
+Roles are cluster objects: never created or dropped, only required to exist.
 
 ---
 
@@ -158,8 +201,9 @@ types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
    function being dropped/recreated, and generated columns that read an altered column, are not —
    PostgreSQL's own error surfaces at publish time. A recreated materialized view is rebuilt
    (`WITH DATA`), which recomputes its contents.
-2. **Grants are not published.** Explicit privileges are counted and warned about; ownership is
-   not modeled either. Partitions can be created and dropped but existing tables are not
+2. **Ownership and default privileges are not modeled.** Objects are created by the deploying
+   role; `ALTER DEFAULT PRIVILEGES`, database-level grants and column privileges on views are
+   counted and warned about. Partitions can be created and dropped but existing tables are not
    attached/detached, and `INHERITS` inheritance is not modeled.
 3. **Deploy scripts are plain SQL.** psql meta-commands (`\i`, `\echo`) cannot run server-side;
    pre/post-deploy scripts run as one implicit transaction each and are re-run on every publish,
@@ -181,9 +225,10 @@ types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
 **All planned work packages (WP0–WP4) and the audit's N1–N9 items are complete.** What remains
 is explicitly out of scope for v1 or deferred:
 
-- **Not managed (warned):** grants/ACLs/ownership, attaching/detaching *existing* partitions,
-  `INHERITS` inheritance, aggregate/window functions, range/multirange types, foreign tables and
-  servers, rules, event triggers, publications/subscriptions.
+- **Not managed (warned):** ownership, default privileges, database-level grants, column
+  privileges on views, attaching/detaching *existing* partitions, `INHERITS` inheritance,
+  aggregate/window functions, range/multirange types, foreign tables and servers, rules, event
+  triggers, publications/subscriptions.
 - **Reported as `UNSUPPORTED_CHANGE` rather than applied:** removing/reordering enum values,
   altering a domain or composite type definition, re-partitioning a table.
 - **Deferred:** a `.pgbac` data artifact (schema + table data, the BACPAC analog); a GUI for

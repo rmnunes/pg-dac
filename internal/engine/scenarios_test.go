@@ -39,6 +39,10 @@ type scenario struct {
 	reason string
 }
 
+// role creates the grantee the privilege scenarios use; roles are cluster-wide
+// on the shared scratch server, so creation is guarded.
+const role = `DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$;`
+
 var scenarios = []scenario{
 	// --- fixed in WP1 ---
 	{"serial-table-from-empty", ``, `CREATE TABLE t(id serial primary key, name text);`, ok, ""},
@@ -103,9 +107,17 @@ var scenarios = []scenario{
 	{"domain-with-default-not-null-from-empty", ``, `CREATE DOMAIN code AS text NOT NULL DEFAULT 'x' CONSTRAINT code_len CHECK (length(VALUE) < 5); CREATE TABLE t(c code);`, ok, ""},
 	{"domain-changed", `CREATE DOMAIN d AS int CHECK (VALUE > 0);`, `CREATE DOMAIN d AS int CHECK (VALUE > 1);`, noconv, "altering a domain is reported as UNSUPPORTED_CHANGE"},
 	{"composite-type-used-by-table-from-empty", ``, `CREATE TYPE pt AS (x int, y int); CREATE TABLE t(p pt);`, ok, ""},
-	{"grant-from-empty",
-		`DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$;`,
-		`DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$; CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader;`, ok, "LOSSY: grants are not published (warned)"},
+	// --- privileges (WP5): GRANT/REVOKE are part of the model ---
+	{"grant-from-empty", role, role + ` CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader;`, ok, ""},
+	{"grant-added", role + ` CREATE TABLE t(a int);`, role + ` CREATE TABLE t(a int); GRANT SELECT, INSERT ON t TO scn_reader;`, ok, ""},
+	{"grant-removed", role + ` CREATE TABLE t(a int); GRANT SELECT, INSERT ON t TO scn_reader;`, role + ` CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader;`, ok, "REVOKE under drop policy all"},
+	{"grant-option-added-and-removed", role + ` CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader WITH GRANT OPTION; GRANT UPDATE ON t TO scn_reader;`, role + ` CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader; GRANT UPDATE ON t TO scn_reader WITH GRANT OPTION;`, ok, ""},
+	{"grant-to-public-and-revoke-default-execute", role + ` CREATE TABLE t(a int); CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';`, role + ` CREATE TABLE t(a int); GRANT SELECT ON t TO PUBLIC; CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; REVOKE EXECUTE ON FUNCTION f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION f() TO scn_reader;`, ok, ""},
+	{"column-grants", role + ` CREATE TABLE t(a int, b text);`, role + ` CREATE TABLE t(a int, b text); GRANT SELECT (a), UPDATE (a, b) ON t TO scn_reader;`, ok, ""},
+	{"grants-on-schema-sequence-types", role + ` CREATE SCHEMA s; CREATE SEQUENCE s.q; CREATE TYPE s.e AS ENUM ('x'); CREATE DOMAIN s.d AS int;`, role + ` CREATE SCHEMA s; CREATE SEQUENCE s.q; CREATE TYPE s.e AS ENUM ('x'); CREATE DOMAIN s.d AS int; GRANT USAGE ON SCHEMA s TO scn_reader; GRANT USAGE, SELECT ON SEQUENCE s.q TO scn_reader; REVOKE USAGE ON TYPE s.e FROM PUBLIC; GRANT USAGE ON TYPE s.e TO scn_reader; GRANT USAGE ON DOMAIN s.d TO scn_reader;`, ok, ""},
+	{"grant-survives-view-recreate", role + ` CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t; GRANT SELECT ON v TO scn_reader;`, role + ` CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t; GRANT SELECT ON v TO scn_reader;`, ok, ""},
+	{"grant-survives-function-recreate", role + ` CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; GRANT EXECUTE ON FUNCTION f() TO scn_reader;`, role + ` CREATE FUNCTION f() RETURNS bigint LANGUAGE sql AS 'SELECT 1'; GRANT EXECUTE ON FUNCTION f() TO scn_reader;`, ok, ""},
+	{"grant-survives-dependent-view-recreate", role + ` CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; GRANT SELECT ON v TO scn_reader;`, role + ` CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; GRANT SELECT ON v TO scn_reader;`, ok, ""},
 
 	// --- fixed in WP2 (dependency-aware migrations) ---
 	{"view-drop-column", `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a, b FROM t;`, `CREATE TABLE t(a int, b int); CREATE VIEW v AS SELECT a FROM t;`, ok, ""},

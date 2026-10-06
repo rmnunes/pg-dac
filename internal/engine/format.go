@@ -185,6 +185,10 @@ func (rep Report) Text() string {
 
 func action(t diff.OpType) string {
 	switch {
+	case t == diff.OpGrant:
+		return "grant"
+	case t == diff.OpRevoke:
+		return "revoke"
 	case t.IsDrop():
 		return "drop"
 	case strings.HasPrefix(string(t), "create"), strings.HasPrefix(string(t), "add"):
@@ -196,6 +200,15 @@ func action(t diff.OpType) string {
 
 func object(op diff.Op) string {
 	switch {
+	case op.Grant != nil:
+		who := op.Grant.Grantee
+		if who == "" {
+			who = "PUBLIC"
+		}
+		if op.Sub != "" {
+			return "privileges of " + who + " on column " + op.Sub + " of " + op.Owner.String()
+		}
+		return "privileges of " + who + " on " + op.Owner.String()
 	case op.Function != nil:
 		return "function " + op.Function.QualifiedSignature()
 	case op.Trigger != nil:

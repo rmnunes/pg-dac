@@ -43,6 +43,15 @@ type Options struct {
 	// (see diff.Options). Defaults: whitespace is ignored, comments count.
 	CompareWhitespace bool
 	IgnoreComments    bool
+	// IgnorePrivileges leaves GRANT/REVOKE out of the comparison (SSDT's
+	// IgnorePermissions). Objects pg-dac recreates still get their privileges
+	// back. Revokes of privileges the source does not hold follow
+	// DropObjectsNotInSource (DropPermissionsNotInSource).
+	IgnorePrivileges bool
+	// ColumnOrder is the policy for a declared column order the target does not
+	// have: "" / "warn" reports it, "ignore" is silent, "rebuild" rebuilds the
+	// table in the declared order (see diff.Options).
+	ColumnOrder string
 
 	// IncludeIDs / ExcludeIDs restrict the comparison to a chosen set of objects,
 	// keyed by object ID (model.ObjRef.Key() — what ObjectChange.ID reports). When
@@ -90,9 +99,11 @@ func (r *Result) Empty() bool { return len(r.Statements) == 0 }
 func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	cs := diff.DiffWith(from, to, opts.diffOptions())
 	diffWarnings := cs.Warnings
+	cs = applyRebuildPolicy(cs, opts)
 	cs = filterDrops(cs, opts)
 	cs = filterByObject(cs, opts)
 	cs = expandDependents(cs, from, to)
+	cs = expandPrivileges(cs, from, to, opts)
 
 	p := plan.Build(cs)
 
@@ -128,7 +139,7 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 
 // diffOptions maps the comparison options onto the differ's.
 func (o Options) diffOptions() diff.Options {
-	return diff.Options{CompareWhitespace: o.CompareWhitespace, IgnoreComments: o.IgnoreComments}
+	return diff.Options{CompareWhitespace: o.CompareWhitespace, IgnoreComments: o.IgnoreComments, ColumnOrder: o.ColumnOrder}
 }
 
 // filterByObject keeps only ops whose owning object passes the include/exclude

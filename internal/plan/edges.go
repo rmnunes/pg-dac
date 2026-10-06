@@ -22,7 +22,7 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	pkUniqueAddByTable := map[string][]int{}
 	addColumnByCol := map[string]int{}
 	defaultOpsByCol := map[string][]int{}
-	identityOpByCol := map[string]int{} // ALTER COLUMN ... ADD/DROP IDENTITY
+	identityOpByCol := map[string]int{}  // ALTER COLUMN ... ADD/DROP IDENTITY
 	colChangeByCol := map[string][]int{} // ALTER TYPE / DROP COLUMN, which dependent views must bracket
 	trigCreateByKey := map[string]int{}  // relation key + "#" + trigger -> CreateTrigger op
 	colKey := func(table model.ObjRef, col string) string { return table.Key() + "#" + col }
@@ -113,6 +113,17 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 			}
 			if c, ok := trigCreateByKey[colKey(op.Owner, op.Sub)]; ok {
 				add(c, i)
+			}
+
+		case diff.OpGrant:
+			// Privileges follow the object (and, for a column, the column).
+			if c, ok := createByObj[op.Owner.Key()]; ok {
+				add(c, i)
+			}
+			if op.Sub != "" {
+				if ac, ok := addColumnByCol[colKey(op.Owner, op.Sub)]; ok {
+					add(ac, i)
+				}
 			}
 
 		case diff.OpCreateSequence:

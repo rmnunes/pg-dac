@@ -154,6 +154,9 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		return one(renderSequenceOwner(op.Sequence), "", nil), nil
 
 	case diff.OpCreateTable:
+		if op.Rebuild {
+			return renderRebuildTable(op), nil
+		}
 		return renderCreateTable(op.Table), nil
 	case diff.OpSetTableLogged:
 		return renderSetLogged(op), nil
@@ -168,6 +171,11 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 	case diff.OpUnsupported:
 		return renderUnsupported(op), nil
 	case diff.OpDropTable:
+		if op.Rebuild {
+			// The paired rebuild create performs the drop inside its atomic block;
+			// this op exists for ordering (dependents are dropped before it).
+			return nil, nil
+		}
 		return haz("DROP TABLE "+op.Table.QualifiedName()+";", "drops a table and all its data",
 			safety.New(safety.DeletesData, "dropping table "+op.Table.Name+" destroys its data"),
 			safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table")), nil
@@ -282,6 +290,11 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		return renderEnableRLS(op), nil
 	case diff.OpDisableRLS:
 		return one("ALTER TABLE "+op.Table.QualifiedName()+" DISABLE ROW LEVEL SECURITY;", "", nil), nil
+
+	case diff.OpGrant:
+		return renderGrant(op), nil
+	case diff.OpRevoke:
+		return renderRevoke(op), nil
 	}
 	return nil, fmt.Errorf("sqlgen: unhandled op type %q", op.Type)
 }

@@ -124,6 +124,30 @@ project's `dropPolicy`), `--validate`, `--dry-run`, `--lock-timeout` and `--no-d
 (publish), `--no-sign` (build/extract), `--require-key <fingerprint>` (every verb that reads a
 `.pgdac`; a `trusted_keys` file under the pg-dac config directory does the same for all runs).
 
+**What counts as a difference** (SSDT's comparison options, with the same defaults): routine
+bodies are compared ignoring whitespace and line endings (`--compare-whitespace` makes them
+exact; `--ignore-comments` also ignores comments); privileges (`GRANT`/`REVOKE` on schemas,
+tables, views, sequences, routines, types and columns) are part of the model and compared
+(`--ignore-privileges`; revokes of privileges the source does not hold follow the drop policy,
+like SSDT's `DropPermissionsNotInSource`), and an object pg-dac drops and recreates always gets
+its privileges back; a table whose declared column order differs from the target's is reported
+(`--column-order warn`), ignored (`ignore`), or rebuilt in the declared order with its rows
+copied (`rebuild`, the SSDT table rebuild — heavy and explicit). A project sets its defaults in
+`pgdac.yaml`:
+
+```yaml
+compare:
+  privileges: true        # false = ignore GRANT/REVOKE
+  columnOrder: warn       # ignore | warn | rebuild
+  ignoreWhitespace: true
+  ignoreComments: false
+roles: [app_readers]      # roles the project's GRANTs name but does not create
+```
+
+Every side of a comparison — a live database included — is first brought to the same canonical
+form through a scratch PostgreSQL, so an expression never compares as different only because of
+how PostgreSQL deparsed it when the object was created.
+
 A project's `pgdac.yaml` `preDeploy`/`postDeploy` scripts, `dropPolicy` and `refactorlog.json`
 travel inside the artifact and are honored by `publish`: pending renames run first as
 `ALTER … RENAME` (recorded per target so they run once), pre-deploy scripts before the migration,

@@ -39,6 +39,7 @@ func ObjectScripts(db *model.Database) []ObjectScript {
 	}
 
 	var out []ObjectScript
+	fileOf := map[string]int{} // owner key -> index of the file that creates the object
 	n := 0
 	for i := 0; i < len(res.Groups); {
 		owner := res.Groups[i].Op.Owner
@@ -51,13 +52,39 @@ func ObjectScripts(db *model.Database) []ObjectScript {
 			j++
 		}
 		sql := strings.TrimSpace(strings.Join(sqls, "\n"))
-		if sql != "" {
-			n++
-			out = append(out, ObjectScript{Section: ExtractSection, Base: scriptBase(n, owner, groupSuffix(res.Groups[i:j])), SQL: sql})
+		if sql == "" {
+			i = j
+			continue
+		}
+		// Privileges and comments only need their object to exist, so they belong
+		// in the file that creates it rather than in a trailing file of their own,
+		// even though the plan runs them last.
+		if idx, ok := fileOf[owner.Key()]; ok && onlyAnnotations(res.Groups[i:j]) {
+			out[idx].SQL += "\n" + sql
+			i = j
+			continue
+		}
+		n++
+		out = append(out, ObjectScript{Section: ExtractSection, Base: scriptBase(n, owner, groupSuffix(res.Groups[i:j])), SQL: sql})
+		if _, ok := fileOf[owner.Key()]; !ok {
+			fileOf[owner.Key()] = len(out) - 1
 		}
 		i = j
 	}
 	return out
+}
+
+// onlyAnnotations reports whether every op in the groups is a privilege or
+// comment change.
+func onlyAnnotations(groups []sqlgen.OpStatements) bool {
+	for _, g := range groups {
+		switch g.Op.Type {
+		case diff.OpGrant, diff.OpRevoke, diff.OpSetComment:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // scriptBase builds the file stem "NNNN_<kind>_<schema.name><suffix>". A

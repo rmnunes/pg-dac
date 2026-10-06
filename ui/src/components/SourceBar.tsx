@@ -25,6 +25,40 @@ export function SourceBar() {
           <label>Require signer key <input value={s.requireKey} onChange={(e) => s.set({ requireKey: e.target.value })} placeholder="fingerprint of a .pgdac signer" /></label>
           <label><input type="checkbox" checked={s.skipDeployScripts} onChange={(e) => s.set({ skipDeployScripts: e.target.checked })} /> Skip pre/post-deploy scripts</label>
           <label className="danger"><input type="checkbox" checked={s.allowDrift} onChange={(e) => s.set({ allowDrift: e.target.checked })} /> Allow drift (publish even if the Target changed outside pg-dac)</label>
+          {/* Comparison semantics; "" defers to the Source project's pgdac.yaml compare: block. */}
+          <label title="GRANT/REVOKE are part of the model. Ignoring them still re-grants a recreated object's privileges.">
+            Privileges{" "}
+            <select value={s.privileges} onChange={(e) => s.set({ privileges: e.target.value as typeof s.privileges })}>
+              <option value="">project default (compare)</option>
+              <option value="compare">compare</option>
+              <option value="ignore">ignore</option>
+            </select>
+          </label>
+          <label title="PostgreSQL cannot reorder columns in place. 'rebuild' copies the table into one with the declared order (SSDT-style; heavy).">
+            Column order{" "}
+            <select value={s.columnOrder} onChange={(e) => s.set({ columnOrder: e.target.value as typeof s.columnOrder })}>
+              <option value="">project default (warn)</option>
+              <option value="ignore">ignore</option>
+              <option value="warn">warn</option>
+              <option value="rebuild">rebuild table</option>
+            </select>
+          </label>
+          <label title="Routine bodies are stored verbatim; by default whitespace differences are not changes.">
+            Routine whitespace{" "}
+            <select value={s.whitespace} onChange={(e) => s.set({ whitespace: e.target.value as typeof s.whitespace })}>
+              <option value="">project default (ignore)</option>
+              <option value="ignore">ignore</option>
+              <option value="compare">compare</option>
+            </select>
+          </label>
+          <label title="Whether a comment-only change inside a routine body is a change.">
+            Routine comments{" "}
+            <select value={s.comments} onChange={(e) => s.set({ comments: e.target.value as typeof s.comments })}>
+              <option value="">project default (compare)</option>
+              <option value="compare">compare</option>
+              <option value="ignore">ignore</option>
+            </select>
+          </label>
         </div>
       </details>
 

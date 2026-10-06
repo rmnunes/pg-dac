@@ -10,7 +10,7 @@ import (
 
 // PlanFormatVersion is the schema version of PlanDoc / the daemon API. The GUI
 // checks compatibility against this before trusting a plan.
-const PlanFormatVersion = 1
+const PlanFormatVersion = 2
 
 // PlanDoc is the rich, GUI-grade representation of a comparison: one entry per
 // changed top-level object (table, view, function, …), each carrying its

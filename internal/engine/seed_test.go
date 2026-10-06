@@ -13,7 +13,6 @@ import (
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
 	"github.com/rmnunes/pg-dac/internal/introspect"
-	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // A column whose value generator changes on a populated table must keep
@@ -133,5 +132,3 @@ func mustExec(t *testing.T, ctx context.Context, conn *pgx.Conn, sql string) {
 		t.Fatalf("%s: %v", sql, err)
 	}
 }
-
-var _ = model.KindTable

@@ -47,18 +47,36 @@ export interface PlanDoc {
   prelude?: Statement[];
 }
 
-/** The PlanDoc format this UI understands (engine.PlanFormatVersion). */
-export const EXPECTED_FORMAT_VERSION = 1;
+/** The PlanDoc / daemon API format this UI understands (engine.PlanFormatVersion). */
+export const EXPECTED_FORMAT_VERSION = 2;
+
+/**
+ * Which side of the comparison a warning is about: "target" is the database
+ * that gets updated (the engine's --from), "source" the desired state (--to),
+ * "plan" the generated migration itself.
+ */
+export type WarningSide = "target" | "source" | "plan" | "";
+
+export interface Warning {
+  side: WarningSide;
+  message: string;
+}
 
 export interface PlanResponse {
   plan: PlanDoc;
-  warnings?: string[];
+  warnings?: Warning[];
 }
 
 export interface ScriptResponse {
   sql: string;
-  warnings?: string[];
+  warnings?: Warning[];
 }
+
+/** Compare options a project's pgdac.yaml `compare:` block can also set; "" = the project's default. */
+export type PrivilegesMode = "" | "compare" | "ignore";
+export type ColumnOrderMode = "" | "ignore" | "warn" | "rebuild";
+export type CommentsMode = "" | "compare" | "ignore";
+export type WhitespaceMode = "" | "ignore" | "compare";
 
 export interface Health {
   status: string;
@@ -92,6 +110,14 @@ export interface CompareRequest {
   skipDeployScripts?: boolean;
   /** Publish even if the target changed outside pg-dac since its last baseline. */
   allowDrift?: boolean;
+  /** Do not compare GRANT/REVOKE (privileges are still re-granted after a recreate). */
+  ignorePrivileges?: boolean;
+  /** What to do when a table's declared column order differs from the target's. */
+  columnOrder?: "ignore" | "warn" | "rebuild";
+  /** Ignore SQL comments inside routine bodies. */
+  ignoreComments?: boolean;
+  /** Compare routine bodies as exact text (whitespace counts). */
+  compareWhitespace?: boolean;
 }
 
 // Compare SSE payloads, re-emitted by the Rust supervisor as {event, data}.
@@ -107,7 +133,7 @@ export interface CompareEvent {
     fromCount?: number;
     toCount?: number;
     plan?: PlanDoc;
-    warnings?: string[];
+    warnings?: Warning[];
   };
 }
 
@@ -119,7 +145,7 @@ export interface PublishEvent {
   data: {
     statementCount?: number;
     dataLoss?: boolean;
-    warnings?: string[];
+    warnings?: Warning[];
     index?: number;
     total?: number;
     sql?: string;

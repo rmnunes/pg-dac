@@ -36,6 +36,8 @@ type Plan struct {
 	ManifestYAML []byte
 	// Refactor is the project's refactorlog (renames to apply once per target).
 	Refactor *refactor.Log
+	// Compare holds the project's comparison defaults (pgdac.yaml compare:).
+	Compare *project.CompareSettings
 }
 
 // Empty reports whether the plan carries nothing.
@@ -65,7 +67,7 @@ func ForSource(spec string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := &Plan{DropPolicy: m.DropPolicy}
+	plan := &Plan{DropPolicy: m.DropPolicy, Compare: m.Compare}
 	if plan.ManifestYAML, err = os.ReadFile(filepath.Join(spec, project.ManifestName)); err != nil {
 		return nil, err
 	}
@@ -104,6 +106,11 @@ func fromArtifact(o *artifact.Opened) *Plan {
 		plan.DropPolicy = o.Manifest.Deploy.DropPolicy
 	}
 	plan.ManifestYAML = o.Parts[artifact.PartProject]
+	if len(plan.ManifestYAML) > 0 {
+		if m, err := project.Parse(plan.ManifestYAML); err == nil {
+			plan.Compare = m.Compare
+		}
+	}
 	if data, ok := o.Parts[artifact.PartRefactorLog]; ok {
 		if log, err := refactor.Parse(data); err == nil {
 			plan.Refactor = log
@@ -158,6 +165,26 @@ func (p *Plan) ArtifactParts() ([]artifact.ExtraPart, *artifact.DeployInfo) {
 		info.PostDeploy = append(info.PostDeploy, name)
 	}
 	return parts, info
+}
+
+// ApplyCompareSettings maps a project's compare block onto the engine options;
+// fields the project leaves unset keep the options' current values.
+func ApplyCompareSettings(opts *engine.Options, cs *project.CompareSettings) {
+	if cs == nil {
+		return
+	}
+	if cs.Privileges != nil {
+		opts.IgnorePrivileges = !*cs.Privileges
+	}
+	if cs.ColumnOrder != "" {
+		opts.ColumnOrder = cs.ColumnOrder
+	}
+	if cs.IgnoreWhitespace != nil {
+		opts.CompareWhitespace = !*cs.IgnoreWhitespace
+	}
+	if cs.IgnoreComments != nil {
+		opts.IgnoreComments = *cs.IgnoreComments
+	}
 }
 
 // ApplyDropPolicy maps a manifest drop policy onto the engine options:

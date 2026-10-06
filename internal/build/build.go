@@ -36,6 +36,10 @@ type Options struct {
 	// normalized against the version it targets (0 = library default). For a
 	// project this is taken from the manifest.
 	TargetMajor int
+	// Roles are role names the authored SQL grants to without creating (the
+	// manifest's `roles:`); they are created in the scratch database first so
+	// the GRANTs apply. Roles are cluster objects pg-dac never deploys.
+	Roles []string
 }
 
 // FromSQL materializes authored SQL in a scratch database and returns its model
@@ -51,8 +55,11 @@ func FromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 	if err != nil {
 		warns = append(warns, fmt.Sprintf("could not re-materialize the schema from its canonical SQL (%v); "+
 			"comparing against the authored form — a publish of this schema will likely fail the same way", err))
-		return db, warns, nil
+		fixed = db
 	}
+	// Authored SQL describes no cluster: the scratch server's roles are not the
+	// model's (a live database keeps its role list for the missing-role check).
+	fixed.Roles = nil
 	return fixed, warns, nil
 }
 
@@ -159,6 +166,7 @@ func cloneModel(m *model.Database) *model.Database {
 // would otherwise stamp its own.
 func restoreProvenance(src, dst *model.Database) {
 	dst.TargetVersion = src.TargetVersion
+	dst.Roles = src.Roles
 	owners := map[string]string{}
 	for _, s := range src.Schemas {
 		owners["schema:"+s.Name] = s.Owner
@@ -235,6 +243,10 @@ func rematerialize(ctx context.Context, db *model.Database, opts Options) (*mode
 	}
 	defer conn.Close(ctx)
 
+	// The model's GRANTs name roles the scratch cluster must have.
+	if err := ensureRoles(ctx, conn, db.Grantees()); err != nil {
+		return nil, err
+	}
 	baseline, err := introspect.Introspect(ctx, conn, introspect.Options{})
 	if err != nil {
 		return nil, err
@@ -264,6 +276,9 @@ func fromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 	}
 	defer conn.Close(ctx)
 
+	if err := ensureRoles(ctx, conn, opts.Roles); err != nil {
+		return nil, nil, err
+	}
 	// Defer function-body validation (as pg_dump does) so a function that
 	// references a table/function created later in the script still applies — the
 	// scratch database only needs the objects to exist, not the bodies to resolve.
@@ -336,9 +351,29 @@ func collectFiles(dir string, opts *Options) ([]string, error) {
 		if opts.TargetMajor == 0 {
 			opts.TargetMajor = m.TargetMajor
 		}
+		opts.Roles = append(opts.Roles, m.Roles...)
 		return m.IncludeFiles(dir)
 	}
 	return collectSQLFiles(dir)
+}
+
+// ensureRoles creates, in the scratch cluster, every role the SQL about to be
+// applied grants to. Roles are cluster-wide and the scratch server is shared by
+// a daemon's scratch databases, so an existing role is left alone (and a race
+// between two scratch builds creating the same role is harmless).
+func ensureRoles(ctx context.Context, conn *pgx.Conn, roles []string) error {
+	for _, r := range roles {
+		if r == "" {
+			continue
+		}
+		sql := "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = " + model.QuoteLiteral(r) +
+			") THEN EXECUTE 'CREATE ROLE ' || " + model.QuoteLiteral(model.QuoteIdent(r)) + " || ' NOLOGIN'; END IF; " +
+			"EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("create role %s in scratch db: %w", r, err)
+		}
+	}
+	return nil
 }
 
 func collectSQLFiles(dir string) ([]string, error) {

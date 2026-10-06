@@ -1,7 +1,20 @@
 import { create } from "zustand";
 
 import * as api from "../ipc/client";
-import type { CompareEvent, CompareRequest, ObjectChange, PlanDoc, Profile, ProfileKind, PublishEvent } from "../ipc/types";
+import type {
+  ColumnOrderMode,
+  CommentsMode,
+  CompareEvent,
+  CompareRequest,
+  ObjectChange,
+  PlanDoc,
+  PrivilegesMode,
+  Profile,
+  ProfileKind,
+  PublishEvent,
+  Warning,
+  WhitespaceMode,
+} from "../ipc/types";
 import { profileRef, resolveSpec } from "./profiles";
 
 type Status = "idle" | "comparing" | "scripting" | "error";
@@ -41,12 +54,17 @@ interface State {
   requireKey: string;
   skipDeployScripts: boolean;
   allowDrift: boolean;
+  // Comparison semantics ("" = the Source project's pgdac.yaml default).
+  privileges: PrivilegesMode;
+  columnOrder: ColumnOrderMode;
+  comments: CommentsMode;
+  whitespace: WhitespaceMode;
 
   // results
   status: Status;
   error?: string;
   plan?: PlanDoc;
-  warnings: string[];
+  warnings: Warning[];
   // Objects the user unchecked.
   excluded: Set<string>;
   // Objects excluded because something they depend on is excluded (SSDT-style
@@ -147,6 +165,10 @@ export const useStore = create<State>((set, get) => ({
   requireKey: "",
   skipDeployScripts: false,
   allowDrift: false,
+  privileges: "",
+  columnOrder: "",
+  comments: "",
+  whitespace: "",
 
   status: "idle",
   warnings: [],
@@ -221,6 +243,11 @@ export const useStore = create<State>((set, get) => ({
       requireKey: s.requireKey.trim() || undefined,
       skipDeployScripts: s.skipDeployScripts || undefined,
       allowDrift: s.allowDrift || undefined,
+      // Only an explicit choice is sent; "" leaves the project's default in force.
+      ignorePrivileges: s.privileges === "" ? undefined : s.privileges === "ignore",
+      columnOrder: s.columnOrder || undefined,
+      ignoreComments: s.comments === "" ? undefined : s.comments === "ignore",
+      compareWhitespace: s.whitespace === "" ? undefined : s.whitespace === "compare",
     };
   },
 

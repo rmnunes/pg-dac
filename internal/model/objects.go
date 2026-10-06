@@ -1,5 +1,35 @@
 package model
 
+import "sort"
+
+// Privilege is one privilege a grantee holds on an object (GRANT ... [WITH
+// GRANT OPTION]). Type is the keyword PostgreSQL's aclexplode reports: SELECT,
+// INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN, USAGE,
+// EXECUTE, CREATE.
+type Privilege struct {
+	Type      string `json:"type"`
+	Grantable bool   `json:"grantable,omitempty"`
+}
+
+// Grant is the set of privileges one grantee holds on an object. Grantee "" is
+// PUBLIC. An object's grants are its EFFECTIVE ACL (PostgreSQL's built-in
+// defaults when nothing was ever granted) minus the owner's own entry — the
+// owner holds everything implicitly and ownership is not modeled — and minus
+// the grantor, which is always the deploying role. Privileges are sorted by
+// Type and an object's grants by Grantee, so equality is positional.
+type Grant struct {
+	Grantee    string      `json:"grantee"`
+	Privileges []Privilege `json:"privileges"`
+}
+
+// SortGrants orders grants by grantee and each grant's privileges by type.
+func SortGrants(gs []Grant) {
+	for i := range gs {
+		sort.Slice(gs[i].Privileges, func(a, b int) bool { return gs[i].Privileges[a].Type < gs[i].Privileges[b].Type })
+	}
+	sort.Slice(gs, func(a, b int) bool { return gs[a].Grantee < gs[b].Grantee })
+}
+
 // ViewColumn is one output column of a view (name and canonical type), in
 // position order. CREATE OR REPLACE VIEW may only append columns; a rename,
 // removal, or type change needs DROP + CREATE (and a recreate of dependents).
@@ -14,6 +44,8 @@ type View struct {
 	Name    string `json:"name"`
 	Owner   string `json:"owner,omitempty"`
 	Comment string `json:"comment,omitempty"`
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 
 	// Definition is the canonical pg_get_viewdef output (the SELECT body,
 	// without the trailing semicolon). Authoritative equality key.
@@ -56,6 +88,9 @@ type MaterializedView struct {
 	Owner   string `json:"owner,omitempty"`
 	Comment string `json:"comment,omitempty"`
 
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
+
 	Definition string      `json:"definition"`
 	WithData   bool        `json:"withData,omitempty"`
 	DependsOn  []ObjRef    `json:"dependsOn,omitempty"`
@@ -77,6 +112,9 @@ type Sequence struct {
 	Name    string `json:"name"`
 	Owner   string `json:"owner,omitempty"`
 	Comment string `json:"comment,omitempty"`
+
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 
 	DataType  string `json:"dataType,omitempty"` // bigint by default
 	Start     int64  `json:"start"`
@@ -121,6 +159,8 @@ type Function struct {
 	Definition string `json:"definition"`
 	Language   string `json:"language,omitempty"`
 	Comment    string `json:"comment,omitempty"`
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 
 	// ReturnType is pg_get_function_result (e.g. "integer", "SETOF app.t",
 	// "TABLE(a integer)"); empty for procedures. CREATE OR REPLACE cannot change
@@ -182,6 +222,8 @@ type Domain struct {
 	Owner      string `json:"owner,omitempty"`
 	Definition string `json:"definition"`
 	Comment    string `json:"comment,omitempty"`
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 }
 
 // Ref returns a dependency-graph reference to this domain.
@@ -198,6 +240,8 @@ type CompositeType struct {
 	Owner      string `json:"owner,omitempty"`
 	Definition string `json:"definition"`
 	Comment    string `json:"comment,omitempty"`
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 }
 
 // Ref returns a dependency-graph reference to this composite type.
@@ -214,6 +258,9 @@ type EnumType struct {
 	Name    string `json:"name"`
 	Owner   string `json:"owner,omitempty"`
 	Comment string `json:"comment,omitempty"`
+
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 
 	// Values are the enum labels in sort order. Adding a value is online and
 	// (PG12+) transaction-safe; removing or reordering values is not supported

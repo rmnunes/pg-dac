@@ -184,20 +184,63 @@ type compareReq struct {
 	SkipDeployScripts      bool     `json:"skipDeployScripts"`
 	AllowDrift             bool     `json:"allowDrift"`
 	RecordBaseline         *bool    `json:"recordBaseline"` // default true
+	// Comparison semantics; nil / "" defers to the desired-state project's
+	// pgdac.yaml compare: block.
+	IgnorePrivileges  *bool  `json:"ignorePrivileges"`
+	ColumnOrder       string `json:"columnOrder"`
+	IgnoreComments    *bool  `json:"ignoreComments"`
+	CompareWhitespace *bool  `json:"compareWhitespace"`
+}
+
+// sideWarning is a warning tagged with the side of the comparison it concerns:
+// "target" (the engine's --from, the database that gets updated), "source"
+// (--to, the desired state) or "plan" (the generated migration).
+type sideWarning struct {
+	Side    string `json:"side"`
+	Message string `json:"message"`
+}
+
+func tagWarnings(side string, ws []string) []sideWarning {
+	out := make([]sideWarning, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, sideWarning{Side: side, Message: w})
+	}
+	return out
+}
+
+func mergeWarnings(groups ...[]sideWarning) []sideWarning {
+	out := []sideWarning{}
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
 }
 
 // engineOptions derives the engine options; the desired-state source's
-// dropPolicy is the default, an explicit dropObjectsNotInSource=true wins.
-func (r compareReq) engineOptions(dropPolicy string) engine.Options {
+// dropPolicy and compare: block are the defaults, explicit request values win.
+func (r compareReq) engineOptions(dplan *deploy.Plan) engine.Options {
 	opts := engine.DefaultOptions()
 	opts.TargetMajor = r.TargetMajor
 	if r.Online != nil {
 		opts.Online = *r.Online
 	}
 	opts.AllowHazards = r.AllowHazards
-	deploy.ApplyDropPolicy(&opts, dropPolicy)
+	deploy.ApplyDropPolicy(&opts, dplan.DropPolicy)
+	deploy.ApplyCompareSettings(&opts, dplan.Compare)
 	if r.DropObjectsNotInSource {
 		opts.DropObjectsNotInSource = true
+	}
+	if r.IgnorePrivileges != nil {
+		opts.IgnorePrivileges = *r.IgnorePrivileges
+	}
+	if r.ColumnOrder != "" {
+		opts.ColumnOrder = r.ColumnOrder
+	}
+	if r.IgnoreComments != nil {
+		opts.IgnoreComments = *r.IgnoreComments
+	}
+	if r.CompareWhitespace != nil {
+		opts.CompareWhitespace = *r.CompareWhitespace
 	}
 	opts.IncludeIDs = toSet(r.IncludeIDs)
 	opts.ExcludeIDs = toSet(r.ExcludeIDs)
@@ -291,7 +334,7 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	res, err := engine.Compare(from, to, req.engineOptions(dplan.DropPolicy))
+	res, err := engine.Compare(from, to, req.engineOptions(dplan))
 	if err != nil {
 		if canceled() {
 			return
@@ -300,7 +343,8 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Prelude = prelude
-	send("result", map[string]any{"plan": res.PlanDoc(), "warnings": append(append(append(fw, tw...), rwarns...), res.Warnings...)})
+	send("result", map[string]any{"plan": res.PlanDoc(),
+		"warnings": mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns), tagWarnings("plan", res.Warnings))})
 }
 
 // pendingRenames applies the desired state's pending refactorlog renames to
@@ -361,13 +405,14 @@ func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	res, err := engine.Compare(from, to, req.engineOptions(dplan.DropPolicy))
+	res, err := engine.Compare(from, to, req.engineOptions(dplan))
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
 	res.Prelude = prelude
-	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards), "warnings": append(append(append(fw, tw...), rwarns...), res.Warnings...)})
+	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards),
+		"warnings": mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns), tagWarnings("plan", res.Warnings))})
 }
 
 // publish streams a live apply over Server-Sent Events: a "start" event, one
@@ -456,8 +501,7 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 	// The raw introspection stays the drift/baseline form; the comparison runs
 	// on its canonical form, like every other source.
 	canonFrom, canonWarns := source.Canonical(d.ctx, fromModel, d.sourceOptions(req))
-	warns = append(warns, canonWarns...)
-	opts := req.engineOptions(dplan.DropPolicy)
+	opts := req.engineOptions(dplan)
 	res, err := engine.Compare(canonFrom, toModel, opts)
 	if err != nil {
 		send("error", map[string]any{"message": err.Error()})
@@ -468,7 +512,8 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		pre, post = nil, nil
 	}
 	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(),
-		"deployScripts": len(pre) + len(post), "warnings": append(warns, res.Warnings...)})
+		"deployScripts": len(pre) + len(post),
+		"warnings":      mergeWarnings(tagWarnings("source", warns), tagWarnings("target", canonWarns), tagWarnings("plan", res.Warnings))})
 	if res.Empty() && len(pre)+len(post) == 0 {
 		baselineRecorded := false
 		if (req.RecordBaseline == nil || *req.RecordBaseline) && len(req.Schemas) == 0 && (drifted || !hadBaseline) {

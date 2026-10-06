@@ -151,6 +151,10 @@ func writeProject(cmd *cobra.Command, dir, name, version string, schemas []strin
 		man.TargetMajor = mv
 	}
 	man.Schemas = schemas
+	// The extracted GRANTs name roles the project does not create; list them so
+	// the project builds (they are created in the scratch database) and a publish
+	// refuses a target that lacks one.
+	man.Roles = m.Grantees()
 	if err := man.Save(dir); err != nil {
 		return err
 	}

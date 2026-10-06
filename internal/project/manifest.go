@@ -39,7 +39,32 @@ type Manifest struct {
 	Exclude []string `yaml:"exclude,omitempty"`
 	// DropPolicy maps to the engine's drop options: none|safe|all.
 	DropPolicy string `yaml:"dropPolicy,omitempty"`
+	// Compare holds the project's defaults for what counts as a difference.
+	Compare *CompareSettings `yaml:"compare,omitempty"`
+	// Roles are roles the project's GRANTs name but do not create (they belong
+	// to the environment, like SSDT's SQLCMD-variable users). They are created
+	// in the scratch database so the project builds, and a publish refuses a
+	// target that lacks one.
+	Roles []string `yaml:"roles,omitempty"`
 }
+
+// CompareSettings are the SSDT-style comparison options a project can pin.
+// A nil pointer / empty string means pg-dac's default.
+type CompareSettings struct {
+	// Privileges: compare GRANT/REVOKE (default true).
+	Privileges *bool `yaml:"privileges,omitempty"`
+	// ColumnOrder: ignore | warn (default) | rebuild — what to do when a table's
+	// declared column order is one PostgreSQL cannot reach with ALTERs.
+	ColumnOrder string `yaml:"columnOrder,omitempty"`
+	// IgnoreWhitespace: routine bodies compare modulo whitespace (default true).
+	IgnoreWhitespace *bool `yaml:"ignoreWhitespace,omitempty"`
+	// IgnoreComments: a comment-only change in a routine body is not a change
+	// (default false).
+	IgnoreComments *bool `yaml:"ignoreComments,omitempty"`
+}
+
+// ColumnOrderPolicies are the accepted values of compare.columnOrder.
+var ColumnOrderPolicies = []string{"ignore", "warn", "rebuild"}
 
 // DefaultSections are the numbered section folders a new project is scaffolded
 // with, ordered to match the engine's dependency bands: functions precede tables
@@ -79,6 +104,12 @@ func Load(dir string) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(data)
+}
+
+// Parse parses and validates manifest text (a pgdac.yaml on disk or the copy an
+// artifact carries).
+func Parse(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ManifestName, err)
@@ -86,7 +117,20 @@ func Load(dir string) (*Manifest, error) {
 	if len(m.Include) == 0 {
 		return nil, fmt.Errorf("%s: 'include' must list at least one glob", ManifestName)
 	}
+	if m.Compare != nil && m.Compare.ColumnOrder != "" && !ValidColumnOrder(m.Compare.ColumnOrder) {
+		return nil, fmt.Errorf("%s: compare.columnOrder must be one of %v, got %q", ManifestName, ColumnOrderPolicies, m.Compare.ColumnOrder)
+	}
 	return &m, nil
+}
+
+// ValidColumnOrder reports whether p is an accepted column-order policy.
+func ValidColumnOrder(p string) bool {
+	for _, v := range ColumnOrderPolicies {
+		if v == p {
+			return true
+		}
+	}
+	return false
 }
 
 // Save writes the manifest to dir/pgdac.yaml.

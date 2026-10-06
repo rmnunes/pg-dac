@@ -57,6 +57,7 @@ func DiffWith(from, to *model.Database, opts Options) *ChangeSet {
 	toSchemas := indexSchemas(to)
 
 	// Per-schema object diffing. Iterate the sorted union of schema names.
+	rebuilt := map[string]bool{}
 	for _, name := range unionKeys(fromSchemas, toSchemas) {
 		fs := fromSchemas[name]
 		ts := toSchemas[name]
@@ -66,10 +67,11 @@ func DiffWith(from, to *model.Database, opts Options) *ChangeSet {
 		diffCollations(cs, fs, ts)
 		diffSequences(cs, from, to, fs, ts)
 		diffFunctions(cs, fs, ts, opts)
-		diffTables(cs, from, to, fs, ts, opts)
+		diffTables(cs, from, to, fs, ts, opts, rebuilt)
 		diffViews(cs, fs, ts)
 		diffMatViews(cs, fs, ts)
 	}
+	reAddForeignKeys(cs, from, to, rebuilt)
 	return cs
 }
 
@@ -307,7 +309,9 @@ func diffSequences(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.
 	}
 }
 
-func diffTables(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Schema, opts Options) {
+// diffTables compares a schema's tables; rebuilt collects the keys of tables
+// the column-order policy rebuilds, for the foreign-key pass that follows.
+func diffTables(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Schema, opts Options, rebuilt map[string]bool) {
 	fromT := indexTables(from)
 	toT := indexTables(to)
 	for _, t := range tablesOf(to) {
@@ -341,6 +345,23 @@ func diffTables(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Sch
 				cs.add(Op{Type: OpCreatePolicy, Owner: t.Ref(), Sub: pol.Name, Table: t, Policy: pol})
 			}
 			continue
+		}
+		if order := columnOrderMismatch(prev, t); order != "" {
+			switch opts.ColumnOrder {
+			case ColumnOrderIgnore:
+			case ColumnOrderRebuild:
+				if reason := rebuildBlocker(prev, t); reason != "" {
+					cs.add(Op{Type: OpUnsupported, Owner: t.Ref(), Table: t,
+						Reason: "table " + t.QualifiedName() + ": " + order + "; " + reason})
+					break
+				}
+				emitRebuild(cs, toDB, prev, t, order)
+				rebuilt[t.Ref().Key()] = true
+				continue
+			default: // warn
+				cs.Warnings = append(cs.Warnings, "table "+t.QualifiedName()+": "+order+
+					"; PostgreSQL cannot reorder columns in place, so the order is left as is (compare.columnOrder: rebuild rebuilds the table)")
+			}
 		}
 		comment(cs, t.Ref(), "", "", prev.Comment, t.Comment)
 		if prev.Persistence != t.Persistence {

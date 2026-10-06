@@ -29,6 +29,9 @@ type Table struct {
 	RLSEnabled bool `json:"rlsEnabled,omitempty"`
 	RLSForced  bool `json:"rlsForced,omitempty"`
 
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
+
 	Columns     []*Column     `json:"columns"`
 	Constraints []*Constraint `json:"constraints,omitempty"`
 	Indexes     []*Index      `json:"indexes,omitempty"`
@@ -76,6 +79,10 @@ func (t *Table) sort() {
 	sort.Slice(t.Indexes, func(i, j int) bool { return t.Indexes[i].Name < t.Indexes[j].Name })
 	sort.Slice(t.Triggers, func(i, j int) bool { return t.Triggers[i].Name < t.Triggers[j].Name })
 	sort.Slice(t.Policies, func(i, j int) bool { return t.Policies[i].Name < t.Policies[j].Name })
+	SortGrants(t.Grants)
+	for _, c := range t.Columns {
+		SortGrants(c.Grants)
+	}
 }
 
 // Trigger models a user trigger on a table (pg_trigger, excluding internal
@@ -147,6 +154,9 @@ type Column struct {
 	StatsTarget *int   `json:"statsTarget,omitempty"` // per-column statistics target
 
 	Comment string `json:"comment,omitempty"`
+
+	// Grants are column-level privileges (GRANT SELECT (col) ON ...).
+	Grants []Grant `json:"grants,omitempty"`
 }
 
 // ConstraintType enumerates the kinds of table constraints pg-dac models.

@@ -85,6 +85,15 @@ const (
 	// (CommentKind + Sub name it; Comment "" removes it).
 	OpSetComment OpType = "setComment"
 
+	// OpGrant / OpRevoke change the privileges a grantee holds on an object (or,
+	// with Sub set, on a column). Op.Grant carries the grantee and the privileges
+	// concerned: for OpGrant each privilege's Grantable is the state to reach
+	// (WITH GRANT OPTION or not); for OpRevoke a privilege with Grantable=true
+	// means "revoke only the grant option" (REVOKE GRANT OPTION FOR), false the
+	// privilege itself.
+	OpGrant  OpType = "grant"
+	OpRevoke OpType = "revoke"
+
 	// OpUnsupported records a desired change PostgreSQL cannot apply in place
 	// (dropping/reordering enum values, altering a type in use, re-partitioning).
 	// It renders as a RAISE WARNING carrying an error-severity hazard so the
@@ -155,6 +164,20 @@ type Op struct {
 	// to SET and to RESET.
 	RelOptions      map[string]string
 	RelOptionsReset []string
+
+	// Grant (OpGrant / OpRevoke) names the grantee and privileges concerned.
+	Grant *model.Grant
+	// MissingRole (OpGrant) marks a grantee the target cluster does not have.
+	MissingRole bool
+
+	// Rebuild (OpCreateTable) marks a table rebuilt in place of PrevTable to
+	// reach a declared column order PostgreSQL cannot produce with ALTERs: the
+	// new table is created under a temporary name, the rows are copied, the old
+	// table dropped and the new one renamed — atomically. OwnedSequences lists
+	// the serial-style sequences owned by the table's columns, detached before
+	// the drop and re-owned after the rename (they would go with the old table).
+	Rebuild        bool
+	OwnedSequences []*model.Sequence
 
 	// SeedSequence (OpAlterColumnIdentity, OpSetColumnDefault) marks that the
 	// column of an EXISTING table gets a value generator that did not exist

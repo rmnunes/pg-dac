@@ -397,7 +397,7 @@ func identityKeyword(identity string) string {
 func seedSequence(t *model.Table, col, seqExpr string) Statement {
 	q := model.QuoteIdent(col)
 	return Statement{
-		SQL: "SELECT pg_catalog.setval(" + seqExpr + ", COALESCE((SELECT max(" + q + ") FROM " + t.QualifiedName() + "), 0) + 1, false);",
+		SQL:           "SELECT pg_catalog.setval(" + seqExpr + ", COALESCE((SELECT max(" + q + ") FROM " + t.QualifiedName() + "), 0) + 1, false);",
 		Transactional: true,
 		Note:          "seed the new sequence past the column's current maximum so generated values cannot collide with existing rows",
 	}

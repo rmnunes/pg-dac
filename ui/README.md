@@ -43,7 +43,10 @@ PostgreSQL binaries once (cached afterward), then stays warm for the session.
 
 1. Set **Source** (left, the desired state — the engine's `--to`) and **Target** (right, gets updated — `--from`) — each is a connection string, a project
    directory, a `.sql` file, or a `.pgdac` artifact (use 📁/📦 to browse). **Compare**. The *Options* panel also takes a required signer key for `.pgdac` sources, whether to run the
-   project's pre/post-deploy scripts, and whether to publish over a drifted Target.
+   project's pre/post-deploy scripts, whether to publish over a drifted Target, and the
+   comparison semantics (privileges, column order, routine whitespace and comments — each
+   defaults to the Source project's `pgdac.yaml` `compare:` block). Warnings are labelled with
+   the side they concern (Target, Source, Plan).
 2. Review the **object tree** (grouped, virtualized, severity-badged). Uncheck objects to
    exclude them; the plan re-computes with your selection. Excluding an object also excludes every
    change that depends on it (shown disabled, with the cause), and including one brings its

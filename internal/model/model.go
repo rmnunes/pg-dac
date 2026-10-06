@@ -33,6 +33,62 @@ type Database struct {
 
 	// Schemas (namespaces) and everything they contain.
 	Schemas []*Schema `json:"schemas"`
+
+	// Roles are the names of every role in the cluster the model was read from.
+	// Only a live database carries them (a project or artifact describes no
+	// cluster); the engine uses them to refuse a GRANT to a role the target does
+	// not have before PostgreSQL fails half-way through a publish.
+	Roles []string `json:"roles,omitempty"`
+}
+
+// Grantees returns the sorted, distinct role names that hold a privilege on any
+// object of the model (PUBLIC excluded). A scratch database must have them
+// before the model's SQL can be applied to it.
+func (d *Database) Grantees() []string {
+	seen := map[string]bool{}
+	collect := func(gs []Grant) {
+		for _, g := range gs {
+			if g.Grantee != "" {
+				seen[g.Grantee] = true
+			}
+		}
+	}
+	for _, s := range d.Schemas {
+		collect(s.Grants)
+		for _, t := range s.Tables {
+			collect(t.Grants)
+			for _, c := range t.Columns {
+				collect(c.Grants)
+			}
+		}
+		for _, v := range s.Views {
+			collect(v.Grants)
+		}
+		for _, m := range s.MatViews {
+			collect(m.Grants)
+		}
+		for _, q := range s.Sequences {
+			collect(q.Grants)
+		}
+		for _, f := range s.Functions {
+			collect(f.Grants)
+		}
+		for _, e := range s.Enums {
+			collect(e.Grants)
+		}
+		for _, dm := range s.Domains {
+			collect(dm.Grants)
+		}
+		for _, c := range s.Composites {
+			collect(c.Grants)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for r := range seen {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // MajorVersion returns the PostgreSQL major version (e.g. 16) derived from
@@ -97,6 +153,8 @@ type Schema struct {
 	Name    string `json:"name"`
 	Owner   string `json:"owner,omitempty"`
 	Comment string `json:"comment,omitempty"`
+	// Grants are the privileges roles hold on this object (see Grant).
+	Grants []Grant `json:"grants,omitempty"`
 
 	Tables     []*Table            `json:"tables,omitempty"`
 	Views      []*View             `json:"views,omitempty"`
@@ -187,13 +245,31 @@ func (s *Schema) sort() {
 	sort.Slice(s.Composites, func(i, j int) bool { return s.Composites[i].Name < s.Composites[j].Name })
 	sort.Slice(s.Collations, func(i, j int) bool { return s.Collations[i].Name < s.Collations[j].Name })
 	sort.Slice(s.Functions, func(i, j int) bool { return s.Functions[i].sortKey() < s.Functions[j].sortKey() })
+	SortGrants(s.Grants)
 	for _, t := range s.Tables {
 		t.sort()
 	}
 	for _, v := range s.Views {
 		sort.Slice(v.Triggers, func(i, j int) bool { return v.Triggers[i].Name < v.Triggers[j].Name })
+		SortGrants(v.Grants)
 	}
 	for _, m := range s.MatViews {
 		sort.Slice(m.Indexes, func(i, j int) bool { return m.Indexes[i].Name < m.Indexes[j].Name })
+		SortGrants(m.Grants)
+	}
+	for _, q := range s.Sequences {
+		SortGrants(q.Grants)
+	}
+	for _, f := range s.Functions {
+		SortGrants(f.Grants)
+	}
+	for _, e := range s.Enums {
+		SortGrants(e.Grants)
+	}
+	for _, d := range s.Domains {
+		SortGrants(d.Grants)
+	}
+	for _, c := range s.Composites {
+		SortGrants(c.Grants)
 	}
 }

@@ -20,7 +20,7 @@ import "strings"
 // line never compares equal to code that runs.
 //
 // The lexer follows PostgreSQL's rules for the constructs that matter here:
-// '' doubling inside standard strings, backslash escapes in E'' strings, ""
+// ” doubling inside standard strings, backslash escapes in E” strings, ""
 // doubling inside quoted identifiers, $tag$ ... $tag$ bodies (a tag cannot
 // start with a digit, so $1 is a parameter, and a $ inside an identifier such
 // as foo$bar is not a quote), and nested block comments.

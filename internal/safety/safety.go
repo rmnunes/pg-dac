@@ -39,6 +39,10 @@ const (
 	// the schema will not converge until the change is made by hand. Error
 	// severity, so a publish is blocked by default.
 	Unsupported HazardType = "UNSUPPORTED_CHANGE"
+	// MissingRole: a GRANT names a role the target cluster does not have. The
+	// statement would fail, so the publish is blocked up front (error severity)
+	// until the role exists or the grant is removed from the source.
+	MissingRole HazardType = "MISSING_ROLE"
 )
 
 // Severity ranks how dangerous a hazard is, so callers can render badges and
@@ -68,7 +72,7 @@ func New(t HazardType, msg string) Hazard {
 // else is a warning the user reviews.
 func defaultSeverity(t HazardType) Severity {
 	switch t {
-	case DeletesData, Unsupported:
+	case DeletesData, Unsupported, MissingRole:
 		return SeverityError
 	default:
 		return SeverityWarning

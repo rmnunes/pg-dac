@@ -15,7 +15,6 @@ package introspect
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rmnunes/pg-dac/internal/model"
@@ -84,15 +83,13 @@ SELECT count(DISTINCT ih.inhrelid) FROM pg_catalog.pg_inherits ih
 JOIN pg_catalog.pg_class c ON c.oid = ih.inhrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p') AND NOT c.relispartition`},
-		{"objects with explicit privileges (GRANT/REVOKE)", `
-SELECT (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-          WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p','v','m','S') AND c.relacl IS NOT NULL)
-     + (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
-          WHERE n.nspname = ANY($1) AND p.proacl IS NOT NULL)
-     + (SELECT count(*) FROM pg_catalog.pg_namespace n
-          WHERE n.nspname = ANY($1) AND n.nspname <> 'public' AND n.nspacl IS NOT NULL)
-     + (SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
-          WHERE n.nspname = ANY($1) AND t.typacl IS NOT NULL)`},
+		{"column-level privileges on views or materialized views", `
+SELECT count(*) FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = ANY($1) AND c.relkind IN ('v', 'm') AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL`},
+		{"default privileges (ALTER DEFAULT PRIVILEGES) scoped to these schemas", `
+SELECT count(*) FROM pg_catalog.pg_default_acl d JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace
+WHERE n.nspname = ANY($1)`},
 	}
 
 	var warns []string
@@ -102,11 +99,7 @@ SELECT (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace 
 			return nil, fmt.Errorf("scan unsupported-object count (%s): %w", c.label, err)
 		}
 		if n > 0 {
-			msg := fmt.Sprintf("%d %s present but not managed by pg-dac", n, c.label)
-			if strings.HasPrefix(c.label, "objects with explicit privileges") {
-				msg += " — privileges are not published"
-			}
-			warns = append(warns, msg)
+			warns = append(warns, fmt.Sprintf("%d %s present but not managed by pg-dac", n, c.label))
 		}
 	}
 	return warns, nil
@@ -176,6 +169,12 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 		return nil, err
 	}
 	if err := readTriggers(ctx, q, names, major, tables, views); err != nil {
+		return nil, err
+	}
+	if err := readPrivileges(ctx, q, names, byName, tables, views, mviews); err != nil {
+		return nil, err
+	}
+	if db.Roles, err = readRoles(ctx, q); err != nil {
 		return nil, err
 	}
 

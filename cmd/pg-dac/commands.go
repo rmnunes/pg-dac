@@ -11,6 +11,7 @@ import (
 	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/project"
 	"github.com/rmnunes/pg-dac/internal/refactor"
 	"github.com/rmnunes/pg-dac/internal/source"
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
@@ -28,6 +29,14 @@ type commonFlags struct {
 	dropObjects bool
 	doValidate  bool
 	requireKey  string
+
+	// Comparison semantics; the desired-state project's compare: block is the
+	// default, an explicitly given flag wins (see options()).
+	ignorePrivileges  bool
+	columnOrder       string
+	ignoreComments    bool
+	compareWhitespace bool
+	cmd               *cobra.Command
 
 	// dropPolicy is the desired-state source's manifest drop policy, applied as
 	// the default unless --drop-objects-not-in-source was given explicitly.
@@ -47,6 +56,11 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 	fl.BoolVar(&f.dropObjects, "drop-objects-not-in-source", false, "drop objects present in the target but not in the source")
 	fl.BoolVar(&f.doValidate, "validate", false, "replay the migration in a scratch database to prove it executes and converges")
 	fl.StringVar(&f.requireKey, "require-key", "", "fail unless a .pgdac source is signed by this key fingerprint (default: the trusted_keys file, if any)")
+	fl.BoolVar(&f.ignorePrivileges, "ignore-privileges", false, "do not compare GRANT/REVOKE (recreated objects still get their privileges back)")
+	fl.StringVar(&f.columnOrder, "column-order", "", "when a table's declared column order differs from the target's: ignore | warn (default) | rebuild the table in the declared order")
+	fl.BoolVar(&f.ignoreComments, "ignore-comments", false, "treat comment-only changes inside routine bodies as no change")
+	fl.BoolVar(&f.compareWhitespace, "compare-whitespace", false, "compare routine bodies as exact text (by default whitespace and line endings are ignored)")
+	f.cmd = cmd
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
 }
@@ -54,6 +68,9 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 // sourceOptions builds the source resolution options, loading the trusted-keys
 // file when no explicit key is required.
 func (f *commonFlags) sourceOptions() (source.Options, error) {
+	if f.columnOrder != "" && !project.ValidColumnOrder(f.columnOrder) {
+		return source.Options{}, fmt.Errorf("--column-order must be one of %v, got %q", project.ColumnOrderPolicies, f.columnOrder)
+	}
 	opts := source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor, RequireKey: f.requireKey}
 	if f.requireKey == "" {
 		keys, err := artifact.LoadTrustedKeys()
@@ -183,10 +200,29 @@ func (f *commonFlags) options() engine.Options {
 	opts.TargetMajor = f.targetMajor
 	opts.Online = !f.noOnline
 	opts.AllowHazards = f.allowHaz
-	// The source's pgdac.yaml dropPolicy is the default; an explicit flag wins.
+	// The source's pgdac.yaml dropPolicy and compare: block are the defaults; an
+	// explicitly given flag wins.
 	deploy.ApplyDropPolicy(&opts, f.dropPolicy)
+	if f.plan != nil {
+		deploy.ApplyCompareSettings(&opts, f.plan.Compare)
+	}
 	if f.dropObjectsSet || f.dropObjects {
 		opts.DropObjectsNotInSource = f.dropObjects
+	}
+	if f.cmd != nil {
+		fl := f.cmd.Flags()
+		if fl.Changed("ignore-privileges") {
+			opts.IgnorePrivileges = f.ignorePrivileges
+		}
+		if fl.Changed("column-order") {
+			opts.ColumnOrder = f.columnOrder
+		}
+		if fl.Changed("ignore-comments") {
+			opts.IgnoreComments = f.ignoreComments
+		}
+		if fl.Changed("compare-whitespace") {
+			opts.CompareWhitespace = f.compareWhitespace
+		}
 	}
 	return opts
 }

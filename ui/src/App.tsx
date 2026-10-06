@@ -12,6 +12,21 @@ import { ScriptModal } from "./components/ScriptModal";
 import { CompareProgress } from "./components/CompareProgress";
 import { specIsDb } from "./state/profiles";
 
+// Warnings arrive tagged with the side they concern; the GUI's names for the
+// engine's --from / --to are Target / Source.
+function sideLabel(side: string): string {
+  switch (side) {
+    case "target":
+      return "Target";
+    case "source":
+      return "Source";
+    case "plan":
+      return "Plan";
+    default:
+      return side;
+  }
+}
+
 export default function App() {
   const { from, profiles, plan, warnings, error, generateScript, loadProfiles, handlePublishEvent, handleCompareEvent } =
     useStore();
@@ -103,7 +118,10 @@ export default function App() {
       {warnings.length > 0 && (
         <div className="warnings">
           {warnings.map((w, i) => (
-            <div key={i}>⚠ {w}</div>
+            <div key={i}>
+              ⚠ {w.side && <b>{sideLabel(w.side)}: </b>}
+              {w.message}
+            </div>
           ))}
         </div>
       )}

@@ -96,4 +96,4 @@ type Signature struct {
 //	3: the signature covers the whole manifest (not only the Merkle root), and
 //	   the artifact may carry the project's pgdac.yaml and pre/post-deploy
 //	   scripts (manifest.deploy). Older artifacts verify with their own scheme.
-const FormatVersion = 3
+const FormatVersion = 4

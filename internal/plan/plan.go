@@ -67,6 +67,8 @@ func opPriority(op diff.Op) int {
 		return 12
 	case diff.OpDropPolicy:
 		return 13
+	case diff.OpRevoke:
+		return 15
 	case diff.OpDropConstraint:
 		return 20
 	case diff.OpDropIndex:
@@ -157,6 +159,8 @@ func opPriority(op diff.Op) int {
 		return 175
 	case diff.OpSetComment:
 		return 185
+	case diff.OpGrant:
+		return 186
 	case diff.OpUnsupported:
 		return 189
 	}
