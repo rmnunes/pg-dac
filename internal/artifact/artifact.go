@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rodrigonunes/pg-dac/internal/model"
@@ -22,8 +23,20 @@ type BuildOptions struct {
 	SchemaSQL string
 	// CreatedAt is an RFC3339 timestamp; empty uses the current UTC time.
 	CreatedAt string
-	// SigningKey, if non-nil, signs the artifact's Merkle root.
+	// SigningKey, if non-nil, signs the artifact (the whole manifest).
 	SigningKey ed25519.PrivateKey
+	// Extra parts to archive next to the model (project manifest, deploy
+	// scripts); they are hashed, included in the Merkle root and thus signed.
+	Extra []ExtraPart
+	// Deploy is recorded in the manifest when the artifact carries deployment
+	// content.
+	Deploy *DeployInfo
+}
+
+// ExtraPart is an additional file to archive.
+type ExtraPart struct {
+	Name string
+	Data []byte
 }
 
 // Build writes a .pgdac archive for model m at path and returns its manifest.
@@ -40,6 +53,9 @@ func Build(path string, m *model.Database, opts BuildOptions) (*Manifest, error)
 	parts := []part{{PartModel, modelBytes}}
 	if opts.SchemaSQL != "" {
 		parts = append(parts, part{PartSchema, []byte(opts.SchemaSQL)})
+	}
+	for _, x := range opts.Extra {
+		parts = append(parts, part{x.name(), x.Data})
 	}
 
 	var mparts []Part
@@ -62,12 +78,17 @@ func Build(path string, m *model.Database, opts BuildOptions) (*Manifest, error)
 		Generator:     opts.Generator,
 		TargetMajor:   m.MajorVersion(),
 		CreatedAt:     createdAt,
+		Deploy:        opts.Deploy,
 		Parts:         mparts,
 		MerkleRoot:    root,
 	}
 	if opts.SigningKey != nil {
 		pub := opts.SigningKey.Public().(ed25519.PublicKey)
-		sig := ed25519.Sign(opts.SigningKey, []byte(root))
+		payload, err := signingPayload(man)
+		if err != nil {
+			return nil, err
+		}
+		sig := ed25519.Sign(opts.SigningKey, payload)
 		man.Signature = &Signature{
 			Algo:      "ed25519",
 			PublicKey: base64.StdEncoding.EncodeToString(pub),
@@ -113,7 +134,9 @@ type Opened struct {
 	Model       *model.Database
 	IntegrityOK bool // every part hash matched and the Merkle root recomputed
 	Signed      bool
-	SignatureOK bool // the signature verified over the recomputed Merkle root
+	SignatureOK bool // the signature verified (whole manifest for format 3+, Merkle root before)
+	// Parts holds every archived file by name (including deploy scripts).
+	Parts map[string][]byte
 }
 
 // Fingerprint returns the signer key fingerprint, or "" if unsigned.
@@ -179,9 +202,9 @@ func Open(path string) (*Opened, error) {
 		integrityOK = false
 	}
 
-	out := &Opened{Manifest: man, IntegrityOK: integrityOK, Signed: man.Signature != nil}
+	out := &Opened{Manifest: man, IntegrityOK: integrityOK, Signed: man.Signature != nil, Parts: files}
 	if out.Signed {
-		out.SignatureOK = verifySignature(man.Signature, man.MerkleRoot) && integrityOK
+		out.SignatureOK = verifySignature(&man) && integrityOK
 	}
 
 	modelBytes, ok := files[PartModel]
@@ -196,7 +219,18 @@ func Open(path string) (*Opened, error) {
 	return out, nil
 }
 
-func verifySignature(sig *Signature, merkleRoot string) bool {
+// signingPayload is the canonical byte string a format-3 signature covers: the
+// manifest serialized as JSON with the signature field removed. Every field
+// (name, version, target, created-at, deploy info, part digests, Merkle root)
+// is therefore authenticated, not just the content hashes.
+func signingPayload(man *Manifest) ([]byte, error) {
+	cp := *man
+	cp.Signature = nil
+	return json.Marshal(&cp)
+}
+
+func verifySignature(man *Manifest) bool {
+	sig := man.Signature
 	if sig == nil || sig.Algo != "ed25519" {
 		return false
 	}
@@ -208,5 +242,16 @@ func verifySignature(sig *Signature, merkleRoot string) bool {
 	if err != nil {
 		return false
 	}
-	return ed25519.Verify(ed25519.PublicKey(pub), []byte(merkleRoot), raw)
+	var payload []byte
+	if man.FormatVersion >= 3 {
+		if payload, err = signingPayload(man); err != nil {
+			return false
+		}
+	} else {
+		payload = []byte(man.MerkleRoot) // formats 1–2 signed only the Merkle root
+	}
+	return ed25519.Verify(ed25519.PublicKey(pub), payload, raw)
 }
+
+// name returns the part's archive path, normalized to forward slashes.
+func (x ExtraPart) name() string { return strings.ReplaceAll(x.Name, "\\", "/") }

@@ -106,6 +106,15 @@ func (m *Manifest) IncludeFiles(dir string) ([]string, error) {
 	return m.resolveGlobs(dir, m.Include)
 }
 
+// PreDeployFiles / PostDeployFiles return the deployment scripts that run
+// before / after the generated migration, in manifest order.
+func (m *Manifest) PreDeployFiles(dir string) ([]string, error) {
+	return m.resolveGlobs(dir, m.PreDeploy)
+}
+func (m *Manifest) PostDeployFiles(dir string) ([]string, error) {
+	return m.resolveGlobs(dir, m.PostDeploy)
+}
+
 // AllFiles returns every project file in full deploy order: preDeploy, then the
 // include globs, then postDeploy.
 func (m *Manifest) AllFiles(dir string) ([]string, error) {

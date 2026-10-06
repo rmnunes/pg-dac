@@ -6,6 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rodrigonunes/pg-dac/internal/artifact"
+	"github.com/rodrigonunes/pg-dac/internal/deploy"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/model"
 	"github.com/rodrigonunes/pg-dac/internal/source"
@@ -22,6 +24,12 @@ type commonFlags struct {
 	allowHaz    bool
 	dropObjects bool
 	doValidate  bool
+	requireKey  string
+
+	// dropPolicy is the desired-state source's manifest drop policy, applied as
+	// the default unless --drop-objects-not-in-source was given explicitly.
+	dropPolicy     string
+	dropObjectsSet bool
 }
 
 func (f *commonFlags) bind(cmd *cobra.Command) {
@@ -34,15 +42,48 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 	fl.BoolVar(&f.allowHaz, "allow-hazards", false, "include data-loss operations (otherwise they are blocked)")
 	fl.BoolVar(&f.dropObjects, "drop-objects-not-in-source", false, "drop objects present in the target but not in the source")
 	fl.BoolVar(&f.doValidate, "validate", false, "replay the migration in a scratch database to prove it executes and converges")
+	fl.StringVar(&f.requireKey, "require-key", "", "fail unless a .pgdac source is signed by this key fingerprint (default: the trusted_keys file, if any)")
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
+}
+
+// sourceOptions builds the source resolution options, loading the trusted-keys
+// file when no explicit key is required.
+func (f *commonFlags) sourceOptions() (source.Options, error) {
+	opts := source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor, RequireKey: f.requireKey}
+	if f.requireKey == "" {
+		keys, err := artifact.LoadTrustedKeys()
+		if err != nil {
+			return opts, fmt.Errorf("read trusted keys: %w", err)
+		}
+		opts.TrustedKeys = keys
+	}
+	return opts, nil
+}
+
+// loadDeployPlan reads the desired-state source's deployment plan (pre/post
+// scripts, drop policy) and records the policy for options().
+func (f *commonFlags) loadDeployPlan(cmd *cobra.Command) (*deploy.Plan, error) {
+	plan, err := deploy.ForSource(f.to)
+	if err != nil {
+		return nil, fmt.Errorf("--to: %w", err)
+	}
+	f.dropPolicy = plan.DropPolicy
+	f.dropObjectsSet = cmd.Flags().Changed("drop-objects-not-in-source")
+	return plan, nil
 }
 
 // resolveModels resolves both sources to models, printing any unsupported-object
 // warnings to stderr. The "to" model is desired; "from" is the schema to be changed.
 func (f *commonFlags) resolveModels(cmd *cobra.Command) (from, to *model.Database, err error) {
 	ctx := cmd.Context()
-	srcOpts := source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor}
+	srcOpts, err := f.sourceOptions()
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := f.loadDeployPlan(cmd); err != nil {
+		return nil, nil, err
+	}
 	from, fromWarns, err := source.Resolve(ctx, f.from, srcOpts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("--from: %w", err)
@@ -102,7 +143,11 @@ func (f *commonFlags) options() engine.Options {
 	opts.TargetMajor = f.targetMajor
 	opts.Online = !f.noOnline
 	opts.AllowHazards = f.allowHaz
-	opts.DropObjectsNotInSource = f.dropObjects
+	// The source's pgdac.yaml dropPolicy is the default; an explicit flag wins.
+	deploy.ApplyDropPolicy(&opts, f.dropPolicy)
+	if f.dropObjectsSet || f.dropObjects {
+		opts.DropObjectsNotInSource = f.dropObjects
+	}
 	return opts
 }
 

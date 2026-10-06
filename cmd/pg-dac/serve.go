@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
+	"github.com/rodrigonunes/pg-dac/internal/artifact"
+	"github.com/rodrigonunes/pg-dac/internal/deploy"
 	"github.com/rodrigonunes/pg-dac/internal/devdb"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/execute"
@@ -53,7 +55,11 @@ func runServe(cmd *cobra.Command, addr string) error {
 		return fmt.Errorf("bind %s: %w", addr, err)
 	}
 
-	d := &daemon{ctx: ctx, token: os.Getenv("PGDAC_TOKEN"), version: appVersion()}
+	trusted, err := artifact.LoadTrustedKeys()
+	if err != nil {
+		return fmt.Errorf("read trusted keys: %w", err)
+	}
+	d := &daemon{ctx: ctx, token: os.Getenv("PGDAC_TOKEN"), version: appVersion(), trustedKeys: trusted}
 	var once sync.Once
 	stop := make(chan struct{})
 	shutdown := func() { once.Do(func() { close(stop) }) }
@@ -91,9 +97,10 @@ func runServe(cmd *cobra.Command, addr string) error {
 }
 
 type daemon struct {
-	ctx     context.Context
-	token   string
-	version string
+	ctx         context.Context
+	token       string
+	version     string
+	trustedKeys []string
 
 	// ops tracks in-flight cancelable operations by client-supplied opId so a
 	// /cancel request can abort a running compare (which propagates through the
@@ -170,19 +177,46 @@ type compareReq struct {
 	DropObjectsNotInSource bool     `json:"dropObjectsNotInSource"`
 	IncludeIDs             []string `json:"includeIDs"`
 	ExcludeIDs             []string `json:"excludeIDs"`
+	RequireKey             string   `json:"requireKey"`
+	SkipDeployScripts      bool     `json:"skipDeployScripts"`
 }
 
-func (r compareReq) engineOptions() engine.Options {
+// engineOptions derives the engine options; the desired-state source's
+// dropPolicy is the default, an explicit dropObjectsNotInSource=true wins.
+func (r compareReq) engineOptions(dropPolicy string) engine.Options {
 	opts := engine.DefaultOptions()
 	opts.TargetMajor = r.TargetMajor
 	if r.Online != nil {
 		opts.Online = *r.Online
 	}
 	opts.AllowHazards = r.AllowHazards
-	opts.DropObjectsNotInSource = r.DropObjectsNotInSource
+	deploy.ApplyDropPolicy(&opts, dropPolicy)
+	if r.DropObjectsNotInSource {
+		opts.DropObjectsNotInSource = true
+	}
 	opts.IncludeIDs = toSet(r.IncludeIDs)
 	opts.ExcludeIDs = toSet(r.ExcludeIDs)
 	return opts
+}
+
+// sourceOptions derives source resolution options (schemas, target major,
+// signer trust) for a request.
+func (d *daemon) sourceOptions(r compareReq) source.Options {
+	opts := source.Options{Schemas: r.Schemas, TargetMajor: r.TargetMajor, RequireKey: r.RequireKey}
+	if r.RequireKey == "" {
+		opts.TrustedKeys = d.trustedKeys
+	}
+	return opts
+}
+
+// deployPlan reads the desired-state source's deployment plan, tolerating
+// sources that have none.
+func deployPlan(spec string) *deploy.Plan {
+	p, err := deploy.ForSource(spec)
+	if err != nil || p == nil {
+		return &deploy.Plan{}
+	}
+	return p
 }
 
 // plan streams the comparison over Server-Sent Events so the GUI can show what
@@ -224,7 +258,8 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		return false
 	}
 
-	srcOpts := source.Options{Schemas: req.Schemas, TargetMajor: req.TargetMajor}
+	srcOpts := d.sourceOptions(req)
+	dplan := deployPlan(req.To)
 	send("phase", map[string]any{"step": "read-from", "message": "Reading Target…", "source": req.From})
 	from, fw, err := source.Resolve(ctx, req.From, srcOpts)
 	if err != nil {
@@ -246,7 +281,7 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	send("phase", map[string]any{"step": "diff", "message": "Diffing and generating plan…", "toCount": objectCount(to)})
-	res, err := engine.Compare(from, to, req.engineOptions())
+	res, err := engine.Compare(from, to, req.engineOptions(dplan.DropPolicy))
 	if err != nil {
 		if canceled() {
 			return
@@ -273,7 +308,8 @@ func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	srcOpts := source.Options{Schemas: req.Schemas, TargetMajor: req.TargetMajor}
+	srcOpts := d.sourceOptions(req)
+	dplan := deployPlan(req.To)
 	from, fw, err := source.Resolve(d.ctx, req.From, srcOpts)
 	if err != nil {
 		badRequest(w, fmt.Errorf("from: %w", err))
@@ -284,7 +320,7 @@ func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fmt.Errorf("to: %w", err))
 		return
 	}
-	res, err := engine.Compare(from, to, req.engineOptions())
+	res, err := engine.Compare(from, to, req.engineOptions(dplan.DropPolicy))
 	if err != nil {
 		badRequest(w, err)
 		return
@@ -330,36 +366,56 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		send("error", map[string]any{"message": "introspect target: " + err.Error()})
 		return
 	}
-	toModel, warns, err := source.Resolve(d.ctx, req.To, source.Options{Schemas: req.Schemas, TargetMajor: req.TargetMajor})
+	dplan := deployPlan(req.To)
+	toModel, warns, err := source.Resolve(d.ctx, req.To, d.sourceOptions(req))
 	if err != nil {
 		send("error", map[string]any{"message": "resolve source: " + err.Error()})
 		return
 	}
-	opts := req.engineOptions()
+	opts := req.engineOptions(dplan.DropPolicy)
 	res, err := engine.Compare(fromModel, toModel, opts)
 	if err != nil {
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(), "warnings": append(warns, res.Warnings...)})
-	if res.Empty() {
+	pre, post := dplan.Pre, dplan.Post
+	if req.SkipDeployScripts {
+		pre, post = nil, nil
+	}
+	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(),
+		"deployScripts": len(pre) + len(post), "warnings": append(warns, res.Warnings...)})
+	if res.Empty() && len(pre)+len(post) == 0 {
 		send("done", map[string]any{"applied": 0})
 		return
 	}
-	if res.HasDataLoss() && !opts.AllowHazards {
-		send("error", map[string]any{"message": "refusing to publish: possible data loss; set allowHazards to proceed"})
+	if res.HasBlocking() && !opts.AllowHazards {
+		send("error", map[string]any{"message": "refusing to publish: data-loss or unsupported changes present; set allowHazards to proceed"})
 		return
 	}
 
+	total := len(res.Statements)
+	announce := func(phase string) func(string) {
+		return func(name string) {
+			send("progress", map[string]any{"index": 0, "total": total, "sql": "-- " + phase + "-deploy script: " + name})
+		}
+	}
+	if err := deploy.Run(d.ctx, conn, pre, announce("pre")); err != nil {
+		send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})
+		return
+	}
 	applied, err := execute.ApplyStream(d.ctx, conn, res.Statements, execute.DefaultOptions(),
 		func(index, total int, s sqlgen.Statement) {
 			send("progress", map[string]any{"index": index, "total": total, "sql": s.SQL})
 		})
 	if err != nil {
-		send("error", map[string]any{"applied": applied, "total": len(res.Statements), "message": err.Error()})
+		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
 		return
 	}
-	send("done", map[string]any{"applied": applied})
+	if err := deploy.Run(d.ctx, conn, post, announce("post")); err != nil {
+		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
+		return
+	}
+	send("done", map[string]any{"applied": applied, "deployScripts": len(pre) + len(post)})
 }
 
 // --- helpers ---

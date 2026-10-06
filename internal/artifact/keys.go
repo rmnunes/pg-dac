@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // keyFileName is the auto-managed signing key (the 32-byte Ed25519 seed,
@@ -59,4 +60,44 @@ func LoadOrCreateSigningKey() (ed25519.PrivateKey, error) {
 func KeyFingerprint(pub ed25519.PublicKey) string {
 	sum := sha256.Sum256(pub)
 	return hex.EncodeToString(sum[:8])
+}
+
+// trustedKeysFile lists the signer fingerprints an artifact must carry to be
+// accepted as a source (one per line; blank lines and # comments ignored).
+const trustedKeysFile = "trusted_keys"
+
+// TrustedKeysPath returns the location of the trusted-keys file.
+func TrustedKeysPath() (string, error) {
+	dir, err := keyDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, trustedKeysFile), nil
+}
+
+// LoadTrustedKeys reads the trusted-keys file. A missing file means "no trust
+// list configured" (nil, nil): any signer is accepted with a warning.
+func LoadTrustedKeys() ([]string, error) {
+	path, err := TrustedKeysPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var keys []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line != "" {
+			keys = append(keys, line)
+		}
+	}
+	return keys, nil
 }

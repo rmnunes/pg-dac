@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rodrigonunes/pg-dac/internal/artifact"
+	"github.com/rodrigonunes/pg-dac/internal/deploy"
 	"github.com/rodrigonunes/pg-dac/internal/engine"
 	"github.com/rodrigonunes/pg-dac/internal/model"
 	"github.com/rodrigonunes/pg-dac/internal/project"
@@ -30,7 +31,7 @@ func newExtractCmd() *cobra.Command {
 }
 
 func artifactWriteCmd(use, short string) *cobra.Command {
-	var from, out, name, version, toProject string
+	var from, out, name, version, toProject, requireKey string
 	var schemas []string
 	var targetMajor int
 	var noSign bool
@@ -43,11 +44,25 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 			if out == "" && toProject == "" {
 				return fmt.Errorf("specify --out <file.pgdac> or --to-project <dir>")
 			}
-			m, warns, err := source.Resolve(ctx, from, source.Options{Schemas: schemas, TargetMajor: targetMajor})
+			srcOpts := source.Options{Schemas: schemas, TargetMajor: targetMajor, RequireKey: requireKey}
+			if requireKey == "" {
+				keys, kerr := artifact.LoadTrustedKeys()
+				if kerr != nil {
+					return fmt.Errorf("read trusted keys: %w", kerr)
+				}
+				srcOpts.TrustedKeys = keys
+			}
+			m, warns, err := source.Resolve(ctx, from, srcOpts)
 			if err != nil {
 				return fmt.Errorf("--from: %w", err)
 			}
 			printWarnings(cmd, "--from", warns)
+			// A project's deployment content (pgdac.yaml, pre/post-deploy scripts,
+			// drop policy) travels inside the artifact.
+			dplan, err := deploy.ForSource(from)
+			if err != nil {
+				return fmt.Errorf("--from: %w", err)
+			}
 
 			if toProject != "" {
 				return writeProject(cmd, toProject, name, version, schemas, m)
@@ -62,6 +77,7 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 				Generator: "pg-dac " + appVersion(),
 				SchemaSQL: canonicalSQL(m),
 			}
+			opts.Extra, opts.Deploy = dplan.ArtifactParts()
 			if !noSign {
 				key, err := artifact.LoadOrCreateSigningKey()
 				if err != nil {
@@ -77,6 +93,10 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "Wrote %s (%s v%s, target PG %d, %d part(s))\n",
 				out, man.Name, man.Version, man.TargetMajor, len(man.Parts))
+			if man.Deploy != nil {
+				fmt.Fprintf(w, "Deploy: policy %q, %d pre-deploy, %d post-deploy script(s)\n",
+					man.Deploy.DropPolicy, len(man.Deploy.PreDeploy), len(man.Deploy.PostDeploy))
+			}
 			if man.Signature != nil {
 				op := &artifact.Opened{Manifest: *man}
 				fmt.Fprintf(w, "Signed (ed25519, key %s)\n", op.Fingerprint())
@@ -93,6 +113,7 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 	fl.StringVar(&version, "version", "1.0.0", "application version")
 	fl.StringArrayVar(&schemas, "schema", nil, "restrict to these schemas (repeatable)")
 	fl.IntVar(&targetMajor, "target-major", 0, "PostgreSQL major version used to normalize a project/.sql source (0 = the project's pgdac.yaml, else 16)")
+	fl.StringVar(&requireKey, "require-key", "", "fail unless a .pgdac source is signed by this key fingerprint (default: the trusted_keys file, if any)")
 	fl.BoolVar(&noSign, "no-sign", false, "do not sign the artifact (integrity checksum only)")
 	fl.StringVar(&toProject, "to-project", "", "reverse-engineer the source into a declarative project directory instead of a .pgdac")
 	_ = cmd.MarkFlagRequired("from")
@@ -169,6 +190,13 @@ func newInspectCmd() *cobra.Command {
 			schemas, tables, views, seqs, enums := summarize(o.Model)
 			fmt.Fprintf(w, "Contents:    %d schema(s), %d table(s), %d view(s), %d sequence(s), %d enum(s)\n",
 				schemas, tables, views, seqs, enums)
+			if m.Deploy != nil {
+				fmt.Fprintf(w, "Deploy:      policy %q, %d pre-deploy, %d post-deploy script(s)\n",
+					m.Deploy.DropPolicy, len(m.Deploy.PreDeploy), len(m.Deploy.PostDeploy))
+			}
+			if m.FormatVersion < artifact.FormatVersion {
+				fmt.Fprintf(w, "Format:      %d (current %d) — rebuild to get the current signature scheme and canonical form\n", m.FormatVersion, artifact.FormatVersion)
+			}
 
 			if !o.IntegrityOK {
 				return fmt.Errorf("artifact integrity check FAILED (corrupt or tampered)")

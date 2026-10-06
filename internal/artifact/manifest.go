@@ -23,6 +23,12 @@ const (
 	PartManifest = "manifest.json"
 	PartModel    = "model.json"
 	PartSchema   = "sql/schema.sql"
+	// PartProject is the project's pgdac.yaml, when the artifact was built from
+	// a project; PartPreDeployDir / PartPostDeployDir hold its deployment
+	// scripts as numbered parts (NNNN_<file>.sql) in execution order.
+	PartProject       = "project/pgdac.yaml"
+	PartPreDeployDir  = "deploy/pre/"
+	PartPostDeployDir = "deploy/post/"
 )
 
 // Manifest is the metadata and integrity block stored as manifest.json.
@@ -40,12 +46,24 @@ type Manifest struct {
 	// CreatedAt is an RFC3339 UTC timestamp.
 	CreatedAt string `json:"createdAt"`
 
+	// Deploy describes the deployment-time content carried next to the model
+	// (drop policy, pre/post-deploy script parts), when any.
+	Deploy *DeployInfo `json:"deploy,omitempty"`
+
 	// Parts lists the SHA-256 (hex) of every archived part except this manifest.
 	Parts []Part `json:"parts"`
 	// MerkleRoot is the hex Merkle root over the part digests.
 	MerkleRoot string `json:"merkleRoot"`
-	// Signature is present when the artifact was signed.
+	// Signature is present when the artifact was signed. Since format 3 it
+	// covers the whole manifest (every field above), not just the Merkle root.
 	Signature *Signature `json:"signature,omitempty"`
+}
+
+// DeployInfo is the manifest's record of a project's deployment-time content.
+type DeployInfo struct {
+	DropPolicy string   `json:"dropPolicy,omitempty"`
+	PreDeploy  []string `json:"preDeploy,omitempty"`  // part names, in execution order
+	PostDeploy []string `json:"postDeploy,omitempty"` // part names, in execution order
 }
 
 // Part records the digest of one archived file.
@@ -54,14 +72,16 @@ type Part struct {
 	SHA256 string `json:"sha256"`
 }
 
-// Signature is an Ed25519 signature over the Merkle root.
+// Signature is an Ed25519 signature. Format 3+: over the canonical JSON of the
+// manifest with this field removed, so name, version, target, deploy info and
+// the part digests are all covered. Formats 1–2 signed only the Merkle root.
 type Signature struct {
 	Algo string `json:"algo"` // "ed25519"
 	// PublicKey is the base64-encoded signer public key, included so the artifact
 	// is self-verifying for integrity; authenticity requires the verifier to also
-	// trust this key (e.g. compare its fingerprint against a known value).
+	// trust this key (--require-key, or the trusted_keys file).
 	PublicKey string `json:"publicKey"`
-	// Sig is the base64-encoded signature over the Merkle-root bytes.
+	// Sig is the base64-encoded signature.
 	Sig string `json:"sig"`
 }
 
@@ -72,4 +92,7 @@ type Signature struct {
 //	   empty search_path) and serial-backed sequences are modeled explicitly. A
 //	   v1 artifact still opens, but comparing it against a v2 model can report
 //	   qualification-only differences — rebuild it.
-const FormatVersion = 2
+//	3: the signature covers the whole manifest (not only the Merkle root), and
+//	   the artifact may carry the project's pgdac.yaml and pre/post-deploy
+//	   scripts (manifest.deploy). Older artifacts verify with their own scheme.
+const FormatVersion = 3

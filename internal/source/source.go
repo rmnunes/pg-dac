@@ -27,6 +27,11 @@ type Options struct {
 	// TargetMajor selects the scratch PostgreSQL major used to normalize a
 	// project/.sql source (0 = the project's manifest, else the library default).
 	TargetMajor int
+	// RequireKey, when set, is the signer fingerprint a .pgdac source must carry.
+	RequireKey string
+	// TrustedKeys, when non-empty (and RequireKey is unset), is the set of
+	// signer fingerprints a .pgdac source may carry.
+	TrustedKeys []string
 }
 
 // Resolve turns a source spec into a model and any unsupported-object warnings.
@@ -38,7 +43,7 @@ func Resolve(ctx context.Context, spec string, opts Options) (*model.Database, [
 	case IsConnString(spec):
 		return resolveDB(ctx, spec, opts)
 	case strings.HasSuffix(spec, ".pgdac"):
-		return resolveArtifact(spec)
+		return resolveArtifact(spec, opts)
 	}
 
 	if fi, err := os.Stat(spec); err == nil {
@@ -77,12 +82,15 @@ func IsConnString(s string) bool {
 		strings.Contains(s, "user=")
 }
 
-// resolveArtifact opens a .pgdac, rejecting it if its integrity check fails or
-// if it is signed but the signature does not verify. An artifact written by an
-// older format version is accepted with a warning: its canonical form may differ
-// from a freshly introspected model (e.g. unqualified names), which shows up as
-// spurious differences until it is rebuilt.
-func resolveArtifact(path string) (*model.Database, []string, error) {
+// resolveArtifact opens a .pgdac, rejecting it if its integrity check fails, if
+// it is signed but the signature does not verify, or if its signer is not the
+// one required / not in the trust list. Without any trust configuration a
+// signed artifact is accepted and its signer fingerprint reported, and an
+// unsigned one is accepted with a warning. An artifact written by an older
+// format version is accepted with a warning: its canonical form may differ from
+// a freshly introspected model, which shows up as spurious differences until it
+// is rebuilt.
+func resolveArtifact(path string, opts Options) (*model.Database, []string, error) {
 	o, err := artifact.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -94,6 +102,33 @@ func resolveArtifact(path string) (*model.Database, []string, error) {
 		return nil, nil, fmt.Errorf("artifact %s has an invalid signature", path)
 	}
 	var warns []string
+	fp := o.Fingerprint()
+	switch {
+	case opts.RequireKey != "":
+		if !o.Signed {
+			return nil, nil, fmt.Errorf("artifact %s is unsigned but key %s is required", path, opts.RequireKey)
+		}
+		if fp != opts.RequireKey {
+			return nil, nil, fmt.Errorf("artifact %s is signed by key %s, not the required %s", path, fp, opts.RequireKey)
+		}
+	case len(opts.TrustedKeys) > 0:
+		if !o.Signed {
+			return nil, nil, fmt.Errorf("artifact %s is unsigned but a trusted-keys list is configured", path)
+		}
+		trusted := false
+		for _, k := range opts.TrustedKeys {
+			if k == fp {
+				trusted = true
+			}
+		}
+		if !trusted {
+			return nil, nil, fmt.Errorf("artifact %s is signed by key %s, which is not in the trusted-keys list", path, fp)
+		}
+	case !o.Signed:
+		warns = append(warns, fmt.Sprintf("artifact %s is unsigned; its origin cannot be verified", path))
+	default:
+		warns = append(warns, fmt.Sprintf("artifact %s is signed by key %s (no trust list configured — pass --require-key or add the key to the trusted_keys file to enforce it)", path, fp))
+	}
 	if o.Manifest.FormatVersion < artifact.FormatVersion {
 		warns = append(warns, fmt.Sprintf("artifact %s uses format version %d (current %d); its canonical "+
 			"definitions may differ in schema qualification — rebuild it to avoid spurious differences",

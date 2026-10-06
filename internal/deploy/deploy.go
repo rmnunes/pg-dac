@@ -1,0 +1,183 @@
+// Package deploy carries the deployment-time parts of a project that are not
+// schema: pre-deploy and post-deploy scripts (seed data, grants, REFRESH
+// MATERIALIZED VIEW, ...) and the manifest's drop policy. They travel inside a
+// .pgdac next to the model, so an artifact is a complete deployment unit the
+// way a DACPAC is, and `publish` runs them around the generated migration.
+package deploy
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/rodrigonunes/pg-dac/internal/artifact"
+	"github.com/rodrigonunes/pg-dac/internal/engine"
+	"github.com/rodrigonunes/pg-dac/internal/execute"
+	"github.com/rodrigonunes/pg-dac/internal/project"
+)
+
+// Script is one deployment script: a display name and its SQL.
+type Script struct {
+	Name string
+	SQL  string
+}
+
+// Plan is what a desired-state source contributes to a deployment besides the
+// schema model.
+type Plan struct {
+	Pre, Post  []Script
+	DropPolicy string // "" | none | safe | all
+	// ManifestYAML is the project's pgdac.yaml text, when the source has one.
+	ManifestYAML []byte
+}
+
+// Empty reports whether the plan carries nothing.
+func (p *Plan) Empty() bool {
+	return p == nil || (len(p.Pre) == 0 && len(p.Post) == 0 && p.DropPolicy == "" && len(p.ManifestYAML) == 0)
+}
+
+// ForSource inspects a desired-state spec: a project directory with a
+// pgdac.yaml yields its pre/post-deploy files (in manifest order) and drop
+// policy; a .pgdac yields the ones embedded at build time; anything else (a
+// live database, a bare .sql file) yields an empty plan.
+func ForSource(spec string) (*Plan, error) {
+	spec = strings.TrimPrefix(spec, "file://")
+	if strings.HasSuffix(spec, ".pgdac") {
+		o, err := artifact.Open(spec)
+		if err != nil {
+			return nil, err
+		}
+		return fromArtifact(o), nil
+	}
+	fi, err := os.Stat(spec)
+	if err != nil || !fi.IsDir() || !project.Exists(spec) {
+		return &Plan{}, nil
+	}
+	m, err := project.Load(spec)
+	if err != nil {
+		return nil, err
+	}
+	plan := &Plan{DropPolicy: m.DropPolicy}
+	if plan.ManifestYAML, err = os.ReadFile(filepath.Join(spec, project.ManifestName)); err != nil {
+		return nil, err
+	}
+	if plan.Pre, err = readScripts(spec, m.PreDeployFiles); err != nil {
+		return nil, err
+	}
+	if plan.Post, err = readScripts(spec, m.PostDeployFiles); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+func readScripts(dir string, list func(string) ([]string, error)) ([]Script, error) {
+	files, err := list(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []Script
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", f, err)
+		}
+		rel, _ := filepath.Rel(dir, f)
+		out = append(out, Script{Name: filepath.ToSlash(rel), SQL: string(data)})
+	}
+	return out, nil
+}
+
+func fromArtifact(o *artifact.Opened) *Plan {
+	plan := &Plan{}
+	if o.Manifest.Deploy != nil {
+		plan.DropPolicy = o.Manifest.Deploy.DropPolicy
+	}
+	plan.ManifestYAML = o.Parts[artifact.PartProject]
+	for _, name := range partsUnder(o, artifact.PartPreDeployDir) {
+		plan.Pre = append(plan.Pre, Script{Name: name, SQL: string(o.Parts[name])})
+	}
+	for _, name := range partsUnder(o, artifact.PartPostDeployDir) {
+		plan.Post = append(plan.Post, Script{Name: name, SQL: string(o.Parts[name])})
+	}
+	return plan
+}
+
+// partsUnder lists an artifact's parts below a directory prefix in name order
+// (names carry a zero-padded sequence, so this is the execution order).
+func partsUnder(o *artifact.Opened, prefix string) []string {
+	var names []string
+	for name := range o.Parts {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ArtifactParts renders the plan as extra artifact parts (manifest text plus
+// numbered pre/post scripts) and the manifest's deploy block.
+func (p *Plan) ArtifactParts() ([]artifact.ExtraPart, *artifact.DeployInfo) {
+	if p.Empty() {
+		return nil, nil
+	}
+	var parts []artifact.ExtraPart
+	info := &artifact.DeployInfo{DropPolicy: p.DropPolicy}
+	if len(p.ManifestYAML) > 0 {
+		parts = append(parts, artifact.ExtraPart{Name: artifact.PartProject, Data: p.ManifestYAML})
+	}
+	for i, s := range p.Pre {
+		name := fmt.Sprintf("%s%04d_%s", artifact.PartPreDeployDir, i+1, filepath.Base(s.Name))
+		parts = append(parts, artifact.ExtraPart{Name: name, Data: []byte(s.SQL)})
+		info.PreDeploy = append(info.PreDeploy, name)
+	}
+	for i, s := range p.Post {
+		name := fmt.Sprintf("%s%04d_%s", artifact.PartPostDeployDir, i+1, filepath.Base(s.Name))
+		parts = append(parts, artifact.ExtraPart{Name: name, Data: []byte(s.SQL)})
+		info.PostDeploy = append(info.PostDeploy, name)
+	}
+	return parts, info
+}
+
+// ApplyDropPolicy maps a manifest drop policy onto the engine options:
+//
+//	none  drop nothing that is missing from the source
+//	safe  drop only constraints and indexes (cheap to recreate) — the default
+//	all   drop every object missing from the source
+//
+// An unknown or empty policy leaves the options untouched.
+func ApplyDropPolicy(opts *engine.Options, policy string) {
+	switch strings.ToLower(policy) {
+	case "none":
+		opts.DropObjectsNotInSource = false
+		opts.DropConstraintsNotInSource = false
+		opts.DropIndexesNotInSource = false
+	case "safe":
+		opts.DropObjectsNotInSource = false
+		opts.DropConstraintsNotInSource = true
+		opts.DropIndexesNotInSource = true
+	case "all":
+		opts.DropObjectsNotInSource = true
+		opts.DropConstraintsNotInSource = true
+		opts.DropIndexesNotInSource = true
+	}
+}
+
+// Run executes scripts in order, each as one multi-statement script in its own
+// implicit transaction (simple query protocol). Scripts are plain SQL — psql
+// meta-commands such as \i cannot run server-side.
+func Run(ctx context.Context, conn *pgx.Conn, scripts []Script, onScript func(name string)) error {
+	for _, s := range scripts {
+		if onScript != nil {
+			onScript(s.Name)
+		}
+		if err := execute.ApplyScript(ctx, conn, s.SQL); err != nil {
+			return fmt.Errorf("deploy script %s: %w", s.Name, err)
+		}
+	}
+	return nil
+}
