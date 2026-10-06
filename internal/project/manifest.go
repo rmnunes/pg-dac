@@ -92,6 +92,49 @@ func Default(name string) *Manifest {
 	}
 }
 
+// AddRoles appends roles to the manifest's roles: list, editing the YAML in
+// place so the file's comments and layout survive (an update from a database
+// must not reformat a hand-written manifest).
+func AddRoles(dir string, roles []string) error {
+	path := filepath.Join(dir, ManifestName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse %s: %w", ManifestName, err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("%s: unexpected document structure", ManifestName)
+	}
+	root := doc.Content[0]
+	var seq *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "roles" {
+			seq = root.Content[i+1]
+		}
+	}
+	if seq == nil {
+		seq = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "roles"}, seq)
+	}
+	have := map[string]bool{}
+	for _, n := range seq.Content {
+		have[n.Value] = true
+	}
+	for _, r := range roles {
+		if !have[r] {
+			seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: r})
+		}
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
 // Exists reports whether dir contains a pgdac.yaml.
 func Exists(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ManifestName))

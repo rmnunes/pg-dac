@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 
 import { useStore } from "../state/store";
-import { displaySpec } from "../state/profiles";
+import { displaySpec, specIsProject } from "../state/profiles";
 
 export function PublishModal({ onClose }: { onClose: () => void }) {
   const { plan, publish, allowHazards, set, startPublish, from, profiles } = useStore();
+  const isProject = specIsProject(from, profiles);
+  const unit = isProject ? "file" : "statement";
   const errorCodes = useMemo(
     () => (plan?.hazardSummary ?? []).filter((h) => h.severity === "error"),
     [plan],
@@ -29,12 +31,21 @@ export function PublishModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal publish" onClick={(e) => e.stopPropagation()}>
-        <h2>Publish to Target</h2>
-        <p className="muted">
-          Applies the migration to the <b>Target</b> <code>{displaySpec(from, profiles)}</code>, updating it to match
-          the Source. This is not all-or-nothing — CONCURRENTLY statements run outside a transaction; a failed
-          publish can be resumed by comparing again.
-        </p>
+        <h2>{isProject ? "Update Target project" : "Publish to Target"}</h2>
+        {isProject ? (
+          <p className="muted">
+            Rewrites the files of the <b>Target</b> project <code>{displaySpec(from, profiles)}</code> so they describe
+            the Source: changed objects are replaced in place, new objects get a file at the project's stable path,
+            and objects the Source lacks are removed only under drop policy <code>all</code>. Objects defined by
+            migration-style statements are refused with directions.
+          </p>
+        ) : (
+          <p className="muted">
+            Applies the migration to the <b>Target</b> <code>{displaySpec(from, profiles)}</code>, updating it to match
+            the Source. This is not all-or-nothing — CONCURRENTLY statements run outside a transaction; a failed
+            publish can be resumed by comparing again.
+          </p>
+        )}
 
         {plan?.dataLoss && (
           <label className="ack danger">
@@ -73,7 +84,7 @@ export function PublishModal({ onClose }: { onClose: () => void }) {
             </div>
             <pre className="publish-log">{publish.log.join("\n")}</pre>
             {publish.error && <div className="error-banner">{publish.error}</div>}
-            {publish.done && <div className="ok-banner">Applied {publish.applied} statement(s).</div>}
+            {publish.done && <div className="ok-banner">Applied {publish.applied} {unit}(s).</div>}
           </div>
         )}
 

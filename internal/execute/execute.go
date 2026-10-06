@@ -149,6 +149,56 @@ func ApplyStatements(ctx context.Context, e Execer, stmts []sqlgen.Statement) er
 	return nil
 }
 
+// ApplyDeferred runs authored statements one by one in autocommit, deferring
+// any that fail and retrying them after the rest until a pass makes no
+// progress. The order of a project's files therefore does not matter: a view
+// that precedes its table fails once and succeeds on the next pass, exactly as
+// a declarative SQL project behaves in SSDT. Statements that never succeed are
+// reported together with their last error (up to a handful, then a count).
+func ApplyDeferred(ctx context.Context, e Execer, stmts []string) error {
+	if err := prepareSession(ctx, e); err != nil {
+		return err
+	}
+	type pending struct {
+		sql string
+		err error
+	}
+	queue := make([]pending, 0, len(stmts))
+	for _, s := range stmts {
+		if strings.TrimSpace(s) != "" {
+			queue = append(queue, pending{sql: s})
+		}
+	}
+	for len(queue) > 0 {
+		var failed []pending
+		for _, p := range queue {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if _, err := e.Exec(ctx, p.sql); err != nil {
+				failed = append(failed, pending{sql: p.sql, err: err})
+			}
+		}
+		if len(failed) == 0 {
+			return nil
+		}
+		if len(failed) == len(queue) {
+			var b strings.Builder
+			fmt.Fprintf(&b, "%d statement(s) failed after retrying in every order", len(failed))
+			for i, p := range failed {
+				if i == 5 {
+					fmt.Fprintf(&b, "\n  ... and %d more", len(failed)-i)
+					break
+				}
+				fmt.Fprintf(&b, "\n  %s: %v", firstLine(p.sql), p.err)
+			}
+			return errors.New(b.String())
+		}
+		queue = failed
+	}
+	return nil
+}
+
 // ApplyScript runs a multi-statement SQL script using the simple query protocol
 // (one implicit transaction). Suitable for applying authored declarative DDL to
 // a scratch database for normalization; not for migrations containing

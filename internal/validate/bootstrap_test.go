@@ -129,7 +129,7 @@ func TestBootstrap_FromEmpty(t *testing.T) {
 }
 
 // TestExtractProjectRoundTrip lays the comprehensive fixture out as an
-// extracted project (engine.ObjectScripts: one numbered file per object in
+// extracted project (engine.ProjectFiles: one file per object at a stable path;
 // global dependency order), builds that project back through the scratch
 // database, and requires it to compare empty against the original model in both
 // directions. This is the gate for `extract --to-project` on schemas where a
@@ -147,21 +147,23 @@ func TestExtractProjectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build fixture: %v", err)
 	}
-	scripts := engine.ObjectScripts(to)
-	if len(scripts) < 10 {
-		t.Fatalf("expected many extracted scripts, got %d", len(scripts))
+	files := engine.ProjectFiles(to)
+	if len(files) < 10 {
+		t.Fatalf("expected many extracted files, got %d", len(files))
 	}
 	dir := t.TempDir()
-	for _, sc := range scripts {
-		if err := os.MkdirAll(filepath.Join(dir, sc.Section), 0o755); err != nil {
+	for _, f := range files {
+		path := filepath.Join(dir, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, sc.Section, sc.FileName()), []byte(sc.SQL+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(f.SQL+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	man := project.Default("roundtrip")
-	man.Include = []string{engine.ExtractSection + "/**/*.sql"}
+	man.Include = []string{engine.ExtensionsSection + "/**/*.sql", engine.ExtractSection + "/**/*.sql"}
+	man.Roles = to.Grantees()
 	if mv := to.MajorVersion(); mv > 0 {
 		man.TargetMajor = mv
 	}

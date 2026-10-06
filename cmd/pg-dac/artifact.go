@@ -127,26 +127,27 @@ func writeProject(cmd *cobra.Command, dir, name, version string, schemas []strin
 		abs, _ := filepath.Abs(dir)
 		name = filepath.Base(abs)
 	}
-	scripts := engine.ObjectScripts(m)
-	written := 0
-	for _, sc := range scripts {
-		sectionDir := filepath.Join(dir, sc.Section)
-		if err := os.MkdirAll(sectionDir, 0o755); err != nil {
+	// Import creates a project; an existing one is updated through publish with
+	// the project as the target, which touches only what changed.
+	if project.Exists(dir) {
+		return fmt.Errorf("%s already holds a project (%s); to bring it up to date run: pg-dac publish --from %s --to <database>", dir, project.ManifestName, dir)
+	}
+	files := engine.ProjectFiles(m)
+	for _, f := range files {
+		path := filepath.Join(dir, filepath.FromSlash(f.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		path := filepath.Join(sectionDir, sc.FileName())
-		if err := os.WriteFile(path, []byte(sc.SQL+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(f.SQL+"\n"), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
-		written++
 	}
 
 	man := project.Default(name)
 	man.Version = version
-	// Extracted projects are laid out as one numbered file per object in the
-	// global dependency order a from-empty publish uses (see engine.ObjectScripts),
-	// not in the section folders `init` scaffolds for hand authoring.
-	man.Include = []string{engine.ExtractSection + "/**/*.sql"}
+	// One file per object under stable paths (see engine.ProjectFiles); the build
+	// applies statements with deferred retry, so no order is encoded in names.
+	man.Include = []string{engine.ExtensionsSection + "/**/*.sql", engine.ExtractSection + "/**/*.sql"}
 	if mv := m.MajorVersion(); mv > 0 {
 		man.TargetMajor = mv
 	}
@@ -159,8 +160,8 @@ func writeProject(cmd *cobra.Command, dir, name, version string, schemas []strin
 		return err
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "Extracted %d script(s) into project %q at %s\n", written, name, dir)
-	fmt.Fprintf(w, "  %s (targetMajor %d); files under %s/ apply in dependency order\n", project.ManifestName, man.TargetMajor, engine.ExtractSection)
+	fmt.Fprintf(w, "Extracted %d file(s) into project %q at %s\n", len(files), name, dir)
+	fmt.Fprintf(w, "  %s (targetMajor %d); one file per object under %s/<schema>/<kind>/\n", project.ManifestName, man.TargetMajor, engine.ExtractSection)
 	return nil
 }
 

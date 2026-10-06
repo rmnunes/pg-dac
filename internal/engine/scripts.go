@@ -1,7 +1,9 @@
 package engine
 
 import (
-	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
 	"strings"
 
 	"github.com/rmnunes/pg-dac/internal/diff"
@@ -9,141 +11,147 @@ import (
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
-// ExtractSection is the folder an extracted project's scripts are written to.
+// ExtractSection is the root folder an extracted project's object files live in.
 const ExtractSection = "schema"
 
-// ObjectScript is one object's canonical CREATE SQL, the project folder it
-// belongs in, and a filename stem (unique within the folder). Used by
-// `extract --to-project` to lay a database out as a declarative project.
-type ObjectScript struct {
-	Section string
-	Base    string
-	SQL     string
+// ExtensionsSection is the folder extension files live in.
+const ExtensionsSection = "extensions"
+
+// ProjectFile is one object's canonical SQL — its CREATE, sub-objects (keys,
+// indexes, triggers, policies), comments and privileges — at the stable path a
+// declarative pg-dac project keeps it under:
+//
+//	extensions/<name>.sql
+//	schema/<schema>/schema.sql
+//	schema/<schema>/<tables|views|materialized_views|sequences|types|collations|functions|procedures>/<name>.sql
+//
+// Paths are slash-separated and relative to the project root. The build
+// applies statements with deferred retry, so no file order is needed and a
+// table's foreign keys can live in the table's own file.
+type ProjectFile struct {
+	Path  string
+	Owner model.ObjRef
+	SQL   string
 }
 
-// FileName returns a filesystem-safe "<base>.sql".
-func (o ObjectScript) FileName() string { return sanitizeFilename(o.Base) + ".sql" }
-
-// ObjectScripts renders a database as a numbered sequence of per-object scripts
-// in global dependency order — the very order a from-empty publish applies — so
-// the resulting project builds cleanly even when a function's signature needs a
-// view's row type, a view calls such a function, or a trigger executes it.
-// Consecutive plan operations on the same object share one file; a table's
-// foreign keys, triggers and policies therefore land in later files of their
-// own once everything they reference exists (the file name says what they hold).
-func ObjectScripts(db *model.Database) []ObjectScript {
+// ProjectFiles renders a database as one file per object (see ProjectFile).
+// Statements come from the from-empty migration the engine would publish, so
+// every object kind pg-dac manages is covered and the text is the canonical
+// form a comparison expects. File paths are deterministic; names that would
+// collide on a case-insensitive file system or after sanitizing get a short
+// hash suffix.
+func ProjectFiles(db *model.Database) []ProjectFile {
 	baseline := &model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{{Name: "public"}}}
 	res, err := Compare(baseline, db, Options{Online: false})
 	if err != nil {
 		return nil
 	}
-
-	var out []ObjectScript
-	fileOf := map[string]int{} // owner key -> index of the file that creates the object
-	n := 0
-	for i := 0; i < len(res.Groups); {
-		owner := res.Groups[i].Op.Owner
-		j := i
+	byOwner := map[string]*ProjectFile{}
+	var order []string
+	for _, g := range res.Groups {
+		key := g.Op.Owner.Key()
+		pf, ok := byOwner[key]
+		if !ok {
+			pf = &ProjectFile{Owner: g.Op.Owner, Path: projectPath(g.Op.Owner, routineKind(g.Op))}
+			byOwner[key] = pf
+			order = append(order, key)
+		}
 		var sqls []string
-		for j < len(res.Groups) && res.Groups[j].Op.Owner.Key() == owner.Key() {
-			for _, s := range res.Groups[j].Statements {
-				sqls = append(sqls, s.SQL)
+		for _, s := range g.Statements {
+			sqls = append(sqls, s.SQL)
+		}
+		if sql := strings.TrimSpace(strings.Join(sqls, "\n")); sql != "" {
+			if pf.SQL != "" {
+				pf.SQL += "\n"
 			}
-			j++
+			pf.SQL += sql
 		}
-		sql := strings.TrimSpace(strings.Join(sqls, "\n"))
-		if sql == "" {
-			i = j
-			continue
-		}
-		// Privileges and comments only need their object to exist, so they belong
-		// in the file that creates it rather than in a trailing file of their own,
-		// even though the plan runs them last.
-		if idx, ok := fileOf[owner.Key()]; ok && onlyAnnotations(res.Groups[i:j]) {
-			out[idx].SQL += "\n" + sql
-			i = j
-			continue
-		}
-		n++
-		out = append(out, ObjectScript{Section: ExtractSection, Base: scriptBase(n, owner, groupSuffix(res.Groups[i:j])), SQL: sql})
-		if _, ok := fileOf[owner.Key()]; !ok {
-			fileOf[owner.Key()] = len(out) - 1
-		}
-		i = j
 	}
+	out := make([]ProjectFile, 0, len(order))
+	for _, key := range order {
+		if byOwner[key].SQL != "" {
+			out = append(out, *byOwner[key])
+		}
+	}
+	disambiguate(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }
 
-// onlyAnnotations reports whether every op in the groups is a privilege or
-// comment change.
-func onlyAnnotations(groups []sqlgen.OpStatements) bool {
-	for _, g := range groups {
-		switch g.Op.Type {
-		case diff.OpGrant, diff.OpRevoke, diff.OpSetComment:
-		default:
-			return false
-		}
+// routineKind reports "procedure" for a routine op, else "".
+func routineKind(op diff.Op) string {
+	if op.Function != nil {
+		return op.Function.Kind
 	}
-	return true
+	return ""
 }
 
-// scriptBase builds the file stem "NNNN_<kind>_<schema.name><suffix>". A
-// function's signature is reduced to its name (the sequence number already
-// keeps overloads apart), and the stem is bounded so deep paths stay well under
-// filesystem limits.
-func scriptBase(n int, owner model.ObjRef, suffix string) string {
-	name := owner.Name
-	if owner.Kind == model.KindFunction {
-		if p := strings.IndexByte(name, '('); p > 0 {
+// projectPath is the stable file path for an object (before collision handling).
+func projectPath(o model.ObjRef, routine string) string {
+	switch o.Kind {
+	case model.KindExtension:
+		return ExtensionsSection + "/" + fileSafe(o.Name) + ".sql"
+	case model.KindSchema:
+		return ExtractSection + "/" + fileSafe(o.Name) + "/schema.sql"
+	}
+	folder := map[model.ObjKind]string{
+		model.KindTable:     "tables",
+		model.KindView:      "views",
+		model.KindMatView:   "materialized_views",
+		model.KindSequence:  "sequences",
+		model.KindEnum:      "types",
+		model.KindDomain:    "types",
+		model.KindComposite: "types",
+		model.KindCollation: "collations",
+		model.KindFunction:  "functions",
+	}[o.Kind]
+	if folder == "" {
+		folder = string(o.Kind)
+	}
+	name := o.Name
+	if o.Kind == model.KindFunction {
+		if routine == "procedure" {
+			folder = "procedures"
+		}
+		// Name carries "name(identity args)"; overloads are told apart by a hash
+		// of the argument list so the file name stays the routine's name.
+		if p := strings.IndexByte(name, '('); p >= 0 {
+			args := name[p:]
 			name = name[:p]
+			if args != "()" {
+				name += "__" + shortHash(args)
+			}
 		}
 	}
-	if owner.Schema != "" {
-		name = owner.Schema + "." + name
-	}
-	const maxName = 80
-	if len(name) > maxName {
-		name = name[:maxName]
-	}
-	return fmt.Sprintf("%04d_%s_%s%s", n, owner.Kind, name, suffix)
+	return ExtractSection + "/" + fileSafe(o.Schema) + "/" + folder + "/" + fileSafe(name) + ".sql"
 }
 
-// groupSuffix names a file that holds only sub-object operations of an object
-// created in an earlier file (its foreign keys, triggers, ...); it is empty when
-// the file creates the object itself.
-func groupSuffix(groups []sqlgen.OpStatements) string {
-	for _, g := range groups {
-		switch g.Op.Type {
-		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateFunction,
-			diff.OpCreateSequence, diff.OpCreateSchema, diff.OpCreateExtension, diff.OpCreateEnum,
-			diff.OpCreateDomain, diff.OpCreateCompositeType, diff.OpCreateCollation:
-			return ""
+// disambiguate appends a hash suffix to files whose paths collide once case is
+// folded (Windows and macOS file systems) or after sanitizing.
+func disambiguate(files []ProjectFile) {
+	groups := map[string][]int{}
+	for i, f := range files {
+		k := strings.ToLower(f.Path)
+		groups[k] = append(groups[k], i)
+	}
+	for _, idxs := range groups {
+		if len(idxs) < 2 {
+			continue
+		}
+		for _, i := range idxs {
+			p := files[i].Path
+			files[i].Path = strings.TrimSuffix(p, ".sql") + "__" + shortHash(files[i].Owner.Key()) + ".sql"
 		}
 	}
-	switch groups[0].Op.Type {
-	case diff.OpAddConstraint:
-		return "_constraints"
-	case diff.OpCreateIndex:
-		return "_indexes"
-	case diff.OpCreateTrigger, diff.OpSetTriggerEnabled:
-		return "_triggers"
-	case diff.OpSetColumnStorage, diff.OpSetColumnCompression, diff.OpSetColumnStats:
-		return "_columns"
-	case diff.OpSetComment:
-		return "_comments"
-	case diff.OpCreatePolicy:
-		return "_policies"
-	case diff.OpEnableRLS:
-		return "_rls"
-	case diff.OpSetSequenceOwner:
-		return "_owner"
-	case diff.OpValidateConstraint:
-		return "_validate"
-	}
-	return "_" + string(groups[0].Op.Type)
 }
 
-func sanitizeFilename(s string) string {
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:4])
+}
+
+// fileSafe keeps a name usable as a file or folder name on every platform.
+func fileSafe(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
@@ -153,5 +161,23 @@ func sanitizeFilename(s string) string {
 			b.WriteRune('_')
 		}
 	}
-	return strings.Trim(b.String(), "_")
+	out := strings.Trim(b.String(), "_")
+	if out == "" || out == "." || out == ".." {
+		out = "_" + shortHash(s)
+	}
+	return out
 }
+
+// ObjectSQL renders one object of db (with its sub-objects, comments and
+// privileges) in canonical form, or "" when absent. It is the content a
+// project update writes for that object.
+func ObjectSQL(db *model.Database, ref model.ObjRef) string {
+	for _, f := range ProjectFiles(db) {
+		if f.Owner.Key() == ref.Key() {
+			return f.SQL
+		}
+	}
+	return ""
+}
+
+var _ = sqlgen.Statement{}

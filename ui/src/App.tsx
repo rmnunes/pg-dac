@@ -10,7 +10,7 @@ import { DetailPane } from "./components/DetailPane";
 import { PublishModal } from "./components/PublishModal";
 import { ScriptModal } from "./components/ScriptModal";
 import { CompareProgress } from "./components/CompareProgress";
-import { specIsDb } from "./state/profiles";
+import { specIsDb, specIsProject } from "./state/profiles";
 
 // Warnings arrive tagged with the side they concern; the GUI's names for the
 // engine's --from / --to are Target / Source.
@@ -77,9 +77,12 @@ export default function App() {
   }, [handlePublishEvent, handleCompareEvent, loadProfiles]);
 
   const hasChanges = !!plan && plan.changes.length > 0;
-  // A Target can only be published to if it's a live database (you can't apply a
-  // migration to a project folder or an artifact). Handles profile refs too.
+  // A Target is published to when it is a live database (the migration runs
+  // there) or a project directory (its files are updated from the Source). An
+  // artifact cannot be a Target. Handles profile refs too.
   const targetIsDb = specIsDb(from, profiles);
+  const targetIsProject = specIsProject(from, profiles);
+  const canPublish = targetIsDb || targetIsProject;
   const counts = (plan?.changes ?? []).reduce<Record<string, number>>((a, c) => {
     a[c.changeKind] = (a[c.changeKind] ?? 0) + 1;
     return a;
@@ -160,15 +163,17 @@ export default function App() {
           </button>
           <button
             className="primary"
-            disabled={!hasChanges || !targetIsDb}
+            disabled={!hasChanges || !canPublish}
             title={
               targetIsDb
                 ? "Apply the changes to the Target database"
-                : "Publish updates the Target — set the Target to a database connection (or use Generate Script to back-port into a project)"
+                : targetIsProject
+                  ? "Rewrite the Target project's files so they describe the Source (SSDT's Update project from database)"
+                  : "Publish updates the Target — set the Target to a database connection or a project directory"
             }
             onClick={() => setShowPublish(true)}
           >
-            Publish to Target…
+            {targetIsProject ? "Update Target project…" : "Publish to Target…"}
           </button>
         </div>
       </footer>

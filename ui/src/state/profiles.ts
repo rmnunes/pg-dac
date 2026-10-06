@@ -85,3 +85,13 @@ export function specIsDb(spec: string, profiles: Profile[]): boolean {
   const p = find(spec, profiles);
   return p ? p.kind === "db" : looksLikeDsn(spec);
 }
+
+// specIsProject → whether a (possibly profile) spec refers to a project
+// directory (a Target that can be updated from the Source, like SSDT's
+// "Update project from database").
+export function specIsProject(spec: string, profiles: Profile[]): boolean {
+  const p = find(spec, profiles);
+  if (p) return p.kind === "project";
+  const s = spec.trim();
+  return s !== "" && !looksLikeDsn(s) && !s.toLowerCase().endsWith(".pgdac");
+}

@@ -25,6 +25,7 @@ import (
 	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/model"
 	"github.com/rmnunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/sqltext"
 )
 
 // Options configures a build.
@@ -279,11 +280,11 @@ func fromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 	if err := ensureRoles(ctx, conn, opts.Roles); err != nil {
 		return nil, nil, err
 	}
-	// Defer function-body validation (as pg_dump does) so a function that
-	// references a table/function created later in the script still applies — the
-	// scratch database only needs the objects to exist, not the bodies to resolve.
-	script := "SET check_function_bodies = false;\n" + sqlText
-	if err := execute.ApplyScript(ctx, conn, script); err != nil {
+	// Statements run one by one with deferred retry (see execute.ApplyDeferred),
+	// so a project's files need no particular order, and with function-body
+	// validation off (as pg_dump does) a function may reference objects that
+	// appear later — the scratch database only needs the objects to exist.
+	if err := execute.ApplyDeferred(ctx, conn, sqltext.Split(sqlText)); err != nil {
 		hint := ""
 		if looksLikePsqlScript(sqlText) {
 			hint = "\nhint: the source contains psql client-side meta-commands (e.g. \\i, \\echo, \\ir) " +
@@ -296,10 +297,11 @@ func fromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 	return introspect.IntrospectWithWarnings(ctx, conn, introspect.Options{IncludeSchemas: opts.Schemas})
 }
 
-// FromDir reads every .sql file under dir (recursively, in sorted path order),
-// concatenates them, and builds a model from the result. File order within the
-// concatenation does not affect the final model — the scratch database resolves
-// dependencies — but a stable order keeps any apply error messages reproducible.
+// FromDir reads the project's .sql files (the manifest's include globs, else
+// every .sql under dir, in sorted path order), concatenates them, and builds a
+// model from the result. File order does not affect the model: statements are
+// applied with deferred retry, so an object may be defined before what it
+// references. The stable order only keeps apply error messages reproducible.
 func FromDir(ctx context.Context, dir string, opts Options) (*model.Database, []string, error) {
 	files, err := collectFiles(dir, &opts)
 	if err != nil {

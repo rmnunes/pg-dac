@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,7 @@ import (
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
 	"github.com/rmnunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/project"
 	"github.com/rmnunes/pg-dac/internal/refactor"
 	"github.com/rmnunes/pg-dac/internal/source"
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
@@ -25,7 +27,7 @@ func newPublishCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "publish",
-		Short: "Apply the migration that brings the --from database up to the desired --to state",
+		Short: "Apply the migration that brings the --from target (a database, or a project to update) to the desired --to state",
 		Long: "Compares the live --from database against the desired --to state and applies the\n" +
 			"resulting migration with lock-safety (a session lock_timeout plus jittered\n" +
 			"retries). Data-loss and unsupported changes are refused unless --allow-hazards is\n" +
@@ -37,7 +39,11 @@ func newPublishCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 
 			if !source.IsConnString(f.from) {
-				return fmt.Errorf("--from must be a database connection string for publish (got %q)", f.from)
+				// A project as the target: update its files from the desired state.
+				if project.Exists(strings.TrimPrefix(f.from, "file://")) {
+					return publishToProject(cmd, f, dryRun)
+				}
+				return fmt.Errorf("--from must be a database connection string or a project directory for publish (got %q)", f.from)
 			}
 			conn, err := pgx.Connect(ctx, f.from)
 			if err != nil {

@@ -114,8 +114,21 @@ pg-dac inspect app.pgdac
 
 # Scaffold / reverse-engineer a declarative project
 pg-dac init    --dir ./schema --name app                               # section folders for hand authoring
-pg-dac extract --from "postgres://...prod" --to-project ./schema       # schema/NNNN_<kind>_<name>.sql in dependency order
+pg-dac extract --from "postgres://...prod" --to-project ./schema       # one file per object: schema/<schema>/<kind>/<name>.sql
+
+# Update an existing project from a database (SSDT's "Update project from database"):
+# the project is the target, only the files of changed objects are rewritten
+pg-dac publish --from ./schema --to "postgres://...dev" --dry-run       # file-level diff
+pg-dac publish --from ./schema --to "postgres://...dev"
 ```
+
+Project files need no particular order: the build applies statements with deferred retry, so a
+view may be defined before its table and a table's foreign keys live in the table's own file.
+Updating a project rewrites an object's declarative statements in place (keeping the comments
+above them), adds a file at the stable path for a new object, removes a dropped object's
+statements under drop policy `all`, and adds new grantees to `roles:`. An object defined by
+migration-style statements (`ALTER TABLE … ADD COLUMN`, `DO` blocks) cannot be rewritten by any
+tool and is refused with directions.
 
 Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
 the PostgreSQL major used to normalize a project source; a project's `pgdac.yaml` `targetMajor`

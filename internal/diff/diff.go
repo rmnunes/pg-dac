@@ -360,7 +360,9 @@ func diffTables(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Sch
 				continue
 			default: // warn
 				cs.Warnings = append(cs.Warnings, "table "+t.QualifiedName()+": "+order+
-					"; PostgreSQL cannot reorder columns in place, so the order is left as is (compare.columnOrder: rebuild rebuilds the table)")
+					"; PostgreSQL cannot reorder columns in place, so the order is left as is. "+
+					"To make the target match, set compare.columnOrder: rebuild (the table is rebuilt); "+
+					"to make the project match the target instead, update the project from it: pg-dac publish --from <project> --to <target>")
 			}
 		}
 		comment(cs, t.Ref(), "", "", prev.Comment, t.Comment)
@@ -473,7 +475,15 @@ func diffColumn(cs *ChangeSet, fromDB, toDB *model.Database, t *model.Table, pre
 		// the sequence it draws from may only be creatable once the identity
 		// sequence of the same name is gone.
 		if cur.Identity != "" {
-			cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev, SeedSequence: isIntegerType(cur.Type)})
+			reason := ""
+			if prev.Default != "" {
+				// A serial column in the target and an identity column in the
+				// source is usually two truths for one table, not a change anyone
+				// decided: say how to resolve it either way.
+				reason = "the target generates this column with DEFAULT " + prev.Default + ", the source declares an identity column; " +
+					"publishing converts the target (seeded past its current maximum); to adopt the target's definition into the project instead: pg-dac publish --from <project> --to <target>"
+			}
+			cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev, SeedSequence: isIntegerType(cur.Type), Reason: reason})
 		} else {
 			cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 			if cur.Default != "" && cur.Generated == "" {

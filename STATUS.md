@@ -15,7 +15,9 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | CLI engine: compare / script / report / plan | ✅ Verified on a ~290-object production schema |
 | Publish into an **existing** database | ✅ Dependents (views, matviews, triggers) are dropped and recreated around blocking changes (WP2) |
 | View column changes / function result-type changes | ✅ `DROP` + `CREATE` when `CREATE OR REPLACE` cannot apply (WP2) |
-| `extract --to-project` | ✅ One numbered file per object in global dependency order (WP2); round-trips the ~290-object production schema |
+| `extract --to-project` | ✅ One file per object at a stable path, `schema/<schema>/<kind>/<name>.sql` (WP6); round-trips the ~900-object production schema |
+| Update a project from a database (project as Target) | ✅ `publish --from <project> --to <db>`; files of changed objects rewritten in place, new files at stable paths, drops per policy, `roles:` kept current; file-level `--dry-run`; imperative definitions refused with directions (WP6) |
+| Order-free project files | ✅ The build applies statements with deferred retry, like an SSDT project (WP6) |
 | Publish into an **empty** database (bootstrap) | ✅ Fixed in WP1; regression-gated by `TestBootstrap_FromEmpty` |
 | Deterministic output / stable artifact hash | ✅ Fixed in WP1 (differ walks model order) |
 | Model independent of session `search_path` | ✅ Fixed in WP1 (introspection pins `search_path = ''`) |
@@ -173,6 +175,33 @@ grant silently.
 
 ---
 
+## WP6 (2026-10-07) — the project as a compare target
+
+The principle: the tool, not the operator, closes the loop in both directions, as SSDT's Schema
+Compare does when the project is the target.
+
+- **Order-insensitive build** (`execute.ApplyDeferred`, `sqltext.Split`): statements are applied
+  one by one; those that fail are retried after the rest until a pass makes no progress, and the
+  survivors are reported together. A view before its table, a foreign key before the referenced
+  table, a trigger before its function all build. Hand-authored projects need no numbering.
+- **Stable layout** (`engine.ProjectFiles`): one file per object at `schema/<schema>/<kind>/<name>.sql`
+  (and `extensions/<name>.sql`, `schema/<schema>/schema.sql`), holding the object's CREATE, its
+  constraints, indexes, triggers, policies, comments and grants. Routine overloads get a hash
+  suffix; names that collide on a case-insensitive file system too. `extract --to-project` writes
+  it and refuses to overwrite an existing project (that is an update).
+- **Project as a publish target** (`internal/projsync`, `publish --from <project> --to <db>`,
+  daemon and GUI "Update Target project"): the project's files are indexed by the object each
+  statement defines or annotates (`sqltext.ParseHead`); a changed object's declarative statements
+  are replaced in place by the canonical rendering (leading comments kept), a new object gets a
+  file at the stable path, a dropped object loses its statements under drop policy `all`, new
+  grantees are appended to `roles:` without reformatting the manifest. `--dry-run` prints a
+  unified file diff. An object defined imperatively is refused with directions; `--allow-hazards`
+  updates the rest. Routine overloads are rewritten as one unit.
+- **Directions in messages**: the column-order warning and the serial-to-identity note say both
+  ways out — rebuild the target, or update the project from it.
+
+---
+
 ## Object coverage
 
 **Managed (introspected, diffed, generated, published):** schemas, extensions, enums (labels added
@@ -220,6 +249,11 @@ Roles are cluster objects: never created or dropped, only required to exist.
 7. A true dependency cycle (possible only for objects that were themselves created via ALTERs)
    is reported as a `plan` warning and the cyclic operations are appended in priority order; the
    migration may still fail to apply.
+8. **Updating a project from a database rewrites declarative statements only.** An object defined
+   by migration steps (`CREATE … IF NOT EXISTS` followed by `ALTER TABLE … ADD COLUMN`, `DO`
+   blocks) is refused with directions; unqualified names in project files are taken to be in
+   `public`; a rename in the database appears as a drop plus an add, as in SSDT — record it in the
+   refactorlog instead.
 
 ---
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -22,6 +23,8 @@ import (
 	"github.com/rmnunes/pg-dac/internal/execute"
 	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/project"
+	"github.com/rmnunes/pg-dac/internal/projsync"
 	"github.com/rmnunes/pg-dac/internal/refactor"
 	"github.com/rmnunes/pg-dac/internal/source"
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
@@ -428,8 +431,10 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	if !source.IsConnString(req.From) {
-		badRequest(w, fmt.Errorf("publish target (from) must be a database connection string"))
+	isDB := source.IsConnString(req.From)
+	isProject := !isDB && project.Exists(strings.TrimPrefix(req.From, "file://"))
+	if !isDB && !isProject {
+		badRequest(w, fmt.Errorf("publish target (from) must be a database connection string or a project directory"))
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -439,6 +444,11 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(v)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
+	}
+
+	if isProject {
+		d.publishProject(req, send)
+		return
 	}
 
 	conn, err := pgx.Connect(d.ctx, req.From)
@@ -652,4 +662,67 @@ func toSet(ss []string) map[string]bool {
 		m[s] = true
 	}
 	return m
+}
+
+// publishProject streams an update of a declarative project (the target) from
+// the desired state: SSDT's "Update project from database". "start" carries
+// the number of file changes, one "progress" per file, then "done".
+func (d *daemon) publishProject(req compareReq, send func(string, any)) {
+	dir := strings.TrimPrefix(req.From, "file://")
+	man, err := project.Load(dir)
+	if err != nil {
+		send("error", map[string]any{"message": "target project: " + err.Error()})
+		return
+	}
+	srcOpts := d.sourceOptions(req)
+	toModel, toWarns, err := source.Resolve(d.ctx, req.To, srcOpts)
+	if err != nil {
+		send("error", map[string]any{"message": "resolve source: " + err.Error()})
+		return
+	}
+	fromModel, fromWarns, err := source.Resolve(d.ctx, req.From, srcOpts)
+	if err != nil {
+		send("error", map[string]any{"message": "build target project: " + err.Error()})
+		return
+	}
+	dplan := deployPlan(req.To)
+	if dplan.Compare == nil {
+		dplan.Compare = man.Compare
+	}
+	if dplan.DropPolicy == "" {
+		dplan.DropPolicy = man.DropPolicy
+	}
+	res, err := engine.Compare(fromModel, toModel, req.engineOptions(dplan))
+	if err != nil {
+		send("error", map[string]any{"message": err.Error()})
+		return
+	}
+	idx, err := projsync.Scan(dir, man, fromModel)
+	if err != nil {
+		send("error", map[string]any{"message": "index project files: " + err.Error()})
+		return
+	}
+	plan := projsync.Build(idx, man, fromModel, toModel, res)
+	var refused []string
+	for _, r := range plan.Refused {
+		refused = append(refused, r.Object+": "+r.Reason)
+	}
+	send("start", map[string]any{"statementCount": len(plan.Changes), "dataLoss": false, "deployScripts": 0, "files": true,
+		"warnings": mergeWarnings(tagWarnings("target", fromWarns), tagWarnings("source", toWarns), tagWarnings("plan", res.Warnings), tagWarnings("plan", refused))})
+	if len(plan.Refused) > 0 && !req.AllowHazards {
+		send("error", map[string]any{"message": fmt.Sprintf("refusing to update the project: %d object(s) are defined imperatively and cannot be rewritten in place (see warnings); set allowHazards to update the others", len(plan.Refused))})
+		return
+	}
+	if plan.Empty() {
+		send("done", map[string]any{"applied": 0, "files": true})
+		return
+	}
+	for i, c := range plan.Changes {
+		send("progress", map[string]any{"index": i + 1, "total": len(plan.Changes), "sql": "-- " + c.Action + " " + c.Path})
+	}
+	if err := plan.Apply(); err != nil {
+		send("error", map[string]any{"applied": 0, "total": len(plan.Changes), "message": err.Error()})
+		return
+	}
+	send("done", map[string]any{"applied": len(plan.Changes), "files": true, "rolesAdded": plan.RolesAdded})
 }

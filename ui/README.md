@@ -46,7 +46,9 @@ PostgreSQL binaries once (cached afterward), then stays warm for the session.
    project's pre/post-deploy scripts, whether to publish over a drifted Target, and the
    comparison semantics (privileges, column order, routine whitespace and comments — each
    defaults to the Source project's `pgdac.yaml` `compare:` block). Warnings are labelled with
-   the side they concern (Target, Source, Plan).
+   the side they concern (Target, Source, Plan). When the **Target is a project directory**, the
+   publish button becomes **Update Target project…** and rewrites the project's files from the
+   Source (SSDT's "Update project from database"); the progress log lists the files written.
 2. Review the **object tree** (grouped, virtualized, severity-badged). Uncheck objects to
    exclude them; the plan re-computes with your selection. Excluding an object also excludes every
    change that depends on it (shown disabled, with the cause), and including one brings its
