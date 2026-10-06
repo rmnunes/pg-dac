@@ -110,11 +110,14 @@ func newPublishCmd() *cobra.Command {
 					}
 				}
 			}
-			printWarnings(cmd, "--from", fromWarns)
+			// The raw introspection stays the drift/baseline form; the comparison
+			// runs on its canonical form, like every other source.
+			canonFrom, canonWarns := source.Canonical(ctx, fromModel, srcOpts)
+			printWarnings(cmd, "--from", append(fromWarns, canonWarns...))
 			printWarnings(cmd, "--to", toWarns)
 
 			opts := f.options()
-			res, err := engine.Compare(fromModel, toModel, opts)
+			res, err := engine.Compare(canonFrom, toModel, opts)
 			if err != nil {
 				return err
 			}
@@ -158,7 +161,7 @@ func newPublishCmd() *cobra.Command {
 				return nil
 			}
 			if f.doValidate {
-				vr, verr := validate.Plan(ctx, fromModel, toModel, opts)
+				vr, verr := validate.Plan(ctx, canonFrom, toModel, opts)
 				if verr != nil {
 					return fmt.Errorf("pre-publish validation failed to apply: %w", verr)
 				}

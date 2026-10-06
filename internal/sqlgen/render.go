@@ -350,28 +350,29 @@ func renderAlterColumnIdentity(op diff.Op) []Statement {
 				Note:          "remove the existing default before adding identity (a column cannot have both)",
 			})
 		}
-		stmts = append(stmts, Statement{
+		conv := Statement{
 			SQL:           "ALTER TABLE " + t + " ALTER COLUMN " + col + " ADD GENERATED " + identityKeyword(cur.Identity) + " AS IDENTITY;",
 			Transactional: true,
 			Note:          "convert to an identity column",
-			Hazards: []safety.Hazard{
-				safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table"),
-				safety.New(safety.Correctness, "on a populated column, set the identity sequence past the existing maximum value to avoid collisions"),
-			},
-		})
+			Hazards:       []safety.Hazard{safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table")},
+		}
+		if !op.SeedSequence {
+			conv.Hazards = append(conv.Hazards, safety.New(safety.Correctness,
+				"on a populated column, set the identity sequence past the existing maximum value to avoid collisions"))
+		}
+		stmts = append(stmts, conv)
+		if op.SeedSequence {
+			stmts = append(stmts, seedSequence(op.Table, cur.Name, identitySequenceExpr(op.Table, cur.Name)))
+		}
 
 	case prev.Identity != "" && cur.Identity == "":
+		// Any default the desired column carries is set by its own op, ordered
+		// after this one and after the sequence it may draw from exists.
 		stmts = append(stmts, Statement{
 			SQL:           "ALTER TABLE " + t + " ALTER COLUMN " + col + " DROP IDENTITY IF EXISTS;",
 			Transactional: true,
 			Hazards:       []safety.Hazard{safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table")},
 		})
-		if cur.Default != "" {
-			stmts = append(stmts, Statement{
-				SQL:           "ALTER TABLE " + t + " ALTER COLUMN " + col + " SET DEFAULT " + cur.Default + ";",
-				Transactional: true,
-			})
-		}
 
 	default: // both identity, kind differs (always <-> by default)
 		stmts = append(stmts, Statement{
@@ -387,6 +388,55 @@ func identityKeyword(identity string) string {
 		return "ALWAYS"
 	}
 	return "BY DEFAULT"
+}
+
+// seedSequence positions a sequence that has never seen the column's rows just
+// past the column's current maximum, so the next generated value cannot
+// collide with existing data. seqExpr yields the sequence (a regclass). An
+// empty table seeds to 1; a missing sequence (NULL regclass) is a no-op.
+func seedSequence(t *model.Table, col, seqExpr string) Statement {
+	q := model.QuoteIdent(col)
+	return Statement{
+		SQL: "SELECT pg_catalog.setval(" + seqExpr + ", COALESCE((SELECT max(" + q + ") FROM " + t.QualifiedName() + "), 0) + 1, false);",
+		Transactional: true,
+		Note:          "seed the new sequence past the column's current maximum so generated values cannot collide with existing rows",
+	}
+}
+
+// identitySequenceExpr yields the regclass of the identity sequence behind a
+// column. pg_get_serial_sequence cannot be used: while the column's former
+// serial sequence is still OWNED BY it (it is dropped later, or kept by the
+// drop policy), that function may return the old sequence instead. An identity
+// sequence is the one pg_depend links to the column with deptype 'i'.
+func identitySequenceExpr(t *model.Table, col string) string {
+	return "(SELECT d.objid::regclass FROM pg_catalog.pg_depend d " +
+		"JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid " +
+		"WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.refclassid = 'pg_catalog.pg_class'::regclass " +
+		"AND d.deptype = 'i' AND d.refobjid = " + model.QuoteLiteral(t.QualifiedName()) + "::regclass AND a.attname = " + model.QuoteLiteral(col) + ")"
+}
+
+// seedDefaultSequence seeds the sequence a column's new nextval() default draws
+// from, when the differ flagged that sequence as new to the target.
+func seedDefaultSequence(op diff.Op) []Statement {
+	seq, ok := regclassOfDefault(op.Column.Default)
+	if !ok {
+		return nil
+	}
+	return []Statement{seedSequence(op.Table, op.Column.Name, seq)}
+}
+
+// regclassOfDefault turns a canonical nextval('x'::regclass) default into the
+// 'x'::regclass expression naming its sequence.
+func regclassOfDefault(def string) (string, bool) {
+	const prefix, suffix = "nextval(", ")"
+	if !strings.HasPrefix(def, prefix) || !strings.HasSuffix(def, suffix) {
+		return "", false
+	}
+	inner := def[len(prefix) : len(def)-len(suffix)]
+	if !strings.HasSuffix(inner, "::regclass") {
+		return "", false
+	}
+	return inner, true
 }
 
 func renderCreatePolicy(op diff.Op) []Statement {

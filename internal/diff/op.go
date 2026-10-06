@@ -156,6 +156,13 @@ type Op struct {
 	RelOptions      map[string]string
 	RelOptionsReset []string
 
+	// SeedSequence (OpAlterColumnIdentity, OpSetColumnDefault) marks that the
+	// column of an EXISTING table gets a value generator that did not exist
+	// before — a new identity, or a default drawing from a sequence created by
+	// this migration. A fresh sequence starts at 1, so sqlgen seeds it past the
+	// column's current maximum; without that the next insert collides.
+	SeedSequence bool
+
 	// Reason, when set, explains why this op exists beyond the plain diff (e.g.
 	// a view recreated because CREATE OR REPLACE cannot drop its columns, or a
 	// dependent recreated around a blocking change). Rendered as a SQL comment.
@@ -172,6 +179,10 @@ type EnumPosition struct {
 // The planner consumes it and returns a dependency-correct ordering.
 type ChangeSet struct {
 	Ops []Op
+	// Warnings are differences the differ saw but — by option or by PostgreSQL's
+	// nature — emits no operation for (e.g. a declared column order the target
+	// does not have). The engine surfaces them with the migration.
+	Warnings []string
 }
 
 // Empty reports whether the change set contains no operations.

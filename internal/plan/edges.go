@@ -22,6 +22,7 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	pkUniqueAddByTable := map[string][]int{}
 	addColumnByCol := map[string]int{}
 	defaultOpsByCol := map[string][]int{}
+	identityOpByCol := map[string]int{} // ALTER COLUMN ... ADD/DROP IDENTITY
 	colChangeByCol := map[string][]int{} // ALTER TYPE / DROP COLUMN, which dependent views must bracket
 	trigCreateByKey := map[string]int{}  // relation key + "#" + trigger -> CreateTrigger op
 	colKey := func(table model.ObjRef, col string) string { return table.Key() + "#" + col }
@@ -48,6 +49,9 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 		case diff.OpSetColumnDefault, diff.OpDropColumnDefault, diff.OpAlterColumnIdentity:
 			k := colKey(op.Owner, op.Sub)
 			defaultOpsByCol[k] = append(defaultOpsByCol[k], i)
+			if op.Type == diff.OpAlterColumnIdentity {
+				identityOpByCol[k] = i
+			}
 		case diff.OpAlterColumnType, diff.OpDropColumn:
 			k := colKey(op.Owner, op.Sub)
 			colChangeByCol[k] = append(colChangeByCol[k], i)
@@ -94,6 +98,14 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 			if c, ok := createByObj[op.Owner.Key()]; ok {
 				add(c, i)
 			}
+			// A column's default is set after its identity is dropped (a column
+			// cannot hold both), and the sequence that default draws from has to
+			// exist by then — see OpCreateSequence below.
+			if op.Type == diff.OpSetColumnDefault || op.Type == diff.OpDropColumnDefault {
+				if id, ok := identityOpByCol[colKey(op.Owner, op.Sub)]; ok {
+					add(id, i)
+				}
+			}
 
 		case diff.OpSetTriggerEnabled:
 			if c, ok := createByObj[op.Owner.Key()]; ok {
@@ -101,6 +113,17 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 			}
 			if c, ok := trigCreateByKey[colKey(op.Owner, op.Sub)]; ok {
 				add(c, i)
+			}
+
+		case diff.OpCreateSequence:
+			// A sequence that takes over from an identity column's implicit
+			// sequence of the same name can only be created once DROP IDENTITY
+			// has removed that one.
+			if op.PrevSeq != nil && op.PrevSeq.OwnedBy != nil {
+				tbl := model.ObjRef{Kind: model.KindTable, Schema: op.PrevSeq.OwnedBy.Schema, Name: op.PrevSeq.OwnedBy.Table}
+				if id, ok := identityOpByCol[colKey(tbl, op.PrevSeq.OwnedBy.Column)]; ok {
+					add(id, i)
+				}
 			}
 
 		case diff.OpCreateTable:

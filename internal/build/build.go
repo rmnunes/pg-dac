@@ -9,11 +9,14 @@ package build
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/rmnunes/pg-dac/internal/devdb"
@@ -44,40 +47,178 @@ func FromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 	if err != nil {
 		return nil, nil, err
 	}
-	fixed, warn := canonicalize(ctx, db, opts)
-	if warn != "" {
-		warns = append(warns, warn)
+	fixed, err := Canonicalize(ctx, db, opts)
+	if err != nil {
+		warns = append(warns, fmt.Sprintf("could not re-materialize the schema from its canonical SQL (%v); "+
+			"comparing against the authored form — a publish of this schema will likely fail the same way", err))
+		return db, warns, nil
 	}
 	return fixed, warns, nil
 }
 
-// canonicalize re-materializes the model from its own canonical SQL and
-// re-introspects it. PostgreSQL's deparsed text is not always a fixed point:
-// an authored `c IN ('F','FE')` deparses to
+// Canonicalize brings a model to its canonical fixed point by re-materializing
+// it from its own from-empty SQL in a scratch database and re-introspecting,
+// until the model stops changing. PostgreSQL's deparsed text is not always a
+// fixed point: an authored `c IN ('F','FE')` deparses to
 // `= ANY ((ARRAY['F'::varchar, 'FE'::varchar])::text[])`, and parsing THAT text
-// yields `= ANY (ARRAY[('F'::varchar)::text, ('FE'::varchar)::text])`. Since a
-// publish applies the canonical text, a model in the authored form would never
-// converge against the database it produced. One extra round reaches the fixed
-// point in practice; a second is tried if the first still moved. If
-// re-materialization fails (e.g. the schema uses an object type pg-dac does not
-// manage), the authored-form model is kept and a warning explains that a
-// publish will hit the same error.
-func canonicalize(ctx context.Context, db *model.Database, opts Options) (*model.Database, string) {
+// yields `= ANY (ARRAY[('F'::varchar)::text, ('FE'::varchar)::text])`. A
+// published database holds the second form (pg-dac applies canonical text)
+// while a database built by hand from the authored SQL holds the first — so
+// EVERY side of a comparison, live databases included, goes through this, or
+// the same expression would compare as different depending on how its object
+// was created, and on which major version deparsed it. One extra round reaches
+// the fixed point in practice; a second is tried if the first still moved.
+//
+// The scratch major is opts.TargetMajor, else the model's own major. Owners and
+// the exact server version — informational fields the renderer does not carry
+// — are restored from the input so the result still describes its origin.
+// Results are memoized by input hash, so a daemon re-comparing an unchanged
+// database pays the scratch round once.
+func Canonicalize(ctx context.Context, db *model.Database, opts Options) (*model.Database, error) {
+	if opts.TargetMajor == 0 {
+		opts.TargetMajor = db.MajorVersion()
+	}
+	raw, err := db.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(raw)
+	key := hex.EncodeToString(sum[:]) + "|" + fmt.Sprint(opts.TargetMajor) + "|" + strings.Join(opts.Schemas, ",")
+	if hit := canonCache.get(key); hit != nil {
+		return hit, nil
+	}
+
 	cur := db
 	for round := 0; round < 2; round++ {
 		next, err := rematerialize(ctx, cur, opts)
 		if err != nil {
-			return cur, fmt.Sprintf("could not re-materialize the schema from its canonical SQL (%v); "+
-				"comparing against the authored form — a publish of this schema will likely fail the same way", err)
+			return nil, err
 		}
+		restoreProvenance(db, next)
 		a, _ := cur.Marshal()
 		b, _ := next.Marshal()
 		if bytes.Equal(a, b) {
-			return cur, ""
+			break
 		}
 		cur = next
 	}
-	return cur, ""
+	canonCache.put(key, cur)
+	return cur, nil
+}
+
+// canonCache memoizes canonical models (see Canonicalize). Entries are handed
+// out as copies so callers can never corrupt a cached model.
+var canonCache = &modelCache{entries: map[string]*model.Database{}}
+
+const canonCacheMax = 16
+
+type modelCache struct {
+	mu      sync.Mutex
+	entries map[string]*model.Database
+	order   []string
+}
+
+func (c *modelCache) get(key string) *model.Database {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m, ok := c.entries[key]
+	if !ok {
+		return nil
+	}
+	return cloneModel(m)
+}
+
+func (c *modelCache) put(key string, m *model.Database) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.entries[key]; !ok {
+		c.order = append(c.order, key)
+		for len(c.order) > canonCacheMax {
+			delete(c.entries, c.order[0])
+			c.order = c.order[1:]
+		}
+	}
+	c.entries[key] = cloneModel(m)
+}
+
+func cloneModel(m *model.Database) *model.Database {
+	data, err := m.Marshal()
+	if err != nil {
+		return m
+	}
+	cp, err := model.Unmarshal(data)
+	if err != nil {
+		return m
+	}
+	return cp
+}
+
+// restoreProvenance copies the fields that describe where a model came from —
+// the exact server version and object owners — from the source model onto its
+// canonical form: the renderer does not emit them, so the scratch database
+// would otherwise stamp its own.
+func restoreProvenance(src, dst *model.Database) {
+	dst.TargetVersion = src.TargetVersion
+	owners := map[string]string{}
+	for _, s := range src.Schemas {
+		owners["schema:"+s.Name] = s.Owner
+		for _, t := range s.Tables {
+			owners[t.Ref().Key()] = t.Owner
+		}
+		for _, v := range s.Views {
+			owners[v.Ref().Key()] = v.Owner
+		}
+		for _, m := range s.MatViews {
+			owners[m.Ref().Key()] = m.Owner
+		}
+		for _, q := range s.Sequences {
+			owners[q.Ref().Key()] = q.Owner
+		}
+		for _, e := range s.Enums {
+			owners[e.Ref().Key()] = e.Owner
+		}
+		for _, d := range s.Domains {
+			owners[d.Ref().Key()] = d.Owner
+		}
+		for _, c := range s.Composites {
+			owners[c.Ref().Key()] = c.Owner
+		}
+		for _, c := range s.Collations {
+			owners[c.Ref().Key()] = c.Owner
+		}
+	}
+	set := func(key string, dst *string) {
+		if o, ok := owners[key]; ok {
+			*dst = o
+		}
+	}
+	for _, s := range dst.Schemas {
+		set("schema:"+s.Name, &s.Owner)
+		for _, t := range s.Tables {
+			set(t.Ref().Key(), &t.Owner)
+		}
+		for _, v := range s.Views {
+			set(v.Ref().Key(), &v.Owner)
+		}
+		for _, m := range s.MatViews {
+			set(m.Ref().Key(), &m.Owner)
+		}
+		for _, q := range s.Sequences {
+			set(q.Ref().Key(), &q.Owner)
+		}
+		for _, e := range s.Enums {
+			set(e.Ref().Key(), &e.Owner)
+		}
+		for _, d := range s.Domains {
+			set(d.Ref().Key(), &d.Owner)
+		}
+		for _, c := range s.Composites {
+			set(c.Ref().Key(), &c.Owner)
+		}
+		for _, c := range s.Collations {
+			set(c.Ref().Key(), &c.Owner)
+		}
+	}
 }
 
 // rematerialize applies the model's from-empty canonical SQL to a fresh scratch

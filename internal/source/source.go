@@ -148,5 +148,21 @@ func resolveDB(ctx context.Context, spec string, opts Options) (*model.Database,
 	if err != nil {
 		return nil, nil, fmt.Errorf("introspect database: %w", err)
 	}
-	return db, warns, nil
+	canon, cwarns := Canonical(ctx, db, opts)
+	return canon, append(warns, cwarns...), nil
+}
+
+// Canonical brings a freshly introspected live-database model to the canonical
+// fixed point every other source is compared in (see build.Canonicalize). If
+// the scratch round fails — the database uses an extension or object the
+// scratch server lacks — the raw model is returned with a warning that
+// explains the cosmetic differences that may follow, rather than failing the
+// comparison outright.
+func Canonical(ctx context.Context, db *model.Database, opts Options) (*model.Database, []string) {
+	canon, err := build.Canonicalize(ctx, db, build.Options{Schemas: opts.Schemas, TargetMajor: opts.TargetMajor})
+	if err != nil {
+		return db, []string{fmt.Sprintf("could not canonicalize the database's schema through a scratch PostgreSQL (%v); "+
+			"comparing its raw catalog text — differences that are only a matter of how an expression was deparsed may appear", err)}
+	}
+	return canon, nil
 }

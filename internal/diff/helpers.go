@@ -5,7 +5,99 @@ import (
 	"strings"
 
 	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/sqltext"
 )
+
+// routineEqual compares two routines' canonical definitions. The header
+// (pg_get_functiondef's CREATE OR REPLACE ... RETURNS ... LANGUAGE ...) is
+// deparsed and canonical, but the body is stored verbatim, so unless exact
+// text comparison was asked for, formatting — and optionally comments — is
+// ignored. The text that gets deployed is always the desired side's, untouched.
+func routineEqual(prev, cur *model.Function, opts Options) bool {
+	if prev.Definition == cur.Definition {
+		return true
+	}
+	if opts.CompareWhitespace && !opts.IgnoreComments {
+		return false
+	}
+	return sqltext.RoutineEqual(prev.Definition, cur.Definition, cur.Language, opts.IgnoreComments)
+}
+
+// isIntegerType reports whether a canonical column type can be fed by a
+// sequence (the only columns pg-dac seeds after a generator change).
+func isIntegerType(t string) bool {
+	switch t {
+	case "smallint", "integer", "bigint":
+		return true
+	}
+	return false
+}
+
+// sequenceOfDefault extracts the sequence a column default draws from, when the
+// default is PostgreSQL's canonical nextval('schema.name'::regclass) form, with
+// either name possibly double-quoted.
+func sequenceOfDefault(def string) (schema, name string, ok bool) {
+	const prefix, suffix = "nextval('", "'::regclass)"
+	if !strings.HasPrefix(def, prefix) || !strings.HasSuffix(def, suffix) || len(def) <= len(prefix)+len(suffix) {
+		return "", "", false
+	}
+	parts := splitQualified(def[len(prefix) : len(def)-len(suffix)])
+	switch len(parts) {
+	case 1:
+		return "public", parts[0], true
+	case 2:
+		return parts[0], parts[1], true
+	}
+	return "", "", false
+}
+
+// splitQualified splits a possibly-quoted dotted name ("a"."b", a.b, "a.b") into
+// its identifier parts, unquoting each.
+func splitQualified(s string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"':
+			if inQuote && i+1 < len(s) && s[i+1] == '"' {
+				cur.WriteByte('"')
+				i++
+				continue
+			}
+			inQuote = !inQuote
+		case c == '.' && !inQuote:
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	return append(parts, cur.String())
+}
+
+// newSequenceDefault reports whether a column default draws from a sequence the
+// target does not have yet (absent, or present only as an identity column's
+// implicit sequence that this migration turns into an explicit one). Such a
+// sequence starts at 1 and must be seeded past the column's existing values.
+func newSequenceDefault(fromDB, toDB *model.Database, def string) bool {
+	schema, name, ok := sequenceOfDefault(def)
+	if !ok || fromDB == nil {
+		return false
+	}
+	for _, s := range fromDB.Schemas {
+		if s.Name != schema {
+			continue
+		}
+		for _, seq := range s.Sequences {
+			if seq.Name == name {
+				return fromDB.IsIdentitySequence(seq)
+			}
+		}
+	}
+	return true
+}
 
 func extRef(e *model.Extension) model.ObjRef {
 	return model.ObjRef{Kind: model.KindExtension, Name: e.Name}

@@ -182,7 +182,11 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 	case diff.OpAlterColumnType:
 		return renderAlterColumnType(op), nil
 	case diff.OpSetColumnDefault:
-		return one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" SET DEFAULT "+op.Column.Default+";", "", nil), nil
+		stmts := one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" SET DEFAULT "+op.Column.Default+";", "", nil)
+		if op.SeedSequence {
+			stmts = append(stmts, seedDefaultSequence(op)...)
+		}
+		return stmts, nil
 	case diff.OpDropColumnDefault:
 		return one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" DROP DEFAULT;", "", nil), nil
 	case diff.OpSetColumnNotNull:

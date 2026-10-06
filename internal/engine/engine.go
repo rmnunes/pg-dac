@@ -39,6 +39,11 @@ type Options struct {
 	DropConstraintsNotInSource bool
 	DropIndexesNotInSource     bool
 
+	// CompareWhitespace / IgnoreComments tune how routine bodies are compared
+	// (see diff.Options). Defaults: whitespace is ignored, comments count.
+	CompareWhitespace bool
+	IgnoreComments    bool
+
 	// IncludeIDs / ExcludeIDs restrict the comparison to a chosen set of objects,
 	// keyed by object ID (model.ObjRef.Key() — what ObjectChange.ID reports). When
 	// IncludeIDs is non-empty, only those objects are changed; ExcludeIDs always
@@ -83,7 +88,8 @@ func (r *Result) Empty() bool { return len(r.Statements) == 0 }
 // Compare computes the migration to transform the "from" model (current/target)
 // into the "to" model (desired).
 func Compare(from, to *model.Database, opts Options) (*Result, error) {
-	cs := diff.Diff(from, to)
+	cs := diff.DiffWith(from, to, opts.diffOptions())
+	diffWarnings := cs.Warnings
 	cs = filterDrops(cs, opts)
 	cs = filterByObject(cs, opts)
 	cs = expandDependents(cs, from, to)
@@ -107,6 +113,7 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 		stmts = append(stmts, g.Statements...)
 	}
 	res := &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, from: from, to: to, online: opts.Online}
+	res.Warnings = append(res.Warnings, diffWarnings...)
 	if len(p.Cyclic) > 0 {
 		names := make([]string, 0, len(p.Cyclic))
 		for _, op := range p.Cyclic {
@@ -117,6 +124,11 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 			len(p.Cyclic), strings.Join(names, "; ")))
 	}
 	return res, nil
+}
+
+// diffOptions maps the comparison options onto the differ's.
+func (o Options) diffOptions() diff.Options {
+	return diff.Options{CompareWhitespace: o.CompareWhitespace, IgnoreComments: o.IgnoreComments}
 }
 
 // filterByObject keeps only ops whose owning object passes the include/exclude

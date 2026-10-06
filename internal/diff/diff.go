@@ -2,8 +2,41 @@ package diff
 
 import "github.com/rmnunes/pg-dac/internal/model"
 
+// Options tunes what counts as a difference. The zero value is the default
+// comparison: routine bodies are compared modulo whitespace, comments count,
+// and a column order the target does not have is reported but not acted on.
+type Options struct {
+	// CompareWhitespace makes routine (function/procedure) bodies compare as
+	// exact text. By default, differences in whitespace and line endings outside
+	// string literals are not changes: PostgreSQL stores bodies verbatim, so a
+	// body deployed from a CRLF checkout or reformatted by an editor would
+	// otherwise be redeployed on every compare.
+	CompareWhitespace bool
+	// IgnoreComments also disregards SQL comments inside routine bodies (SSDT's
+	// IgnoreComments). Implies whitespace-insensitive comparison.
+	IgnoreComments bool
+	// ColumnOrder says what to do when a table exists on both sides but its
+	// declared column order differs from the target's physical order, which
+	// PostgreSQL cannot change in place: ColumnOrderWarn (the default when
+	// empty) reports it, ColumnOrderIgnore stays silent, ColumnOrderRebuild
+	// rebuilds the table SSDT-style (new table in the declared order, rows
+	// copied, swap) — a heavy, opt-in operation.
+	ColumnOrder string
+}
+
+// Column-order policies (Options.ColumnOrder).
+const (
+	ColumnOrderIgnore  = "ignore"
+	ColumnOrderWarn    = "warn"
+	ColumnOrderRebuild = "rebuild"
+)
+
 // Diff computes the operations required to transform the "from" database
-// (current/target state) into the "to" database (desired state).
+// (current/target state) into the "to" database (desired state) under the
+// default options.
+func Diff(from, to *model.Database) *ChangeSet { return DiffWith(from, to, Options{}) }
+
+// DiffWith is Diff with explicit options.
 //
 // Drops for objects present in "from" but absent from "to" are always emitted
 // here; whether they are actually applied is governed by deploy options
@@ -14,7 +47,7 @@ import "github.com/rmnunes/pg-dac/internal/model"
 // by ranging over a Go map. The planner uses discovery order as its tie-breaker
 // within a priority band, so a non-deterministic walk here would make scripts —
 // and the artifact's canonical SQL, hence its Merkle root — differ run to run.
-func Diff(from, to *model.Database) *ChangeSet {
+func DiffWith(from, to *model.Database, opts Options) *ChangeSet {
 	cs := &ChangeSet{}
 
 	diffExtensions(cs, from, to)
@@ -32,8 +65,8 @@ func Diff(from, to *model.Database) *ChangeSet {
 		diffComposites(cs, fs, ts)
 		diffCollations(cs, fs, ts)
 		diffSequences(cs, from, to, fs, ts)
-		diffFunctions(cs, fs, ts)
-		diffTables(cs, fs, ts)
+		diffFunctions(cs, fs, ts, opts)
+		diffTables(cs, from, to, fs, ts, opts)
 		diffViews(cs, fs, ts)
 		diffMatViews(cs, fs, ts)
 	}
@@ -48,12 +81,12 @@ func comment(cs *ChangeSet, owner model.ObjRef, kind, sub, prev, cur string) {
 	}
 }
 
-func diffFunctions(cs *ChangeSet, from, to *model.Schema) {
+func diffFunctions(cs *ChangeSet, from, to *model.Schema, opts Options) {
 	fromF := indexFunctions(from)
 	toF := indexFunctions(to)
 	for _, f := range functionsOf(to) {
 		prev, ok := fromF[f.Signature()]
-		if ok && prev.Definition == f.Definition {
+		if ok && routineEqual(prev, f, opts) {
 			comment(cs, f.Ref(), "", "", prev.Comment, f.Comment)
 			continue
 		}
@@ -236,7 +269,14 @@ func diffSequences(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.
 		}
 		prev, ok := fromSeq[s.Name]
 		if !ok || fromDB.IsIdentitySequence(prev) {
-			cs.add(Op{Type: OpCreateSequence, Owner: s.Ref(), Sequence: s})
+			// PrevSeq names the identity column's implicit sequence this one
+			// replaces; it only disappears with that column's DROP IDENTITY, so
+			// the planner orders the CREATE after it.
+			op := Op{Type: OpCreateSequence, Owner: s.Ref(), Sequence: s}
+			if ok {
+				op.PrevSeq = prev
+			}
+			cs.add(op)
 			if s.OwnedBy != nil {
 				cs.add(Op{Type: OpSetSequenceOwner, Owner: s.Ref(), Sequence: s})
 			}
@@ -267,7 +307,7 @@ func diffSequences(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.
 	}
 }
 
-func diffTables(cs *ChangeSet, from, to *model.Schema) {
+func diffTables(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Schema, opts Options) {
 	fromT := indexTables(from)
 	toT := indexTables(to)
 	for _, t := range tablesOf(to) {
@@ -313,7 +353,7 @@ func diffTables(cs *ChangeSet, from, to *model.Schema) {
 		if set, reset := relOptionsDiff(prev.RelOptions, t.RelOptions); len(set) > 0 || len(reset) > 0 {
 			cs.add(Op{Type: OpSetRelOptions, Owner: t.Ref(), Table: t, RelOptions: set, RelOptionsReset: reset})
 		}
-		diffTableColumns(cs, prev, t)
+		diffTableColumns(cs, fromDB, toDB, prev, t)
 		diffTableConstraints(cs, prev, t)
 		diffTableIndexes(cs, prev, t)
 		diffTriggers(cs, t.Ref(), t, prev.Triggers, t.Triggers, false)
@@ -367,7 +407,7 @@ func sameStats(a, b *int) bool {
 	return *a == *b
 }
 
-func diffTableColumns(cs *ChangeSet, from, to *model.Table) {
+func diffTableColumns(cs *ChangeSet, fromDB, toDB *model.Database, from, to *model.Table) {
 	fromC := indexColumns(from)
 	toC := indexColumns(to)
 	for _, c := range to.Columns { // preserve target column order for adds
@@ -385,7 +425,7 @@ func diffTableColumns(cs *ChangeSet, from, to *model.Table) {
 			}
 			continue
 		}
-		diffColumn(cs, to, prev, c)
+		diffColumn(cs, fromDB, toDB, to, prev, c)
 	}
 	for _, c := range from.Columns {
 		if _, ok := toC[c.Name]; !ok {
@@ -394,7 +434,7 @@ func diffTableColumns(cs *ChangeSet, from, to *model.Table) {
 	}
 }
 
-func diffColumn(cs *ChangeSet, t *model.Table, prev, cur *model.Column) {
+func diffColumn(cs *ChangeSet, fromDB, toDB *model.Database, t *model.Table, prev, cur *model.Column) {
 	if prev.Type != cur.Type || prev.Collation != cur.Collation {
 		cs.add(Op{Type: OpAlterColumnType, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 	}
@@ -404,15 +444,28 @@ func diffColumn(cs *ChangeSet, t *model.Table, prev, cur *model.Column) {
 		cs.add(Op{Type: OpAlterColumnGenerated, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 	}
 	if prev.Identity != cur.Identity {
-		// Identity owns the column's value generation; the single identity op also
-		// reconciles any default (e.g. a serial -> identity conversion), so the
-		// plain default diff below is skipped while identity changes.
-		cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+		// Identity owns the column's value generation. Gaining identity also
+		// drops any serial default (a column cannot have both), so the default
+		// diff below is skipped; the new identity sequence has never seen the
+		// rows and is seeded. Losing identity is a plain DROP IDENTITY, and a
+		// default the desired column carries is set by its own op afterwards —
+		// the sequence it draws from may only be creatable once the identity
+		// sequence of the same name is gone.
+		if cur.Identity != "" {
+			cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev, SeedSequence: isIntegerType(cur.Type)})
+		} else {
+			cs.add(Op{Type: OpAlterColumnIdentity, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+			if cur.Default != "" && cur.Generated == "" {
+				seed := isIntegerType(cur.Type) && newSequenceDefault(fromDB, toDB, cur.Default)
+				cs.add(Op{Type: OpSetColumnDefault, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev, SeedSequence: seed})
+			}
+		}
 	} else if prev.Default != cur.Default && cur.Generated == "" {
 		if cur.Default == "" {
 			cs.add(Op{Type: OpDropColumnDefault, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
 		} else {
-			cs.add(Op{Type: OpSetColumnDefault, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev})
+			seed := isIntegerType(cur.Type) && newSequenceDefault(fromDB, toDB, cur.Default)
+			cs.add(Op{Type: OpSetColumnDefault, Owner: t.Ref(), Sub: cur.Name, Table: t, Column: cur, PrevColumn: prev, SeedSequence: seed})
 		}
 	}
 	if prev.NotNull != cur.NotNull {

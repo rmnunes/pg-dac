@@ -453,8 +453,12 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// The raw introspection stays the drift/baseline form; the comparison runs
+	// on its canonical form, like every other source.
+	canonFrom, canonWarns := source.Canonical(d.ctx, fromModel, d.sourceOptions(req))
+	warns = append(warns, canonWarns...)
 	opts := req.engineOptions(dplan.DropPolicy)
-	res, err := engine.Compare(fromModel, toModel, opts)
+	res, err := engine.Compare(canonFrom, toModel, opts)
 	if err != nil {
 		send("error", map[string]any{"message": err.Error()})
 		return
