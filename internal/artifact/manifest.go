@@ -51,6 +51,12 @@ type Manifest struct {
 	// (drop policy, pre/post-deploy script parts), when any.
 	Deploy *DeployInfo `json:"deploy,omitempty"`
 
+	// Kind is "" or "pgdac" for a schema artifact and "pgbac" for a schema +
+	// data archive (the BACPAC analog, see internal/pgbac); Data describes the
+	// table data such an archive carries.
+	Kind string    `json:"kind,omitempty"`
+	Data *DataInfo `json:"data,omitempty"`
+
 	// Parts lists the SHA-256 (hex) of every archived part except this manifest.
 	Parts []Part `json:"parts"`
 	// MerkleRoot is the hex Merkle root over the part digests.
@@ -65,6 +71,33 @@ type DeployInfo struct {
 	DropPolicy string   `json:"dropPolicy,omitempty"`
 	PreDeploy  []string `json:"preDeploy,omitempty"`  // part names, in execution order
 	PostDeploy []string `json:"postDeploy,omitempty"` // part names, in execution order
+}
+
+// DataInfo describes the table data a .pgbac carries next to its model: one
+// gzip-compressed CSV part per table (generated columns excluded, since
+// PostgreSQL recomputes them) and the position of every sequence, all read in
+// one REPEATABLE READ transaction so the data is a consistent snapshot.
+type DataInfo struct {
+	Tables    []TableData     `json:"tables"`
+	Sequences []SequenceState `json:"sequences,omitempty"`
+	Snapshot  string          `json:"snapshot,omitempty"`
+}
+
+// TableData locates one table's rows in the archive.
+type TableData struct {
+	Schema  string   `json:"schema"`
+	Name    string   `json:"name"`
+	Part    string   `json:"part"`
+	Columns []string `json:"columns"`
+	Rows    int64    `json:"rows"`
+}
+
+// SequenceState is a sequence's position (what pg_dump restores with setval).
+type SequenceState struct {
+	Schema    string `json:"schema"`
+	Name      string `json:"name"`
+	LastValue int64  `json:"lastValue"`
+	IsCalled  bool   `json:"isCalled"`
 }
 
 // Part records the digest of one archived file.

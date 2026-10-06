@@ -55,11 +55,13 @@ target ─┘
 
 ## Status
 
-The engine, daemon, project model, artifact, and GUI are built and exercised against real
-PostgreSQL (embedded 16, Docker 16/18, and a ~290-object production schema). An independent audit
-on 2026-10-06 (the audit notes) drove four work packages; the roadmap in
-[STATUS.md](STATUS.md) is complete, including the refactorlog, drift detection, lint, and a CI /
-release pipeline. The current gates, all in `go test ./...`:
+The engine, daemon, project model, artifacts, and GUI are built and exercised against real
+PostgreSQL (embedded 16/18, Docker 16/18, a ~900-object production schema and its Azure DEV
+database). An independent audit on 2026-10-06 (the audit notes) drove eight work
+packages; the roadmap in [STATUS.md](STATUS.md) is complete — refactorlog, drift detection, lint,
+privileges, column-order policy, project update from a database, single-transaction publish,
+export/import of schema and data — and 0.9.0 is the release candidate ([ROLLOUT.md](ROLLOUT.md),
+[CHANGELOG.md](CHANGELOG.md)). The current gates, all in `go test ./...`:
 
 - **From-empty bootstrap** (`internal/validate/bootstrap_test.go`): a comprehensive schema is
   built, published into an empty scratch database, re-introspected, and must show no residual;
@@ -81,13 +83,14 @@ identity/generated/defaults/not-null/storage/compression/statistics, `UNLOGGED`,
 partitioning), primary/foreign/unique/check/exclude constraints (incl. `NOT VALID` state), indexes on
 tables and materialized views, triggers on tables and views (incl. enabled state), row-level-security
 policies and table RLS enable/force, views (incl. check option and security options), materialized
-views, and comments on all of them.
+views, comments on all of them, and privileges (GRANT/REVOKE incl. grant options and column
+privileges) on schemas, tables, views, sequences, routines and types.
 
-**Out of scope for v1** (details in [STATUS.md](STATUS.md)): grants are warned about but not
-published; policies, defaults and constraints that call a function being recreated are not
+**Out of scope** (details in [STATUS.md](STATUS.md)): ownership and default privileges are warned
+about, not modeled; policies, defaults and constraints that call a function being recreated are not
 recreated around it; changes PostgreSQL cannot make in place (removing enum values, altering a
 domain or composite type, re-partitioning) are reported as an `UNSUPPORTED_CHANGE` hazard rather
-than applied; a `.pgbac` data artifact is deferred.
+than applied; roles are required to exist, never created.
 
 ## Usage
 
@@ -112,6 +115,14 @@ pg-dac extract --from "postgres://...prod" --out prod.pgdac
 pg-dac build   --from ./schema --out app.pgdac --version 2.1.0 --target-major 18
 pg-dac inspect app.pgdac
 
+# Schema AND data (the BACPAC analog): one consistent snapshot, verified and signed
+pg-dac export --from "postgres://...prod" --out prod.pgbac --exclude-table 'audit.*'
+pg-dac import --file prod.pgbac --target "postgres://...empty-db"   # empty target; keys/indexes/triggers after the rows
+
+# Production publish controls
+pg-dac publish --from "postgres://...prod" --to app.pgdac --single-transaction --statement-timeout 10m \
+               --var deploy_environment=prod --exclude-object-type privilege
+
 # Scaffold / reverse-engineer a declarative project
 pg-dac init    --dir ./schema --name app                               # section folders for hand authoring
 pg-dac extract --from "postgres://...prod" --to-project ./schema       # one file per object: schema/<schema>/<kind>/<name>.sql
@@ -133,9 +144,14 @@ tool and is refused with directions.
 Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
 the PostgreSQL major used to normalize a project source; a project's `pgdac.yaml` `targetMajor`
 is the default), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source` (overrides the
-project's `dropPolicy`), `--validate`, `--dry-run`, `--lock-timeout` and `--no-deploy-scripts`
-(publish), `--no-sign` (build/extract), `--require-key <fingerprint>` (every verb that reads a
-`.pgdac`; a `trusted_keys` file under the pg-dac config directory does the same for all runs).
+project's `dropPolicy`), `--exclude-object-type <kind>` (repeatable; SSDT's ExcludeObjectTypes),
+`--validate`, `--dry-run`, `--lock-timeout`, `--statement-timeout`, `--single-transaction`
+(consecutive transactional statements run in one transaction; CONCURRENTLY statements split it,
+`--no-online` makes the whole migration one transaction), `--var name=value` (repeatable; `$(name)`
+placeholders in pre/post-deploy scripts, SQLCMD-style, defaults from `pgdac.yaml` `variables:`)
+and `--no-deploy-scripts` (publish), `--no-sign` (build/extract/export), `--require-key
+<fingerprint>` (every verb that reads a `.pgdac`/`.pgbac`; a `trusted_keys` file under the pg-dac
+config directory does the same for all runs).
 
 **What counts as a difference** (SSDT's comparison options, with the same defaults): routine
 bodies are compared ignoring whitespace and line endings (`--compare-whitespace` makes them

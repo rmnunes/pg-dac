@@ -101,33 +101,9 @@ func resolveArtifact(path string, opts Options) (*model.Database, []string, erro
 	if o.Signed && !o.SignatureOK {
 		return nil, nil, fmt.Errorf("artifact %s has an invalid signature", path)
 	}
-	var warns []string
-	fp := o.Fingerprint()
-	switch {
-	case opts.RequireKey != "":
-		if !o.Signed {
-			return nil, nil, fmt.Errorf("artifact %s is unsigned but key %s is required", path, opts.RequireKey)
-		}
-		if fp != opts.RequireKey {
-			return nil, nil, fmt.Errorf("artifact %s is signed by key %s, not the required %s", path, fp, opts.RequireKey)
-		}
-	case len(opts.TrustedKeys) > 0:
-		if !o.Signed {
-			return nil, nil, fmt.Errorf("artifact %s is unsigned but a trusted-keys list is configured", path)
-		}
-		trusted := false
-		for _, k := range opts.TrustedKeys {
-			if k == fp {
-				trusted = true
-			}
-		}
-		if !trusted {
-			return nil, nil, fmt.Errorf("artifact %s is signed by key %s, which is not in the trusted-keys list", path, fp)
-		}
-	case !o.Signed:
-		warns = append(warns, fmt.Sprintf("artifact %s is unsigned; its origin cannot be verified", path))
-	default:
-		warns = append(warns, fmt.Sprintf("artifact %s is signed by key %s (no trust list configured — pass --require-key or add the key to the trusted_keys file to enforce it)", path, fp))
+	warns, err := artifact.Trust(path, o.Fingerprint(), o.Signed, opts.RequireKey, opts.TrustedKeys)
+	if err != nil {
+		return nil, nil, err
 	}
 	if o.Manifest.FormatVersion < artifact.FormatVersion {
 		warns = append(warns, fmt.Sprintf("artifact %s uses format version %d (current %d); its canonical "+

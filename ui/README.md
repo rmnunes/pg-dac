@@ -49,6 +49,9 @@ PostgreSQL binaries once (cached afterward), then stays warm for the session.
    the side they concern (Target, Source, Plan). When the **Target is a project directory**, the
    publish button becomes **Update Target project…** and rewrites the project's files from the
    Source (SSDT's "Update project from database"); the progress log lists the files written.
+   The options panel also takes object types to exclude from the comparison and `name=value`
+   deploy variables for `$(name)` placeholders in pre/post-deploy scripts; the publish dialog has
+   a **Single transaction** switch (CONCURRENTLY statements run between transactions).
 2. Review the **object tree** (grouped, virtualized, severity-badged). Uncheck objects to
    exclude them; the plan re-computes with your selection. Excluding an object also excludes every
    change that depends on it (shown disabled, with the cause), and including one brings its

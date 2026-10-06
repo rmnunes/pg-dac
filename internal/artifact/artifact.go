@@ -59,13 +59,9 @@ func Build(path string, m *model.Database, opts BuildOptions) (*Manifest, error)
 	}
 
 	var mparts []Part
-	var leaves []string
 	for _, p := range parts {
-		h := sha256Hex(p.data)
-		mparts = append(mparts, Part{Name: p.name, SHA256: h})
-		leaves = append(leaves, h)
+		mparts = append(mparts, Part{Name: p.name, SHA256: sha256Hex(p.data)})
 	}
-	root := merkleRoot(leaves)
 
 	createdAt := opts.CreatedAt
 	if createdAt == "" {
@@ -80,20 +76,9 @@ func Build(path string, m *model.Database, opts BuildOptions) (*Manifest, error)
 		CreatedAt:     createdAt,
 		Deploy:        opts.Deploy,
 		Parts:         mparts,
-		MerkleRoot:    root,
 	}
-	if opts.SigningKey != nil {
-		pub := opts.SigningKey.Public().(ed25519.PublicKey)
-		payload, err := signingPayload(man)
-		if err != nil {
-			return nil, err
-		}
-		sig := ed25519.Sign(opts.SigningKey, payload)
-		man.Signature = &Signature{
-			Algo:      "ed25519",
-			PublicKey: base64.StdEncoding.EncodeToString(pub),
-			Sig:       base64.StdEncoding.EncodeToString(sig),
-		}
+	if err := Seal(man, opts.SigningKey); err != nil {
+		return nil, err
 	}
 	manBytes, err := json.MarshalIndent(man, "", "  ")
 	if err != nil {
@@ -217,6 +202,73 @@ func Open(path string) (*Opened, error) {
 	}
 	out.Model = m
 	return out, nil
+}
+
+// Seal completes a manifest: the Merkle root over its part digests, and — when
+// key is non-nil — the Ed25519 signature over the whole manifest. Shared by the
+// .pgdac and .pgbac writers.
+func Seal(man *Manifest, key ed25519.PrivateKey) error {
+	leaves := make([]string, 0, len(man.Parts))
+	for _, p := range man.Parts {
+		leaves = append(leaves, p.SHA256)
+	}
+	man.MerkleRoot = merkleRoot(leaves)
+	man.Signature = nil
+	if key == nil {
+		return nil
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	payload, err := signingPayload(man)
+	if err != nil {
+		return err
+	}
+	sig := ed25519.Sign(key, payload)
+	man.Signature = &Signature{
+		Algo:      "ed25519",
+		PublicKey: base64.StdEncoding.EncodeToString(pub),
+		Sig:       base64.StdEncoding.EncodeToString(sig),
+	}
+	return nil
+}
+
+// SHA256Hex is the digest every archived part is recorded with.
+func SHA256Hex(data []byte) string { return sha256Hex(data) }
+
+// MerkleRoot recomputes the root over part digests (order-independent).
+func MerkleRoot(leafHexes []string) string { return merkleRoot(leafHexes) }
+
+// VerifyManifest reports whether a manifest's signature verifies.
+func VerifyManifest(man *Manifest) bool { return verifySignature(man) }
+
+// Trust applies the signer policy every artifact reader shares: a required key
+// must match; with a trusted-keys list the artifact must be signed by one of
+// them; without either, a signed artifact is accepted and its signer reported,
+// an unsigned one accepted with a warning.
+func Trust(path, fingerprint string, signed bool, requireKey string, trustedKeys []string) ([]string, error) {
+	switch {
+	case requireKey != "":
+		if !signed {
+			return nil, fmt.Errorf("artifact %s is unsigned but key %s is required", path, requireKey)
+		}
+		if fingerprint != requireKey {
+			return nil, fmt.Errorf("artifact %s is signed by key %s, not the required %s", path, fingerprint, requireKey)
+		}
+		return nil, nil
+	case len(trustedKeys) > 0:
+		if !signed {
+			return nil, fmt.Errorf("artifact %s is unsigned but a trusted-keys list is configured", path)
+		}
+		for _, k := range trustedKeys {
+			if k == fingerprint {
+				return nil, nil
+			}
+		}
+		return nil, fmt.Errorf("artifact %s is signed by key %s, which is not in the trusted-keys list", path, fingerprint)
+	case !signed:
+		return []string{fmt.Sprintf("artifact %s is unsigned; its origin cannot be verified", path)}, nil
+	default:
+		return []string{fmt.Sprintf("artifact %s is signed by key %s (no trust list configured — pass --require-key or add the key to the trusted_keys file to enforce it)", path, fingerprint)}, nil
+	}
 }
 
 // signingPayload is the canonical byte string a format-3 signature covers: the

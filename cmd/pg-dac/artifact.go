@@ -168,10 +168,13 @@ func writeProject(cmd *cobra.Command, dir, name, version string, schemas []strin
 func newInspectCmd() *cobra.Command {
 	var requireKey string
 	cmd := &cobra.Command{
-		Use:   "inspect <artifact.pgdac>",
-		Short: "Verify a .pgdac artifact and print its manifest and contents",
+		Use:   "inspect <artifact.pgdac | archive.pgbac>",
+		Short: "Verify a .pgdac artifact or a .pgbac archive and print its manifest and contents",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.HasSuffix(strings.ToLower(args[0]), ".pgbac") {
+				return inspectPgbac(cmd, args[0], requireKey)
+			}
 			o, err := artifact.Open(args[0])
 			if err != nil {
 				return err

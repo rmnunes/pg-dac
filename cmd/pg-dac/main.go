@@ -15,7 +15,7 @@ import (
 )
 
 // version is overridable at build time with -ldflags "-X main.version=...".
-var version = "0.1.0-dev"
+var version = "0.9.0-dev"
 
 func main() {
 	// run() owns all deferred cleanup; main only translates the result into an
@@ -35,7 +35,7 @@ func run() int {
 	root.AddCommand(
 		newDiffCmd(), newScriptCmd(), newReportCmd(), newPlanCmd(), newPublishCmd(),
 		newBuildCmd(), newExtractCmd(), newInspectCmd(), newServeCmd(), newInitCmd(),
-		newRefactorCmd(), newDriftCmd(), newBaselineCmd(), newLintCmd(),
+		newRefactorCmd(), newDriftCmd(), newBaselineCmd(), newLintCmd(), newExportCmd(), newImportCmd(),
 	)
 
 	// A single shared scratch server is started lazily on first use (if any

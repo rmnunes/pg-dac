@@ -18,6 +18,8 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | `extract --to-project` | ✅ One file per object at a stable path, `schema/<schema>/<kind>/<name>.sql` (WP6); round-trips the ~900-object production schema |
 | Update a project from a database (project as Target) | ✅ `publish --from <project> --to <db>`; files of changed objects rewritten in place, new files at stable paths, drops per policy, `roles:` kept current; file-level `--dry-run`; imperative definitions refused with directions (WP6) |
 | Order-free project files | ✅ The build applies statements with deferred retry, like an SSDT project (WP6) |
+| Export / Import of schema and data (`.pgbac`) | ✅ One consistent snapshot, gzip CSV per table, sequence positions, Merkle root and signature over the data; import into an empty database pg_dump-style with baseline recorded (WP7) |
+| Production publish controls | ✅ `--single-transaction` (CONCURRENTLY-aware batching), `--statement-timeout`, `--lock-timeout`, `--var` deploy variables, `--exclude-object-type`, `--validate`, `--dry-run` (WP7) |
 | Publish into an **empty** database (bootstrap) | ✅ Fixed in WP1; regression-gated by `TestBootstrap_FromEmpty` |
 | Deterministic output / stable artifact hash | ✅ Fixed in WP1 (differ walks model order) |
 | Model independent of session `search_path` | ✅ Fixed in WP1 (introspection pins `search_path = ''`) |
@@ -202,6 +204,29 @@ Compare does when the project is the target.
 
 ---
 
+## WP7 (2026-10-07) — SqlPackage completeness
+
+- **Single-transaction publish** (`publish --single-transaction`, `script --single-transaction`,
+  daemon/GUI): consecutive transactional statements run in one transaction, rolled back together
+  on failure and retried as a whole on a lock timeout; `CONCURRENTLY` statements run on their own
+  between transactions; with `--no-online` the whole migration is one transaction
+  (`IncludeTransactionalScripts`). `--statement-timeout` sets `statement_timeout`.
+- **Object-type exclusion** (`compare.excludeObjectTypes`, `--exclude-object-type`, daemon/GUI):
+  table, view, matview, sequence, function, enum, domain, compositeType, collation, schema,
+  extension, index, constraint, trigger, policy, privilege, comment (`ExcludeObjectTypes`).
+- **Deploy variables** (`pgdac.yaml variables:`, `--var name=value`, daemon/GUI): `$(name)`
+  placeholders in pre/post-deploy scripts; every placeholder must resolve before anything runs;
+  schema files are never substituted (SQLCMD variables).
+- **Export / Import** (`internal/pgbac`; `pg-dac export`, `pg-dac import`, `inspect`): the
+  `.pgbac` archive carries the canonical model plus one gzip CSV per leaf table (generated columns
+  excluded) and every sequence position, read in one REPEATABLE READ snapshot; parts are hashed
+  into the Merkle root and the signature, data parts verified while streaming. Import requires an
+  empty target, creates pre-data objects, COPYs the rows, restores sequences (identity sequences
+  located through `pg_depend`), then adds keys, indexes, triggers, policies and fills materialized
+  views, and records the drift baseline (Export/Import, the BACPAC analog).
+
+---
+
 ## Object coverage
 
 **Managed (introspected, diffed, generated, published):** schemas, extensions, enums (labels added
@@ -259,19 +284,21 @@ Roles are cluster objects: never created or dropped, only required to exist.
 
 ## Roadmap
 
-**All planned work packages (WP0–WP4) and the audit's N1–N9 items are complete.** What remains
-is explicitly out of scope for v1 or deferred:
+**All work packages (WP0–WP7) and the audit's N1–N9 items are complete; 0.9.0 is the release
+candidate for production rollout** (see ROLLOUT.md). What remains is explicitly out of scope or
+deferred:
 
 - **Not managed (warned):** ownership, default privileges, database-level grants, column
   privileges on views, attaching/detaching *existing* partitions, `INHERITS` inheritance,
   aggregate/window functions, range/multirange types, foreign tables and servers, rules, event
-  triggers, publications/subscriptions.
+  triggers, publications/subscriptions. Roles are required to exist, never created.
 - **Reported as `UNSUPPORTED_CHANGE` rather than applied:** removing/reordering enum values,
-  altering a domain or composite type definition, re-partitioning a table.
-- **Deferred:** a `.pgbac` data artifact (schema + table data, the BACPAC analog); a GUI for
-  authoring the refactorlog (today: `pg-dac refactor rename`); dependents other than views,
-  materialized views and triggers when a function is recreated (policies, defaults, CHECKs,
-  index expressions — PostgreSQL's own error surfaces).
+  altering a domain or composite type definition, re-partitioning a table, rebuilding a
+  partitioned table or a partition for column order.
+- **Deferred:** a GUI for authoring the refactorlog (today: `pg-dac refactor rename`) and for
+  export/import (today: the CLI); dependents other than views, materialized views and triggers
+  when a function is recreated (policies, defaults, CHECKs, index expressions — PostgreSQL's own
+  error surfaces); in-place update of imperative project files (refused with directions).
 
 ---
 
