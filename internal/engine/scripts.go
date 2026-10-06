@@ -4,11 +4,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rodrigonunes/pg-dac/internal/diff"
 	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
 )
 
-// ObjectScript is one object's canonical CREATE SQL, the project section folder
-// it belongs in, and a filename stem (unique within the section). Used by
+// ExtractSection is the folder an extracted project's scripts are written to.
+const ExtractSection = "schema"
+
+// ObjectScript is one object's canonical CREATE SQL, the project folder it
+// belongs in, and a filename stem (unique within the folder). Used by
 // `extract --to-project` to lay a database out as a declarative project.
 type ObjectScript struct {
 	Section string
@@ -19,209 +24,92 @@ type ObjectScript struct {
 // FileName returns a filesystem-safe "<base>.sql".
 func (o ObjectScript) FileName() string { return sanitizeFilename(o.Base) + ".sql" }
 
-// ObjectScripts renders a database as section-bucketed scripts in dependency
-// order. Foreign keys, triggers, and policies are split out of their table into
-// later sections so the one-object-per-file project applies cleanly; views are
-// emitted in topological order; serial-backed sequences precede their table.
+// ObjectScripts renders a database as a numbered sequence of per-object scripts
+// in global dependency order — the very order a from-empty publish applies — so
+// the resulting project builds cleanly even when a function's signature needs a
+// view's row type, a view calls such a function, or a trigger executes it.
+// Consecutive plan operations on the same object share one file; a table's
+// foreign keys, triggers and policies therefore land in later files of their
+// own once everything they reference exists (the file name says what they hold).
 func ObjectScripts(db *model.Database) []ObjectScript {
+	baseline := &model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{{Name: "public"}}}
+	res, err := Compare(baseline, db, Options{Online: false})
+	if err != nil {
+		return nil
+	}
+
 	var out []ObjectScript
-	emit := func(section, base, sql string) {
-		if strings.TrimSpace(sql) != "" {
-			out = append(out, ObjectScript{Section: section, Base: base, SQL: sql})
-		}
-	}
-
-	for _, e := range db.Extensions {
-		sql := "CREATE EXTENSION IF NOT EXISTS " + model.QuoteIdent(e.Name)
-		if e.Schema != "" {
-			sql += " SCHEMA " + model.QuoteIdent(e.Schema)
-		}
-		emit("01-extensions", e.Name, sql+";")
-	}
-
-	// ownedBy collects "ALTER SEQUENCE ... OWNED BY table.col" statements keyed by
-	// owning table, appended to the table's script (the table must exist before
-	// OWNED BY runs, while the sequence is created earlier).
-	ownedBy := map[string][]string{}
-
-	for _, s := range db.Schemas {
-		if s.Name != "public" {
-			emit("02-schemas", s.Name, "CREATE SCHEMA IF NOT EXISTS "+model.QuoteIdent(s.Name)+";")
-		}
-		for _, en := range s.Enums {
-			emit("03-types", en.Schema+"."+en.Name, objectCanonical(db, en.Ref()))
-		}
-		for _, co := range s.Collations {
-			emit("03-types", "collation."+co.Schema+"."+co.Name, objectCanonical(db, co.Ref()))
-		}
-		// Functions precede tables: a table default/trigger may reference one, and
-		// PL/pgSQL bodies are not validated against table existence at creation.
-		for _, f := range s.Functions {
-			emit("04-functions", f.Schema+"."+f.Signature(), objectCanonical(db, f.Ref()))
-		}
-		for _, sq := range s.Sequences {
-			if db.IsIdentitySequence(sq) {
-				continue // created implicitly with its GENERATED ... AS IDENTITY column
+	n := 0
+	for i := 0; i < len(res.Groups); {
+		owner := res.Groups[i].Op.Owner
+		j := i
+		var sqls []string
+		for j < len(res.Groups) && res.Groups[j].Op.Owner.Key() == owner.Key() {
+			for _, s := range res.Groups[j].Statements {
+				sqls = append(sqls, s.SQL)
 			}
-			emit("05-sequences", sq.Schema+"."+sq.Name, sequenceCreateSQL(db, sq))
-			if sq.OwnedBy != nil {
-				tk := model.ObjRef{Kind: model.KindTable, Schema: sq.OwnedBy.Schema, Name: sq.OwnedBy.Table}.Key()
-				ownedBy[tk] = append(ownedBy[tk],
-					"ALTER SEQUENCE "+model.QualifiedName(sq.Schema, sq.Name)+
-						" OWNED BY "+model.QualifiedName(sq.OwnedBy.Schema, sq.OwnedBy.Table)+
-						"."+model.QuoteIdent(sq.OwnedBy.Column)+";")
-			}
+			j++
 		}
-		for _, t := range s.Tables {
-			sql := tableCreateSQL(db, t)
-			if extra := ownedBy[t.Ref().Key()]; len(extra) > 0 {
-				sql += "\n" + strings.Join(extra, "\n")
-			}
-			emit("06-tables", t.Schema+"."+t.Name, sql)
+		sql := strings.TrimSpace(strings.Join(sqls, "\n"))
+		if sql != "" {
+			n++
+			out = append(out, ObjectScript{Section: ExtractSection, Base: scriptBase(n, owner, groupSuffix(res.Groups[i:j])), SQL: sql})
 		}
-		// One file per table holding all its foreign keys (applied after all tables).
-		for _, t := range s.Tables {
-			var fks []string
-			for _, c := range t.Constraints {
-				if c.Type == model.ConstraintForeignKey {
-					fks = append(fks, "ALTER TABLE "+t.QualifiedName()+" ADD CONSTRAINT "+model.QuoteIdent(c.Name)+" "+c.Definition+";")
-				}
-			}
-			emit("07-foreign-keys", t.Schema+"."+t.Name, strings.Join(fks, "\n"))
-		}
-		for _, t := range s.Tables {
-			for _, tr := range t.Triggers {
-				emit("08-triggers", t.Schema+"."+t.Name+"."+tr.Name, terminateSQL(tr.Definition))
-			}
-		}
-		for _, t := range s.Tables {
-			for _, p := range t.Policies {
-				emit("09-policies", t.Schema+"."+t.Name+"."+p.Name, policyCreateSQL(db, t, p))
-			}
-		}
-		// Views/matviews in topological order (view-on-view), numbered so the
-		// project's alphabetical glob preserves that order.
-		for i, ref := range orderedViewRefs(s) {
-			emit("10-views", fmt.Sprintf("%04d_%s.%s", i+1, ref.Schema, ref.Name), objectCanonical(db, ref))
-		}
+		i = j
 	}
 	return out
 }
 
-// orderedViewRefs returns the schema's views and materialized views in
-// dependency order (a view is emitted after the views/matviews it references).
-func orderedViewRefs(s *model.Schema) []model.ObjRef {
-	deps := map[string][]string{}
-	refByKey := map[string]model.ObjRef{}
-	var all []model.ObjRef
-	record := func(ref model.ObjRef, dependsOn []model.ObjRef) {
-		all = append(all, ref)
-		refByKey[ref.Key()] = ref
-		for _, d := range dependsOn {
-			deps[ref.Key()] = append(deps[ref.Key()], d.Key())
+// scriptBase builds the file stem "NNNN_<kind>_<schema.name><suffix>". A
+// function's signature is reduced to its name (the sequence number already
+// keeps overloads apart), and the stem is bounded so deep paths stay well under
+// filesystem limits.
+func scriptBase(n int, owner model.ObjRef, suffix string) string {
+	name := owner.Name
+	if owner.Kind == model.KindFunction {
+		if p := strings.IndexByte(name, '('); p > 0 {
+			name = name[:p]
 		}
 	}
-	for _, v := range s.Views {
-		record(v.Ref(), v.DependsOn)
+	if owner.Schema != "" {
+		name = owner.Schema + "." + name
 	}
-	for _, mv := range s.MatViews {
-		record(mv.Ref(), mv.DependsOn)
+	const maxName = 80
+	if len(name) > maxName {
+		name = name[:maxName]
 	}
-
-	var order []model.ObjRef
-	state := map[string]int{} // 0 unvisited, 1 visiting, 2 done
-	var visit func(k string)
-	visit = func(k string) {
-		if state[k] != 0 {
-			return // done, or a cycle we break by not recursing
-		}
-		state[k] = 1
-		for _, d := range deps[k] {
-			if _, ok := refByKey[d]; ok {
-				visit(d)
-			}
-		}
-		state[k] = 2
-		order = append(order, refByKey[k])
-	}
-	for _, ref := range all {
-		visit(ref.Key())
-	}
-	return order
+	return fmt.Sprintf("%04d_%s_%s%s", n, owner.Kind, name, suffix)
 }
 
-// tableCreateSQL renders a table without its foreign keys, triggers, or policies
-// (those go to later sections), keeping columns, non-FK constraints, indexes, RLS.
-func tableCreateSQL(db *model.Database, t *model.Table) string {
-	cp := *t
-	cp.Triggers = nil
-	cp.Policies = nil
-	cp.Constraints = nil
-	for _, c := range t.Constraints {
-		if c.Type != model.ConstraintForeignKey {
-			cp.Constraints = append(cp.Constraints, c)
+// groupSuffix names a file that holds only sub-object operations of an object
+// created in an earlier file (its foreign keys, triggers, ...); it is empty when
+// the file creates the object itself.
+func groupSuffix(groups []sqlgen.OpStatements) string {
+	for _, g := range groups {
+		switch g.Op.Type {
+		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateFunction,
+			diff.OpCreateSequence, diff.OpCreateSchema, diff.OpCreateExtension, diff.OpCreateEnum,
+			diff.OpCreateCollation:
+			return ""
 		}
 	}
-	mini := &model.Database{TargetVersion: db.TargetVersion,
-		Schemas: []*model.Schema{{Name: t.Schema, Tables: []*model.Table{&cp}}}}
-	baseline := &model.Database{TargetVersion: db.TargetVersion,
-		Schemas: []*model.Schema{{Name: t.Schema}}}
-	return joinSQL(Compare(baseline, mini, Options{Online: false}))
-}
-
-// policyCreateSQL renders just the CREATE POLICY for p by diffing the table with
-// and without it (RLS enable is already emitted with the table, so it is held
-// constant on both sides).
-func policyCreateSQL(db *model.Database, t *model.Table, p *model.Policy) string {
-	base := *t
-	base.Triggers, base.Policies = nil, nil
-	with := base
-	with.Policies = []*model.Policy{p}
-	miniDB := func(tb model.Table) *model.Database {
-		return &model.Database{TargetVersion: db.TargetVersion,
-			Schemas: []*model.Schema{{Name: t.Schema, Tables: []*model.Table{&tb}}}}
+	switch groups[0].Op.Type {
+	case diff.OpAddConstraint:
+		return "_constraints"
+	case diff.OpCreateIndex:
+		return "_indexes"
+	case diff.OpCreateTrigger:
+		return "_triggers"
+	case diff.OpCreatePolicy:
+		return "_policies"
+	case diff.OpEnableRLS:
+		return "_rls"
+	case diff.OpSetSequenceOwner:
+		return "_owner"
+	case diff.OpValidateConstraint:
+		return "_validate"
 	}
-	return joinSQL(Compare(miniDB(base), miniDB(with), Options{Online: false}))
-}
-
-func joinSQL(res *Result, err error) string {
-	if err != nil || res.Empty() {
-		return ""
-	}
-	parts := make([]string, 0, len(res.Statements))
-	for _, s := range res.Statements {
-		parts = append(parts, s.SQL)
-	}
-	return strings.Join(parts, "\n")
-}
-
-func terminateSQL(sql string) string {
-	s := strings.TrimRight(strings.TrimSpace(sql), ";")
-	if s == "" {
-		return ""
-	}
-	return s + ";"
-}
-
-// sequenceCreateSQL renders a bare CREATE SEQUENCE. It clears OwnedBy on a copy
-// because the differ deliberately skips owned sequences; ownership is restored
-// separately by an ALTER SEQUENCE ... OWNED BY on the owning table's script.
-func sequenceCreateSQL(db *model.Database, sq *model.Sequence) string {
-	cp := *sq
-	cp.OwnedBy = nil
-	mini := &model.Database{TargetVersion: db.TargetVersion,
-		Schemas: []*model.Schema{{Name: sq.Schema, Sequences: []*model.Sequence{&cp}}}}
-	baseline := &model.Database{TargetVersion: db.TargetVersion,
-		Schemas: []*model.Schema{{Name: sq.Schema}}}
-	res, err := Compare(baseline, mini, Options{Online: false})
-	if err != nil || res.Empty() {
-		return ""
-	}
-	parts := make([]string, 0, len(res.Statements))
-	for _, s := range res.Statements {
-		parts = append(parts, s.SQL)
-	}
-	return strings.Join(parts, "\n")
+	return "_" + string(groups[0].Op.Type)
 }
 
 func sanitizeFilename(s string) string {
