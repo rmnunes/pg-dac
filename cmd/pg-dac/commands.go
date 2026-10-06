@@ -1,0 +1,199 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"github.com/rodrigonunes/pg-dac/internal/engine"
+	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rodrigonunes/pg-dac/internal/source"
+	"github.com/rodrigonunes/pg-dac/internal/validate"
+)
+
+// commonFlags holds the flags shared by the comparison verbs.
+type commonFlags struct {
+	from        string
+	to          string
+	schemas     []string
+	targetMajor int
+	noOnline    bool
+	allowHaz    bool
+	dropObjects bool
+	doValidate  bool
+}
+
+func (f *commonFlags) bind(cmd *cobra.Command) {
+	fl := cmd.Flags()
+	fl.StringVar(&f.from, "from", "", "source: the current/target database (connection string)")
+	fl.StringVar(&f.to, "to", "", "desired state to converge the target toward (connection string)")
+	fl.StringArrayVar(&f.schemas, "schema", nil, "restrict to these schemas (repeatable; default: all user schemas)")
+	fl.IntVar(&f.targetMajor, "target-major", 0, "target PostgreSQL major version for version-gated strategies (0 = derive)")
+	fl.BoolVar(&f.noOnline, "no-online", false, "disable lock-safe rewrites (CONCURRENTLY, NOT VALID/VALIDATE)")
+	fl.BoolVar(&f.allowHaz, "allow-hazards", false, "include data-loss operations (otherwise they are blocked)")
+	fl.BoolVar(&f.dropObjects, "drop-objects-not-in-source", false, "drop objects present in the target but not in the source")
+	fl.BoolVar(&f.doValidate, "validate", false, "replay the migration in a scratch database to prove it executes and converges")
+	_ = cmd.MarkFlagRequired("from")
+	_ = cmd.MarkFlagRequired("to")
+}
+
+// resolveModels resolves both sources to models, printing any unsupported-object
+// warnings to stderr. The "to" model is desired; "from" is the schema to be changed.
+func (f *commonFlags) resolveModels(cmd *cobra.Command) (from, to *model.Database, err error) {
+	ctx := cmd.Context()
+	from, fromWarns, err := source.Resolve(ctx, f.from, source.Options{Schemas: f.schemas})
+	if err != nil {
+		return nil, nil, fmt.Errorf("--from: %w", err)
+	}
+	to, toWarns, err := source.Resolve(ctx, f.to, source.Options{Schemas: f.schemas})
+	if err != nil {
+		return nil, nil, fmt.Errorf("--to: %w", err)
+	}
+	printWarnings(cmd, "--from", fromWarns)
+	printWarnings(cmd, "--to", toWarns)
+	return from, to, nil
+}
+
+// printWarnings writes deduplicated unsupported-object warnings for a source to
+// stderr, so they never corrupt script/report output on stdout.
+func printWarnings(cmd *cobra.Command, label string, warns []string) {
+	for _, w := range warns {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning (%s): %s\n", label, w)
+	}
+}
+
+// compare resolves both sources, runs the engine, and — if --validate was given
+// — replays the migration in a scratch database, writing the outcome to stderr
+// (so it never corrupts a script written to stdout).
+func (f *commonFlags) compare(cmd *cobra.Command) (*engine.Result, error) {
+	from, to, err := f.resolveModels(cmd)
+	if err != nil {
+		return nil, err
+	}
+	res, err := engine.Compare(from, to, f.options())
+	if err != nil {
+		return nil, err
+	}
+	if f.doValidate {
+		f.printValidation(cmd, from, to)
+	}
+	return res, nil
+}
+
+func (f *commonFlags) printValidation(cmd *cobra.Command, from, to *model.Database) {
+	w := cmd.ErrOrStderr()
+	vr, err := validate.Plan(cmd.Context(), from, to, f.options())
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "validation: FAILED to apply: %v\n", err)
+	case vr.Converged:
+		fmt.Fprintln(w, "validation: OK (migration applied to a scratch database and converged to the desired state)")
+	default:
+		fmt.Fprintf(w, "validation: applied, but %d residual change(s) remain (migration does not fully converge)\n",
+			len(vr.Residual.Statements))
+	}
+}
+
+func (f *commonFlags) options() engine.Options {
+	opts := engine.DefaultOptions()
+	opts.TargetMajor = f.targetMajor
+	opts.Online = !f.noOnline
+	opts.AllowHazards = f.allowHaz
+	opts.DropObjectsNotInSource = f.dropObjects
+	return opts
+}
+
+func newScriptCmd() *cobra.Command {
+	f := &commonFlags{}
+	cmd := &cobra.Command{
+		Use:   "script",
+		Short: "Generate the migration SQL that transforms --from into --to",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := f.compare(cmd)
+			if err != nil {
+				return err
+			}
+			fmt.Fprint(cmd.OutOrStdout(), res.Script(f.allowHaz))
+			return nil
+		},
+	}
+	f.bind(cmd)
+	return cmd
+}
+
+func newReportCmd() *cobra.Command {
+	f := &commonFlags{}
+	var format string
+	cmd := &cobra.Command{
+		Use:   "report",
+		Short: "Produce a machine-readable change report (operations + hazards)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := f.compare(cmd)
+			if err != nil {
+				return err
+			}
+			rep := res.Report()
+			if format == "json" {
+				s, err := rep.JSON()
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), s)
+				return nil
+			}
+			fmt.Fprint(cmd.OutOrStdout(), rep.Text())
+			return nil
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVar(&format, "format", "text", "report format: text | json")
+	return cmd
+}
+
+func newPlanCmd() *cobra.Command {
+	f := &commonFlags{}
+	cmd := &cobra.Command{
+		Use:   "plan",
+		Short: "Emit the structured, per-object comparison plan as JSON (for tooling and the GUI)",
+		Long: "Produces a PlanDoc: one entry per changed object with its generated SQL,\n" +
+			"hazards (with severity), before/after definitions, and dependency edges.\n" +
+			"This is the machine-readable form the daemon and GUI consume.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := f.compare(cmd)
+			if err != nil {
+				return err
+			}
+			b, err := json.MarshalIndent(res.PlanDoc(), "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), string(b))
+			return nil
+		},
+	}
+	f.bind(cmd)
+	return cmd
+}
+
+func newDiffCmd() *cobra.Command {
+	f := &commonFlags{}
+	cmd := &cobra.Command{
+		Use:   "diff",
+		Short: "Summarize the differences between --from and --to",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := f.compare(cmd)
+			if err != nil {
+				return err
+			}
+			if res.Empty() {
+				fmt.Fprintln(cmd.OutOrStdout(), "No differences.")
+				return nil
+			}
+			fmt.Fprint(cmd.OutOrStdout(), res.Report().Text())
+			return nil
+		},
+	}
+	f.bind(cmd)
+	return cmd
+}

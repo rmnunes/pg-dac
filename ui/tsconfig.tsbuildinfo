@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/components/detailpane.tsx","./src/components/objecttree.tsx","./src/components/publishmodal.tsx","./src/components/scriptmodal.tsx","./src/components/sourcebar.tsx","./src/ipc/client.ts","./src/ipc/types.ts","./src/state/store.ts"],"errors":true,"version":"5.9.3"}

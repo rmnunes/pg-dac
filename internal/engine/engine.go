@@ -1,0 +1,188 @@
+// Package engine ties the comparison pipeline together: it diffs two models,
+// applies deploy options (drop policy), orders the result into a plan, and
+// renders lock-safe SQL. It is the single entry point the CLI verbs call,
+// regardless of whether each side is a live database, a .pgdac artifact, or a
+// declarative project — those are resolved to models before reaching here.
+package engine
+
+import (
+	"github.com/rodrigonunes/pg-dac/internal/diff"
+	"github.com/rodrigonunes/pg-dac/internal/model"
+	"github.com/rodrigonunes/pg-dac/internal/plan"
+	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+)
+
+// Options controls comparison and generation. The defaults mirror the
+// conservative DACPAC/SqlPackage posture: do not drop objects missing from the
+// source, and block data loss unless explicitly allowed.
+type Options struct {
+	// TargetMajor overrides the PostgreSQL major version used for version-gated
+	// strategies. 0 means "derive from the target/desired model".
+	TargetMajor int
+	// Online enables lock-safe rewrites (CONCURRENTLY, NOT VALID/VALIDATE, ...).
+	Online bool
+
+	// AllowHazards permits data-loss operations to be applied (the
+	// BlockOnPossibleDataLoss analog). It does not affect script/report output,
+	// only whether a publish is blocked.
+	AllowHazards bool
+
+	// DropObjectsNotInSource drops objects (schemas, tables, columns, views,
+	// matviews, sequences, enums, extensions) that exist in the target but not in
+	// the source. Default false.
+	DropObjectsNotInSource bool
+	// DropConstraintsNotInSource / DropIndexesNotInSource drop constraints/indexes
+	// missing from the source. Default true (they are cheap to recreate).
+	DropConstraintsNotInSource bool
+	DropIndexesNotInSource     bool
+
+	// IncludeIDs / ExcludeIDs restrict the comparison to a chosen set of objects,
+	// keyed by object ID (model.ObjRef.Key() — what ObjectChange.ID reports). When
+	// IncludeIDs is non-empty, only those objects are changed; ExcludeIDs always
+	// removes objects. Filtering happens BEFORE planning so dependency ordering is
+	// recomputed over the surviving set — this is how the GUI's per-object
+	// include/exclude stays dependency-correct and plan-vs-apply consistent.
+	IncludeIDs map[string]bool
+	ExcludeIDs map[string]bool
+}
+
+// DefaultOptions returns the recommended conservative defaults.
+func DefaultOptions() Options {
+	return Options{
+		Online:                     true,
+		DropConstraintsNotInSource: true,
+		DropIndexesNotInSource:     true,
+	}
+}
+
+// Result holds the products of a comparison.
+type Result struct {
+	ChangeSet  *diff.ChangeSet
+	Plan       *plan.Plan
+	Groups     []sqlgen.OpStatements // per-op statements, preserving the op<->SQL link
+	Statements []sqlgen.Statement    // flattened, in plan order (script/apply consume this)
+
+	from, to *model.Database // retained for per-object before/after definition rendering
+	online   bool
+}
+
+// Empty reports whether there is nothing to do.
+func (r *Result) Empty() bool { return len(r.Statements) == 0 }
+
+// Compare computes the migration to transform the "from" model (current/target)
+// into the "to" model (desired).
+func Compare(from, to *model.Database, opts Options) (*Result, error) {
+	cs := diff.Diff(from, to)
+	cs = filterDrops(cs, opts)
+	cs = filterByObject(cs, opts)
+
+	p := plan.Build(cs)
+
+	major := opts.TargetMajor
+	if major == 0 {
+		major = to.MajorVersion()
+	}
+	if major == 0 {
+		major = from.MajorVersion()
+	}
+
+	groups, err := sqlgen.GenerateGrouped(p, sqlgen.Options{TargetMajor: major, Online: opts.Online})
+	if err != nil {
+		return nil, err
+	}
+	var stmts []sqlgen.Statement
+	for _, g := range groups {
+		stmts = append(stmts, g.Statements...)
+	}
+	return &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, from: from, to: to, online: opts.Online}, nil
+}
+
+// filterByObject keeps only ops whose owning object passes the include/exclude
+// sets. Filtering by object (op.Owner.Key()) keeps drop+recreate pairs and a
+// table's sub-object ops together, so the subsequent re-plan stays correct.
+func filterByObject(cs *diff.ChangeSet, opts Options) *diff.ChangeSet {
+	if len(opts.IncludeIDs) == 0 && len(opts.ExcludeIDs) == 0 {
+		return cs
+	}
+	out := &diff.ChangeSet{}
+	for _, op := range cs.Ops {
+		key := op.Owner.Key()
+		if opts.ExcludeIDs[key] {
+			continue
+		}
+		if len(opts.IncludeIDs) > 0 && !opts.IncludeIDs[key] {
+			continue
+		}
+		out.Ops = append(out.Ops, op)
+	}
+	return out
+}
+
+// filterDrops removes drop operations disallowed by the deploy options. A drop
+// that is paired with a recreate of the same object (a "changed" object, not a
+// removed one) is always kept — otherwise the recreate would fail or the change
+// would be silently lost.
+func filterDrops(cs *diff.ChangeSet, opts Options) *diff.ChangeSet {
+	created := createdIdentities(cs)
+	out := &diff.ChangeSet{}
+	for _, op := range cs.Ops {
+		if !op.Type.IsDrop() {
+			out.Ops = append(out.Ops, op)
+			continue
+		}
+		if _, isReplace := created[identity(op)]; isReplace {
+			out.Ops = append(out.Ops, op)
+			continue
+		}
+		if dropAllowed(op, opts) {
+			out.Ops = append(out.Ops, op)
+		}
+	}
+	return out
+}
+
+func dropAllowed(op diff.Op, opts Options) bool {
+	switch op.Type {
+	case diff.OpDropConstraint:
+		return opts.DropConstraintsNotInSource
+	case diff.OpDropIndex:
+		return opts.DropIndexesNotInSource
+	default:
+		return opts.DropObjectsNotInSource
+	}
+}
+
+// identity returns a key that uniquely names the object an op acts on, so a drop
+// and its paired recreate map to the same key.
+func identity(op diff.Op) string {
+	switch op.Type {
+	case diff.OpAddConstraint, diff.OpDropConstraint:
+		return op.Owner.Key() + "#c#" + op.Sub
+	case diff.OpCreateIndex, diff.OpDropIndex:
+		return op.Owner.Key() + "#i#" + op.Sub
+	case diff.OpAddColumn, diff.OpDropColumn:
+		return op.Owner.Key() + "#col#" + op.Sub
+	case diff.OpCreateTrigger, diff.OpDropTrigger:
+		return op.Owner.Key() + "#tg#" + op.Sub
+	case diff.OpCreatePolicy, diff.OpDropPolicy:
+		return op.Owner.Key() + "#pol#" + op.Sub
+	default:
+		// Functions key on Owner (whose Name is the full signature); tables,
+		// views, etc. key on Owner directly.
+		return op.Owner.Key()
+	}
+}
+
+func createdIdentities(cs *diff.ChangeSet) map[string]struct{} {
+	m := map[string]struct{}{}
+	for _, op := range cs.Ops {
+		switch op.Type {
+		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView,
+			diff.OpCreateEnum, diff.OpCreateCollation, diff.OpCreateSequence, diff.OpCreateSchema, diff.OpCreateExtension,
+			diff.OpAddConstraint, diff.OpCreateIndex, diff.OpAddColumn,
+			diff.OpCreateFunction, diff.OpCreateTrigger, diff.OpCreatePolicy:
+			m[identity(op)] = struct{}{}
+		}
+	}
+	return m
+}

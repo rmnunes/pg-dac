@@ -1,0 +1,154 @@
+// Package execute applies generated statements to a database. This M2 version is
+// deliberately minimal — it runs statements sequentially in autocommit, which is
+// exactly what plan validation and scratch-database materialization need
+// (per-statement autocommit also lets CONCURRENTLY statements run, since they
+// cannot be inside a transaction block). Milestone 3 adds lock_timeout, retry
+// with backoff, and transaction batching for production publishes.
+package execute
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/rodrigonunes/pg-dac/internal/sqlgen"
+)
+
+// Execer is the subset of pgx used to run individual statements.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// Options tunes the lock-safety behavior of a production apply.
+type Options struct {
+	// LockTimeout is set as the session lock_timeout so blocking DDL aborts
+	// quickly instead of queuing ahead of all later queries. 0 disables it.
+	LockTimeout time.Duration
+	// MaxRetries is how many times a statement that fails to acquire its lock
+	// (SQLSTATE 55P03) is retried before giving up.
+	MaxRetries int
+	// BaseBackoff and MaxBackoff bound the randomized exponential backoff between
+	// retries (backoff = random in [0, min(MaxBackoff, BaseBackoff*2^attempt)]).
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
+}
+
+// DefaultOptions returns sensible production defaults: a short lock_timeout with
+// a handful of jittered retries. statement_timeout is intentionally left
+// unbounded so long index builds and constraint validations are not killed.
+func DefaultOptions() Options {
+	return Options{
+		LockTimeout: 3 * time.Second,
+		MaxRetries:  5,
+		BaseBackoff: 100 * time.Millisecond,
+		MaxBackoff:  5 * time.Second,
+	}
+}
+
+// Progress is an optional callback invoked once per statement just before it is
+// run (1-based index, total count, the statement). Used to stream publish
+// progress to a GUI; pass nil to disable.
+type Progress func(index, total int, s sqlgen.Statement)
+
+// Apply runs statements against conn with lock-safety. Each statement runs in its
+// own autocommit command, so CONCURRENTLY statements are never inside a
+// transaction and a statement that fails to take its lock can be safely retried
+// (it never committed). It returns the number of statements successfully applied;
+// on failure the migration is left partially applied and can be resumed by
+// recomputing the diff from the new current state and publishing again.
+func Apply(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opts Options) (int, error) {
+	return ApplyStream(ctx, conn, stmts, opts, nil)
+}
+
+// ApplyStream is Apply with a per-statement progress callback (for streaming UIs).
+func ApplyStream(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opts Options, onStmt Progress) (int, error) {
+	if opts.LockTimeout > 0 {
+		if _, err := conn.Exec(ctx, fmt.Sprintf("SET lock_timeout = %d", opts.LockTimeout.Milliseconds())); err != nil {
+			return 0, fmt.Errorf("set lock_timeout: %w", err)
+		}
+	}
+	applied := 0
+	for i, s := range stmts {
+		if onStmt != nil {
+			onStmt(i+1, len(stmts), s)
+		}
+		if err := runWithRetry(ctx, conn, s.SQL, opts); err != nil {
+			return applied, fmt.Errorf("statement failed: %s: %w", firstLine(s.SQL), err)
+		}
+		applied++
+	}
+	return applied, nil
+}
+
+func runWithRetry(ctx context.Context, conn Execer, sql string, opts Options) error {
+	for attempt := 0; ; attempt++ {
+		_, err := conn.Exec(ctx, sql)
+		if err == nil {
+			return nil
+		}
+		if !isLockTimeout(err) || attempt >= opts.MaxRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff(opts, attempt)):
+		}
+	}
+}
+
+// isLockTimeout reports whether err is PostgreSQL's lock_not_available (55P03),
+// the error raised when lock_timeout expires waiting for a lock.
+func isLockTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "55P03"
+	}
+	return false
+}
+
+func backoff(opts Options, attempt int) time.Duration {
+	max := opts.BaseBackoff << attempt
+	if max <= 0 || max > opts.MaxBackoff {
+		max = opts.MaxBackoff
+	}
+	return time.Duration(rand.Int63n(int64(max) + 1))
+}
+
+// ApplyStatements runs each statement in its own autocommit command. It stops at
+// the first error and reports which statement failed.
+func ApplyStatements(ctx context.Context, e Execer, stmts []sqlgen.Statement) error {
+	for _, s := range stmts {
+		if _, err := e.Exec(ctx, s.SQL); err != nil {
+			return fmt.Errorf("statement failed: %s: %w", firstLine(s.SQL), err)
+		}
+	}
+	return nil
+}
+
+// ApplyScript runs a multi-statement SQL script using the simple query protocol
+// (one implicit transaction). Suitable for applying authored declarative DDL to
+// a scratch database for normalization; not for migrations containing
+// CONCURRENTLY statements.
+func ApplyScript(ctx context.Context, conn *pgx.Conn, sql string) error {
+	if strings.TrimSpace(sql) == "" {
+		return nil
+	}
+	if err := conn.PgConn().Exec(ctx, sql).Close(); err != nil {
+		return fmt.Errorf("apply script: %w", err)
+	}
+	return nil
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i] + " ..."
+	}
+	return s
+}

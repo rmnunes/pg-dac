@@ -1,0 +1,4 @@
+/bin/
+*.pgdac
+*.exe
+.DS_Store
