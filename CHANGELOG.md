@@ -38,6 +38,14 @@ production pilot completes without a correctness change.
   both archive kinds.
 - Daemon warnings carry the side they concern (Target / Source / Plan); GUI options for every
   comparison setting and publish control.
+- **GUI redesign, SSDT-faithful** (WP8, after the UX evaluation in `ui/UX-REVIEW.md`): toolbar
+  with `Ctrl+Enter` compare, Source/Target dropdowns holding the saved sources, an Options dialog
+  (Comparison / Deployment tabs), the change list grouped by action with tri-state group
+  checkboxes, filter and full keyboard navigation, a Risks tab and publish acknowledgements that
+  explain each hazard code and name the affected objects, a collapsible notes panel for the
+  engine's warnings, native dialogs with focus management, contrast-checked dark theme (editors
+  included), Lucide icons; axe-core reports no violations. A browser-only dev harness
+  (`pnpm dev` without Tauri) replays a real plan through a mock daemon.
 
 ### Changed
 - Plan format 2, artifact format 4 (models carry grants). Older artifacts open with a warning.

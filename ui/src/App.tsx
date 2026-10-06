@@ -1,41 +1,32 @@
 import { useEffect, useState } from "react";
+import { X } from "lucide-react";
 
 import { health, onCompare, onPublish } from "./ipc/client";
 import { EXPECTED_FORMAT_VERSION } from "./ipc/types";
 import pinnedVersion from "../PGDAC_VERSION?raw";
-import { useStore } from "./state/store";
+import { TREE_WIDTH_MAX, TREE_WIDTH_MIN, useStore } from "./state/store";
 import { SourceBar } from "./components/SourceBar";
-import { ObjectTree } from "./components/ObjectTree";
+import { Toolbar } from "./components/Toolbar";
+import { ChangeList } from "./components/ChangeList";
 import { DetailPane } from "./components/DetailPane";
-import { PublishModal } from "./components/PublishModal";
-import { ScriptModal } from "./components/ScriptModal";
+import { NotesPanel } from "./components/NotesPanel";
+import { StatusBar, type EngineInfo } from "./components/StatusBar";
+import { PublishDialog } from "./components/PublishDialog";
+import { ScriptDialog } from "./components/ScriptDialog";
+import { OptionsDialog, type OptionsTab } from "./components/OptionsDialog";
 import { CompareProgress } from "./components/CompareProgress";
-import { specIsDb, specIsProject } from "./state/profiles";
-
-// Warnings arrive tagged with the side they concern; the GUI's names for the
-// engine's --from / --to are Target / Source.
-function sideLabel(side: string): string {
-  switch (side) {
-    case "target":
-      return "Target";
-    case "source":
-      return "Source";
-    case "plan":
-      return "Plan";
-    default:
-      return side;
-  }
-}
 
 export default function App() {
-  const { from, profiles, plan, warnings, error, generateScript, loadProfiles, handlePublishEvent, handleCompareEvent } =
-    useStore();
+  const { plan, warnings, error, generateScript, loadProfiles, handlePublishEvent, handleCompareEvent, set } = useStore();
   const { treeWidth, setTreeWidth, persistTreeWidth } = useStore();
   const [showPublish, setShowPublish] = useState(false);
   const [scriptText, setScriptText] = useState<string | null>(null);
+  const [optionsTab, setOptionsTab] = useState<OptionsTab | null>(null);
+  const [notesOpen, setNotesOpen] = useState(true);
+  const [engine, setEngine] = useState<EngineInfo>({});
 
   // Draggable divider between the change list and the results. Updates the width
-  // live during the drag and persists it once on release.
+  // live during the drag and persists it once on release. Arrow keys work too.
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -51,8 +42,12 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
     document.body.classList.add("resizing");
   };
-
-  const [engineNote, setEngineNote] = useState<string | null>(null);
+  const resizeByKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    setTreeWidth(treeWidth + (e.key === "ArrowRight" ? 16 : -16));
+    persistTreeWidth();
+  };
 
   useEffect(() => {
     const subs = [onPublish(handlePublishEvent), onCompare(handleCompareEvent)];
@@ -62,125 +57,95 @@ export default function App() {
     health()
       .then((h) => {
         if (h.formatVersion !== EXPECTED_FORMAT_VERSION) {
-          setEngineNote(`The pg-dac engine reports plan format ${h.formatVersion}; this UI expects ${EXPECTED_FORMAT_VERSION}. Rebuild the sidecar to match.`);
+          setEngine({ version: h.version, note: `The engine reports plan format ${h.formatVersion}; this UI expects ${EXPECTED_FORMAT_VERSION}. Rebuild the sidecar to match.` });
           return;
         }
         const pinned = pinnedVersion.trim();
-        if (h.version.replace(/-dev$/, "") !== pinned) {
-          setEngineNote(`Engine ${h.version} differs from the UI's pinned ${pinned}; results may differ from a release build.`);
-        }
+        const mismatch = h.version.replace(/-dev$/, "").replace(/ \(.*\)$/, "") !== pinned;
+        setEngine({ version: h.version, note: mismatch ? `Engine ${h.version} differs from the UI's pinned ${pinned}; results may differ from a release build.` : undefined });
       })
-      .catch((e) => setEngineNote(`pg-dac engine not reachable: ${String(e)}`));
+      .catch((e) => setEngine({ note: `pg-dac engine not reachable: ${String(e)}` }));
     return () => {
       subs.forEach((un) => un.then((f) => f()));
     };
   }, [handlePublishEvent, handleCompareEvent, loadProfiles]);
 
-  const hasChanges = !!plan && plan.changes.length > 0;
-  // A Target is published to when it is a live database (the migration runs
-  // there) or a project directory (its files are updated from the Source). An
-  // artifact cannot be a Target. Handles profile refs too.
-  const targetIsDb = specIsDb(from, profiles);
-  const targetIsProject = specIsProject(from, profiles);
-  const canPublish = targetIsDb || targetIsProject;
-  const counts = (plan?.changes ?? []).reduce<Record<string, number>>((a, c) => {
-    a[c.changeKind] = (a[c.changeKind] ?? 0) + 1;
-    return a;
-  }, {});
+  // A fresh result re-opens the notes so new warnings are seen; the user can
+  // collapse them again from the status bar.
+  useEffect(() => {
+    if (warnings.length > 0) setNotesOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan]);
+
+  // Ctrl+Enter compares (the toolbar button's shortcut).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        const s = useStore.getState();
+        if (s.from && s.to && s.status !== "comparing" && !document.querySelector("dialog[open]")) {
+          e.preventDefault();
+          void s.runCompare();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="app">
-      <header className="titlebar">
-        pg-dac <span className="sub">PostgreSQL schema compare</span>
+      <header className="appbar">
+        <h1>
+          pg-dac <span className="sub">PostgreSQL schema compare</span>
+        </h1>
+        <Toolbar
+          onOptions={() => setOptionsTab("compare")}
+          onScript={async () => {
+            const sql = await generateScript();
+            if (sql) setScriptText(sql);
+          }}
+          onPublish={() => setShowPublish(true)}
+        />
       </header>
 
       <SourceBar />
 
-      {plan && (
-        <div className="direction-banner">
-          Update <b>Target</b> to match <b>Source</b>
-          {hasChanges ? (
-            <span className="counts">
-              {" — "}
-              <span className="kind-add">{counts.add ?? 0} add</span>
-              {" · "}
-              <span className="kind-alter">{counts.alter ?? 0} change</span>
-              {counts.drop ? (
-                <>
-                  {" · "}
-                  <span className="kind-drop">{counts.drop} drop</span>
-                </>
-              ) : null}
-            </span>
-          ) : (
-            " — in sync"
-          )}
+      {error && (
+        <div className="error-banner" role="alert">
+          <span className="msg">{error}</span>
+          <button type="button" className="icon-btn ghost" aria-label="Dismiss this error" onClick={() => set({ error: undefined, status: "idle" })}>
+            <X size={14} aria-hidden="true" />
+          </button>
         </div>
       )}
 
-      {warnings.length > 0 && (
-        <div className="warnings">
-          {warnings.map((w, i) => (
-            <div key={i}>
-              ⚠ {w.side && <b>{sideLabel(w.side)}: </b>}
-              {w.message}
-            </div>
-          ))}
-        </div>
-      )}
-      {engineNote && <div className="warnings"><div>⚠ {engineNote}</div></div>}
-      {error && <div className="error-banner">{error}</div>}
-
-      <div className="workspace">
-        <div className="tree-pane" style={{ width: treeWidth }}>
-          <ObjectTree />
-        </div>
+      <main className="workspace">
+        <aside className="list-pane" style={{ width: treeWidth }} aria-label="Changes">
+          <ChangeList />
+        </aside>
         <div
           className="splitter"
           onMouseDown={startResize}
+          onKeyDown={resizeByKey}
           role="separator"
           aria-orientation="vertical"
-          title="Drag to resize the change list"
+          aria-label="Resize the change list"
+          aria-valuemin={TREE_WIDTH_MIN}
+          aria-valuemax={TREE_WIDTH_MAX}
+          aria-valuenow={treeWidth}
+          tabIndex={0}
+          title="Drag or use the arrow keys to resize the change list"
         />
         <DetailPane />
-      </div>
+      </main>
 
-      <footer className="statusbar">
-        <span>
-          {plan
-            ? `${plan.statementCount} statement(s)${plan.prelude?.length ? ` · ${plan.prelude.length} refactorlog rename(s)` : ""}${plan.dataLoss ? " · ⚠ DATA LOSS" : ""}`
-            : "No comparison yet"}
-        </span>
-        <div className="actions">
-          <button
-            disabled={!hasChanges}
-            onClick={async () => {
-              const sql = await generateScript();
-              if (sql) setScriptText(sql);
-            }}
-          >
-            Generate Script
-          </button>
-          <button
-            className="primary"
-            disabled={!hasChanges || !canPublish}
-            title={
-              targetIsDb
-                ? "Apply the changes to the Target database"
-                : targetIsProject
-                  ? "Rewrite the Target project's files so they describe the Source (SSDT's Update project from database)"
-                  : "Publish updates the Target — set the Target to a database connection or a project directory"
-            }
-            onClick={() => setShowPublish(true)}
-          >
-            {targetIsProject ? "Update Target project…" : "Publish to Target…"}
-          </button>
-        </div>
-      </footer>
+      <NotesPanel open={notesOpen} />
+      <StatusBar notesOpen={notesOpen} onToggleNotes={() => setNotesOpen((o) => !o)} engine={engine} />
 
       <CompareProgress />
-      {showPublish && <PublishModal onClose={() => setShowPublish(false)} />}
-      {scriptText !== null && <ScriptModal sql={scriptText} onClose={() => setScriptText(null)} />}
+      {optionsTab && <OptionsDialog initialTab={optionsTab} onClose={() => setOptionsTab(null)} />}
+      {showPublish && <PublishDialog onClose={() => setShowPublish(false)} onOptions={() => setOptionsTab("deploy")} />}
+      {scriptText !== null && <ScriptDialog sql={scriptText} onClose={() => setScriptText(null)} />}
     </div>
   );
 }

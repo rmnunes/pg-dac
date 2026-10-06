@@ -41,20 +41,16 @@ interface CompareProgress {
   canceled?: boolean;
 }
 
-interface State {
-  // sources
-  from: string;
-  to: string;
-  // options
+// The comparison and deployment options (the Options dialog). "" on a
+// comparison-semantics option defers to the Source project's pgdac.yaml.
+export interface OptionsState {
   schemas: string; // comma-separated
   targetMajor: string; // "" or number
   online: boolean;
-  allowHazards: boolean;
   dropObjects: boolean;
   requireKey: string;
   skipDeployScripts: boolean;
   allowDrift: boolean;
-  // Comparison semantics ("" = the Source project's pgdac.yaml default).
   privileges: PrivilegesMode;
   columnOrder: ColumnOrderMode;
   comments: CommentsMode;
@@ -62,12 +58,47 @@ interface State {
   excludeTypes: string; // comma-separated object types left out of the comparison
   variables: string; // name=value per line, for $(name) in deploy scripts
   singleTransaction: boolean;
+}
+
+export const OPTION_DEFAULTS: OptionsState = {
+  schemas: "",
+  targetMajor: "",
+  online: true,
+  dropObjects: false,
+  requireKey: "",
+  skipDeployScripts: false,
+  allowDrift: false,
+  privileges: "",
+  columnOrder: "",
+  comments: "",
+  whitespace: "",
+  excludeTypes: "",
+  variables: "",
+  singleTransaction: false,
+};
+
+const OPTION_KEYS = Object.keys(OPTION_DEFAULTS) as (keyof OptionsState)[];
+
+/** How many options differ from their defaults (the toolbar badge). */
+export const changedOptionCount = (s: OptionsState): number => OPTION_KEYS.filter((k) => s[k] !== OPTION_DEFAULTS[k]).length;
+
+interface State extends OptionsState {
+  // sources
+  from: string;
+  to: string;
+  // Set when the user acknowledges the error-severity hazards in the publish
+  // dialog; the engine refuses to apply them otherwise.
+  allowHazards: boolean;
 
   // results
   status: Status;
   error?: string;
   plan?: PlanDoc;
   warnings: Warning[];
+  comparedAt?: number;
+  // The sources and options the current plan was computed with, so the UI can
+  // say when the options changed since.
+  comparedSignature?: string;
   // Objects the user unchecked.
   excluded: Set<string>;
   // Objects excluded because something they depend on is excluded (SSDT-style
@@ -86,19 +117,22 @@ interface State {
 
   // actions
   set: (patch: Partial<State>) => void;
+  resetOptions: () => void;
   setTreeWidth: (n: number) => void;
   persistTreeWidth: () => void;
   swap: () => void;
   request: () => CompareRequest;
   loadProfiles: () => Promise<void>;
-  addProfile: (p: { name: string; kind: ProfileKind; value: string }) => Promise<void>;
+  addProfile: (p: { name: string; kind: ProfileKind; value: string }) => Promise<Profile | undefined>;
   removeProfile: (id: string) => Promise<void>;
   runCompare: () => Promise<void>;
   cancelCompare: () => void;
   handleCompareEvent: (e: CompareEvent) => void;
   generateScript: () => Promise<string>;
   toggleExclude: (id: string) => void;
+  setIncluded: (ids: string[], included: boolean) => void;
   select: (id: string) => void;
+  dismissWarning: (index: number) => void;
   startPublish: () => Promise<void>;
   handlePublishEvent: (e: PublishEvent) => void;
 }
@@ -172,30 +206,33 @@ function dependenciesOf(plan: PlanDoc, id: string): Set<string> {
 // Persisted change-list width (the draggable divider between the change list and
 // the results). Kept in localStorage so it survives restarts.
 const TREE_WIDTH_KEY = "pgdac.treeWidth";
-const clampWidth = (n: number): number => Math.max(240, Math.min(900, Math.round(n)));
+export const TREE_WIDTH_MIN = 240;
+export const TREE_WIDTH_MAX = 900;
+const clampWidth = (n: number): number => Math.max(TREE_WIDTH_MIN, Math.min(TREE_WIDTH_MAX, Math.round(n)));
 function loadTreeWidth(): number {
-  const v = Number(localStorage.getItem(TREE_WIDTH_KEY));
-  return Number.isFinite(v) && v > 0 ? clampWidth(v) : 420;
+  try {
+    const v = Number(localStorage.getItem(TREE_WIDTH_KEY));
+    return Number.isFinite(v) && v > 0 ? clampWidth(v) : 420;
+  } catch {
+    return 420;
+  }
 }
+
+// What a plan depends on besides the object selection: the two sources and
+// every option. Compared against the stored signature to flag a stale plan.
+export function optionsSignature(s: OptionsState & { from: string; to: string }): string {
+  const o: Record<string, unknown> = { from: s.from, to: s.to };
+  for (const k of OPTION_KEYS) o[k] = s[k];
+  return JSON.stringify(o);
+}
+
+export const optionsStale = (s: State): boolean => !!s.plan && s.comparedSignature !== optionsSignature(s);
 
 export const useStore = create<State>((set, get) => ({
   from: "",
   to: "",
-  schemas: "",
-  targetMajor: "",
-  online: true,
+  ...OPTION_DEFAULTS,
   allowHazards: false,
-  dropObjects: false,
-  requireKey: "",
-  skipDeployScripts: false,
-  allowDrift: false,
-  privileges: "",
-  columnOrder: "",
-  comments: "",
-  whitespace: "",
-  excludeTypes: "",
-  variables: "",
-  singleTransaction: false,
 
   status: "idle",
   warnings: [],
@@ -208,6 +245,7 @@ export const useStore = create<State>((set, get) => ({
   treeWidth: loadTreeWidth(),
 
   set: (patch) => set(patch),
+  resetOptions: () => set({ ...OPTION_DEFAULTS }),
   // Live during a drag (cheap); persisted once on mouse-up via persistTreeWidth.
   setTreeWidth: (n) => set({ treeWidth: clampWidth(n) }),
   persistTreeWidth: () => {
@@ -231,9 +269,12 @@ export const useStore = create<State>((set, get) => ({
   addProfile: async ({ name, kind, value }) => {
     const profile: Profile = { id: crypto.randomUUID(), name, kind, value };
     try {
-      set({ profiles: await api.addProfile(profile) });
+      const profiles = await api.addProfile(profile);
+      set({ profiles });
+      return profiles.find((p) => p.id === profile.id) ?? profiles.find((p) => p.value === value && p.kind === kind);
     } catch (e) {
       set({ error: String(e) });
+      return undefined;
     }
   },
 
@@ -289,9 +330,13 @@ export const useStore = create<State>((set, get) => ({
       error: undefined,
       plan: undefined,
       warnings: [],
+      comparedAt: undefined,
+      comparedSignature: optionsSignature(s),
       excluded: new Set(),
       autoExcluded: new Map(),
       selectedId: undefined,
+      allowHazards: false,
+      publish: { running: false, total: 0, applied: 0, log: [], done: false },
       compareProgress: {
         running: true,
         opId,
@@ -343,6 +388,7 @@ export const useStore = create<State>((set, get) => ({
             status: "idle",
             plan,
             warnings: e.data.warnings ?? [],
+            comparedAt: Date.now(),
             selectedId: plan?.changes[0]?.id,
           };
         }
@@ -385,7 +431,24 @@ export const useStore = create<State>((set, get) => ({
       return { excluded: next, autoExcluded: computeAutoExcluded(s.plan, next) };
     }),
 
+  // Group-level include/exclude (the tri-state checkbox on a group header).
+  setIncluded: (ids, included) =>
+    set((s) => {
+      const next = new Set(s.excluded);
+      if (included) {
+        for (const id of ids) {
+          next.delete(id);
+          if (s.plan) for (const dep of dependenciesOf(s.plan, id)) next.delete(dep);
+        }
+      } else {
+        for (const id of ids) next.add(id);
+      }
+      return { excluded: next, autoExcluded: computeAutoExcluded(s.plan, next) };
+    }),
+
   select: (id) => set({ selectedId: id }),
+
+  dismissWarning: (index) => set((s) => ({ warnings: s.warnings.filter((_, i) => i !== index) })),
 
   startPublish: async () => {
     set({ publish: { running: true, total: 0, applied: 0, log: [], done: false, error: undefined } });

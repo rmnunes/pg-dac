@@ -95,3 +95,6 @@ export function specIsProject(spec: string, profiles: Profile[]): boolean {
   const s = spec.trim();
   return s !== "" && !looksLikeDsn(s) && !s.toLowerCase().endsWith(".pgdac");
 }
+
+// profileOf → the saved profile a spec refers to, if it is a profile reference.
+export const profileOf = (spec: string, profiles: Profile[]): Profile | undefined => find(spec, profiles);

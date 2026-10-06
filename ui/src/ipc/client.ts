@@ -13,27 +13,32 @@ import type {
   PublishEvent,
   ScriptResponse,
 } from "./types";
+import { mock } from "./mock";
 
-export const health = (): Promise<Health> => invoke("pgdac_health");
+// Outside the Tauri shell (plain `vite` in a browser, for UX work and audits)
+// every command is served by the in-browser mock daemon instead.
+const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export const health = (): Promise<Health> => (inTauri ? invoke("pgdac_health") : mock.health());
 
 // Saved source profiles (persisted in the app config dir). Each call returns the
 // full, updated list.
-export const listProfiles = (): Promise<Profile[]> => invoke("profiles_list");
-export const addProfile = (profile: Profile): Promise<Profile[]> => invoke("profile_add", { profile });
-export const removeProfile = (id: string): Promise<Profile[]> => invoke("profile_remove", { id });
+export const listProfiles = (): Promise<Profile[]> => (inTauri ? invoke("profiles_list") : mock.listProfiles());
+export const addProfile = (profile: Profile): Promise<Profile[]> => (inTauri ? invoke("profile_add", { profile }) : mock.addProfile(profile));
+export const removeProfile = (id: string): Promise<Profile[]> => (inTauri ? invoke("profile_remove", { id }) : mock.removeProfile(id));
 
 // Compare streams its progress over the pgdac://compare event channel; this just
 // kicks it off and returns immediately. The request's opId is used to cancel it.
-export const startCompare = (req: CompareRequest): Promise<void> => invoke("pgdac_plan", { req });
+export const startCompare = (req: CompareRequest): Promise<void> => (inTauri ? invoke("pgdac_plan", { req }) : mock.startCompare(req));
 
-export const cancelCompare = (opId: string): Promise<unknown> => invoke("pgdac_cancel", { opId });
+export const cancelCompare = (opId: string): Promise<unknown> => (inTauri ? invoke("pgdac_cancel", { opId }) : mock.cancelCompare());
 
 export const onCompare = (cb: (e: CompareEvent) => void): Promise<UnlistenFn> =>
-  listen<CompareEvent>("pgdac://compare", (event) => cb(event.payload));
+  inTauri ? listen<CompareEvent>("pgdac://compare", (event) => cb(event.payload)) : mock.onCompare(cb);
 
-export const script = (req: CompareRequest): Promise<ScriptResponse> => invoke("pgdac_script", { req });
+export const script = (req: CompareRequest): Promise<ScriptResponse> => (inTauri ? invoke("pgdac_script", { req }) : mock.script(req));
 
-export const startPublish = (req: CompareRequest): Promise<void> => invoke("pgdac_publish", { req });
+export const startPublish = (req: CompareRequest): Promise<void> => (inTauri ? invoke("pgdac_publish", { req }) : mock.startPublish(req));
 
 export const buildArtifact = (args: {
   from: string;
@@ -41,15 +46,15 @@ export const buildArtifact = (args: {
   name?: string;
   version?: string;
   noSign?: boolean;
-}): Promise<string> => invoke("pgdac_build", args);
+}): Promise<string> => (inTauri ? invoke("pgdac_build", args) : mock.buildArtifact());
 
-export const inspectArtifact = (path: string): Promise<string> => invoke("pgdac_inspect", { path });
+export const inspectArtifact = (path: string): Promise<string> => (inTauri ? invoke("pgdac_inspect", { path }) : mock.inspectArtifact());
 
 export const onPublish = (cb: (e: PublishEvent) => void): Promise<UnlistenFn> =>
-  listen<PublishEvent>("pgdac://publish", (event) => cb(event.payload));
+  inTauri ? listen<PublishEvent>("pgdac://publish", (event) => cb(event.payload)) : mock.onPublish(cb);
 
 export const pickFile = (filters?: { name: string; extensions: string[] }[]): Promise<string | null> =>
-  open({ multiple: false, directory: false, filters }).then((r) => (typeof r === "string" ? r : null));
+  inTauri ? open({ multiple: false, directory: false, filters }).then((r) => (typeof r === "string" ? r : null)) : mock.pickFile();
 
 export const pickDirectory = (): Promise<string | null> =>
-  open({ multiple: false, directory: true }).then((r) => (typeof r === "string" ? r : null));
+  inTauri ? open({ multiple: false, directory: true }).then((r) => (typeof r === "string" ? r : null)) : mock.pickDirectory();

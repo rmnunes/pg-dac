@@ -27,7 +27,7 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Artifact as a deployment unit | ✅ Carries `pgdac.yaml`, pre/post-deploy scripts and the drop policy; `publish` runs them (WP3) |
 | `pg-dac serve` daemon (warm Postgres, HTTP/SSE, cancel) | ✅ |
 | Project model (`pgdac.yaml`, `init`) | ✅ `include`/`exclude`/`schemas`/`targetMajor`/`preDeploy`/`postDeploy`/`dropPolicy` all honored |
-| Tauri GUI | ✅ Builds and type-checks; previously confirmed working visually |
+| Tauri GUI | ✅ SSDT-style layout after the UX evaluation (`ui/UX-REVIEW.md`): toolbar, source dropdowns, Options dialog, change list grouped by action with keyboard navigation, Risks tab, notes panel, native dialogs; axe-core clean; builds and type-checks (WP8) |
 | Object coverage | ✅ Partitioning, domains, composite types, matview indexes, view triggers/options, trigger state, UNLOGGED, storage parameters, column storage/compression/statistics, comments (WP3); privileges — GRANT/REVOKE on schemas, tables, views, sequences, routines, types and columns (WP5) |
 | Canonical comparison of live databases | ✅ Every side, a live database included, is brought to PostgreSQL's deparse fixed point through the scratch server before diffing (memoized), so an expression never differs only by how it was deparsed (WP5) |
 | Comparison semantics (SSDT options) | ✅ Routine bodies compared modulo whitespace (`--compare-whitespace`), comments optional (`--ignore-comments`), privileges optional (`--ignore-privileges`; revokes follow the drop policy), column order `ignore`/`warn`/`rebuild` (`--column-order`); defaults per project in `pgdac.yaml` `compare:` (WP5) |
@@ -227,6 +227,37 @@ Compare does when the project is the target.
 
 ---
 
+## WP8 (2026-10-07) — GUI redesign, SSDT-faithful
+
+A UX evaluation of the desktop GUI (`ui/UX-REVIEW.md`: heuristics with severity ratings, axe-core,
+keyboard pass, layout measurements, cognitive walkthrough) found the review workspace starved
+(42 % of the window; 22 % near the minimum size), a flat 12-control options row mixing comparison
+semantics with deployment switches, permanent warnings in CLI vocabulary, and accessibility
+failures (unnamed checkboxes, non-dialog modals, no Escape, a mouse-only list, failing contrast,
+a light editor in a dark shell). Of three options offered, "SSDT faithful" was chosen:
+
+- **Toolbar** (Compare `Ctrl+Enter`, Generate Script, Publish/Update, Options with a non-default
+  count) and **Source/Target dropdowns** holding the saved sources plus browse / open artifact /
+  type a connection string (masked).
+- **Options dialog**, tabs Comparison and Deployment, every control labelled and described;
+  the status bar flags options changed since the last comparison.
+- **Change list grouped by action** (Drop / Change / Add) with tri-state group checkboxes,
+  filter and "risks only", a badge naming each row's most serious risk; an ARIA tree with roving
+  focus (arrows, Space, Enter, Left/Right), still virtualized.
+- **Risks tab** rendering hazard codes as title + explanation + affected statements
+  (`ui/src/vocab.ts`); the publish dialog lists the objects behind each acknowledgement and says
+  why Apply is disabled.
+- **Notes panel** for the engine's warnings: collapsible from the status bar, per-note dismiss.
+- **Foundation**: native `<dialog>` modals (focus trap, Escape, focus return), contrast-checked
+  tokens (≥ 4.5:1), 12 px minimum text, dark Monaco themes, Lucide icons, landmarks.
+- **Browser dev harness**: `pnpm dev` without Tauri routes IPC to an in-browser mock daemon
+  replaying an anonymized real plan, for UX work and audits without a database.
+
+Re-audit: axe-core zero violations (was 1 critical, 1 serious, 3 moderate); workspace 393 px of a
+1024×680 window with the notes open (was 151 px).
+
+---
+
 ## Object coverage
 
 **Managed (introspected, diffed, generated, published):** schemas, extensions, enums (labels added
@@ -284,7 +315,7 @@ Roles are cluster objects: never created or dropped, only required to exist.
 
 ## Roadmap
 
-**All work packages (WP0–WP7) and the audit's N1–N9 items are complete; 0.9.0 is the release
+**All work packages (WP0–WP8) and the audit's N1–N9 items are complete; 0.9.0 is the release
 candidate for production rollout** (see ROLLOUT.md). What remains is explicitly out of scope or
 deferred:
 

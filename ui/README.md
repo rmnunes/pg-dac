@@ -2,8 +2,8 @@
 
 A Tauri desktop **Schema Compare** GUI for PostgreSQL, driving the `pg-dac` engine.
 It mirrors the SQL Server *Schema Compare* experience: pick two sources, review an
-object-by-object diff with definition diffs and generated SQL, then generate a script
-or publish — all backed by the same engine the CLI uses.
+object-by-object diff with definition diffs, generated SQL and the risks of each change, then
+generate a script or publish — all backed by the same engine the CLI uses.
 
 ## Architecture
 
@@ -18,8 +18,9 @@ React UI ──invoke──▶ src-tauri (Rust supervisor) ──spawn──▶ 
   the bundled `pg-dac` sidecar, runs `pg-dac serve`, reads the loopback address it prints,
   and forwards commands. No PostgreSQL logic lives in Rust — `pg-dac` owns it all.
 - **The frontend** (`src/`) is React 19 + Vite 6 + TypeScript, Monaco (`DiffEditor`),
-  TanStack Virtual (the object tree), and Zustand. IPC wrappers in `src/ipc/` mirror the
-  daemon JSON (`PlanDoc`, `ObjectChange`, `Hazard`) 1:1.
+  TanStack Virtual (the change list), Zustand and Lucide icons. IPC wrappers in `src/ipc/`
+  mirror the daemon JSON (`PlanDoc`, `ObjectChange`, `Hazard`) 1:1; `src/vocab.ts` holds the
+  human copy for the engine's hazard codes.
 
 ## Run it (development)
 
@@ -39,28 +40,54 @@ pnpm tauri dev      # launches the app; it spawns `pg-dac serve` automatically
 The first compare against a project/`.sql`/`.pgdac` source downloads the embedded
 PostgreSQL binaries once (cached afterward), then stays warm for the session.
 
+### Frontend only, in a browser
+
+`pnpm dev` and http://localhost:1420 run the frontend without Tauri: `src/ipc/client.ts` routes
+every command to the in-browser mock daemon (`src/ipc/mock.ts`), which replays a real plan
+(`src/dev/fixture-plan.json`: five changes, data loss, three engine notes) with the same event
+choreography as the Rust supervisor and keeps saved sources in `localStorage`. Use it for UX
+work, visual review and accessibility audits (axe-core from the console) — no database needed.
+The desktop app never takes this path.
+
 ## Using the app
 
-1. Set **Source** (left, the desired state — the engine's `--to`) and **Target** (right, gets updated — `--from`) — each is a connection string, a project
-   directory, a `.sql` file, or a `.pgdac` artifact (use 📁/📦 to browse). **Compare**. The *Options* panel also takes a required signer key for `.pgdac` sources, whether to run the
-   project's pre/post-deploy scripts, whether to publish over a drifted Target, and the
-   comparison semantics (privileges, column order, routine whitespace and comments — each
-   defaults to the Source project's `pgdac.yaml` `compare:` block). Warnings are labelled with
-   the side they concern (Target, Source, Plan). When the **Target is a project directory**, the
-   publish button becomes **Update Target project…** and rewrites the project's files from the
-   Source (SSDT's "Update project from database"); the progress log lists the files written.
-   The options panel also takes object types to exclude from the comparison and `name=value`
-   deploy variables for `$(name)` placeholders in pre/post-deploy scripts; the publish dialog has
-   a **Single transaction** switch (CONCURRENTLY statements run between transactions).
-2. Review the **object tree** (grouped, virtualized, severity-badged). Uncheck objects to
-   exclude them; the plan re-computes with your selection. Excluding an object also excludes every
-   change that depends on it (shown disabled, with the cause), and including one brings its
-   dependencies back — the SSDT behavior.
-3. The **detail pane** shows the Monaco definition diff (old vs new) and the generated SQL
-   with hazard annotations.
-4. **Generate Script** exports the SQL, or **Publish…** applies it — the publish dialog
-   requires acknowledging each error-severity hazard code (and data loss) before *Apply*,
-   then streams live per-statement progress.
+The window is laid out like SSDT's Schema Compare:
+
+- **Toolbar** (top right): **Compare** (`Ctrl+Enter`), **Generate Script**, **Publish to
+  Target…** (or **Update Target project…** when the Target is a project directory), **Options**.
+- **Source** (left, the desired state — the engine's `--to`) and **Target** (right, gets
+  updated — `--from`). Each is a dropdown: the saved sources, then *Browse for a project
+  folder…*, *Open a .pgdac artifact…* and *Type a connection string or path…*. A typed
+  connection string is shown masked and can be kept as a saved source. The swap button
+  exchanges the two.
+- **Options** opens a dialog with two tabs. *Comparison*: schemas, Target PostgreSQL version,
+  privileges, column order, routine whitespace and comments (each defaulting to the Source
+  project's `pgdac.yaml` `compare:` block), excluded object types, required signer key.
+  *Deployment*: online (lock-safe), single transaction, drop objects not in the Source, allow
+  drift, skip pre/post-deploy scripts, deploy variables. The toolbar button shows how many
+  options differ from their defaults; the status bar says when options changed after the last
+  comparison.
+- **Change list** (left pane), grouped by action — Drop, Change, Add — with a tri-state
+  include checkbox per group and one per change. Filter by name or type, or show risks only.
+  Each row's badge names its most serious risk ("data loss", "rewrite", "exclusive lock", …).
+  Excluding a change also excludes every change that depends on it (shown disabled, with the
+  cause); including one brings its dependencies back — the SSDT behaviour. The list is a
+  keyboard tree: arrows move, `Space` includes/excludes, `Enter` selects, `Left`/`Right`
+  collapse/expand a group.
+- **Detail pane**: *Definition* (Monaco side-by-side diff, Source left / Target current right,
+  green = added to the Target, red = removed; a toggle shows the Target after the change),
+  *Generated SQL*, and *Risks* — each hazard with a title, the engine's explanation and the
+  statements that carry it.
+- **Notes**: the engine's warnings (labelled Target / Source / Plan) in a collapsible panel
+  above the status bar, each dismissible; the status bar toggles it and shows the count.
+- **Publish** summarises the deployment settings (with a link to change them), lists the risks
+  to acknowledge — each with the objects it affects — and streams per-statement progress.
+  `Apply` stays disabled until every acknowledgement is ticked.
+
+Every dialog is a native `<dialog>`: `Escape` closes it (or cancels a running compare), focus is
+trapped inside and returns to the opener. Every control has an accessible name; the colour
+tokens in `src/styles.css` meet WCAG AA contrast. `UX-REVIEW.md` records the evaluation that
+led to this layout and the re-audit after it.
 
 ## Build a release
 
