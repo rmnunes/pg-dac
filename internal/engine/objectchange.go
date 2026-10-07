@@ -223,13 +223,45 @@ func presentKeys(db *model.Database) map[string]model.ObjKind {
 	return m
 }
 
-// objectCanonical renders the canonical CREATE statements for a single object by
-// materializing it alone (against an empty same-named schema) and rendering the
-// non-online SQL — reusing the whole engine so every object kind is covered.
-// Returns "" for objects without a meaningful standalone definition (schemas,
-// extensions) or when the object is absent from db.
+// objectCanonical renders an object's definition as the statements that would
+// create it from nothing — the text the GUI diffs side by side. Every kind has
+// one: a schema is its CREATE SCHEMA with comment and grants, an extension its
+// CREATE EXTENSION with the installed version noted (a version upgrade is
+// otherwise invisible in the text), everything else the object under its
+// schema.
 func objectCanonical(db *model.Database, ref model.ObjRef) string {
-	if ref.Kind == model.KindSchema || ref.Kind == model.KindExtension {
+	if db == nil {
+		return ""
+	}
+	switch ref.Kind {
+	case model.KindSchema:
+		for _, s := range db.Schemas {
+			if s.Name != ref.Name {
+				continue
+			}
+			bare := &model.Schema{Name: s.Name, Owner: s.Owner, Comment: s.Comment, Grants: s.Grants}
+			return renderFromNothing(
+				&model.Database{TargetVersion: db.TargetVersion},
+				&model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{bare}})
+		}
+		return ""
+	case model.KindExtension:
+		for _, e := range db.Extensions {
+			if e.Name != ref.Name {
+				continue
+			}
+			var schemas []*model.Schema
+			if e.Schema != "" {
+				schemas = []*model.Schema{{Name: e.Schema}}
+			}
+			out := renderFromNothing(
+				&model.Database{TargetVersion: db.TargetVersion, Schemas: schemas},
+				&model.Database{TargetVersion: db.TargetVersion, Schemas: schemas, Extensions: []*model.Extension{e}})
+			if out != "" && e.Version != "" {
+				out += "\n-- version " + e.Version
+			}
+			return out
+		}
 		return ""
 	}
 	mini := extractObject(db, ref)
@@ -237,6 +269,12 @@ func objectCanonical(db *model.Database, ref model.ObjRef) string {
 		return ""
 	}
 	baseline := &model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{{Name: ref.Schema}}}
+	return renderFromNothing(baseline, mini)
+}
+
+// renderFromNothing renders the statements that take baseline to mini, joined
+// as one text.
+func renderFromNothing(baseline, mini *model.Database) string {
 	res, err := Compare(baseline, mini, Options{Online: false})
 	if err != nil || res.Empty() {
 		return ""

@@ -345,3 +345,52 @@ func TestCompare_DropColumnDataLossGate(t *testing.T) {
 		t.Errorf("with --allow-hazards the DROP COLUMN should be present:\n%s", res.Script(true))
 	}
 }
+
+// TestObjectChanges_SchemaAndExtensionDefinitions: schemas and extensions have
+// a definition like every other object, so an added or removed one shows its
+// CREATE statement in the detail diff instead of two empty panes, and an
+// extension's definition notes its version so an upgrade is visible.
+func TestObjectChanges_SchemaAndExtensionDefinitions(t *testing.T) {
+	empty := &model.Database{TargetVersion: 160004, Schemas: []*model.Schema{{Name: "public"}}}
+	full := &model.Database{
+		TargetVersion: 160004,
+		Extensions:    []*model.Extension{{Name: "pg_trgm", Schema: "public", Version: "1.6"}},
+		Schemas:       []*model.Schema{{Name: "public"}, {Name: "app", Comment: "application objects"}},
+	}
+	changes := func(from, to *model.Database) map[string]ObjectChange {
+		t.Helper()
+		opts := DefaultOptions()
+		opts.DropObjectsNotInSource = true
+		res, err := Compare(from, to, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byID := map[string]ObjectChange{}
+		for _, c := range res.ObjectChanges() {
+			byID[c.ID] = c
+		}
+		return byID
+	}
+	extKey := model.ObjRef{Kind: model.KindExtension, Name: "pg_trgm"}.Key()
+	schKey := model.ObjRef{Kind: model.KindSchema, Name: "app"}.Key()
+
+	added := changes(empty, full)
+	ext, sch := added[extKey], added[schKey]
+	if ext.ChangeKind != "add" || ext.OldDefinition != "" ||
+		!strings.Contains(ext.NewDefinition, `CREATE EXTENSION IF NOT EXISTS "pg_trgm"`) || !strings.Contains(ext.NewDefinition, "version 1.6") {
+		t.Errorf("added extension: kind=%q old=%q new=%q", ext.ChangeKind, ext.OldDefinition, ext.NewDefinition)
+	}
+	if sch.ChangeKind != "add" || sch.OldDefinition != "" ||
+		!strings.Contains(sch.NewDefinition, `CREATE SCHEMA "app"`) || !strings.Contains(sch.NewDefinition, "COMMENT ON SCHEMA") {
+		t.Errorf("added schema: kind=%q old=%q new=%q", sch.ChangeKind, sch.OldDefinition, sch.NewDefinition)
+	}
+
+	dropped := changes(full, empty)
+	ext, sch = dropped[extKey], dropped[schKey]
+	if ext.ChangeKind != "drop" || ext.NewDefinition != "" || !strings.Contains(ext.OldDefinition, `CREATE EXTENSION IF NOT EXISTS "pg_trgm"`) {
+		t.Errorf("dropped extension: kind=%q old=%q new=%q", ext.ChangeKind, ext.OldDefinition, ext.NewDefinition)
+	}
+	if sch.ChangeKind != "drop" || sch.NewDefinition != "" || !strings.Contains(sch.OldDefinition, `CREATE SCHEMA "app"`) {
+		t.Errorf("dropped schema: kind=%q old=%q new=%q", sch.ChangeKind, sch.OldDefinition, sch.NewDefinition)
+	}
+}

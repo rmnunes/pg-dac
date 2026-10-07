@@ -65,6 +65,9 @@ production pilot completes without a correctness change.
 - identity → serial conversions order `CREATE SEQUENCE` after `DROP IDENTITY`.
 - A `CREATE OR REPLACE` of a view or function no longer re-grants its privileges.
 - Column-order warnings name only the misplaced columns.
+- Schemas and extensions have a definition in the plan like every other object, so the GUI's
+  Definition diff shows `CREATE SCHEMA` (with comment and grants) or `CREATE EXTENSION` (with the
+  installed version noted) instead of two empty panes.
 
 ## 0.1.0 — 2026-10-07
 
