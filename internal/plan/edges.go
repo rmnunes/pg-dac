@@ -92,7 +92,7 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 			diff.OpAlterColumnIdentity, diff.OpAlterColumnGenerated,
 			diff.OpSetColumnStorage, diff.OpSetColumnCompression, diff.OpSetColumnStats,
 			diff.OpSetTableLogged, diff.OpSetRelOptions, diff.OpSetComment,
-			diff.OpCreateIndex, diff.OpCreatePolicy, diff.OpEnableRLS,
+			diff.OpCreateIndex, diff.OpReplaceIndex, diff.OpCreatePolicy, diff.OpEnableRLS,
 			diff.OpValidateConstraint:
 			// Sub-object operations must follow their owning object's creation.
 			if c, ok := createByObj[op.Owner.Key()]; ok {

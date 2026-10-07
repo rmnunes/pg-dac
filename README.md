@@ -47,7 +47,7 @@ target ─┘
   dropping a table or function a view or trigger uses, replacing a view whose columns changed or a
   function whose result type changed — automatically drop the dependents first and recreate them
   afterwards, each statement annotated with why.
-- **SQL generation + safety** — renders lock-safe DDL: `CREATE INDEX CONCURRENTLY`, constraints
+- **SQL generation + safety** — renders lock-safe DDL: `CREATE INDEX CONCURRENTLY`, gap-free index rebuilds (a changed index is built concurrently under a temporary name, then swapped in), constraints
   added `NOT VALID` then `VALIDATE`d, scan-free `SET NOT NULL` on PG12+, etc. Each statement is
   tagged with typed hazards; data-loss operations are blocked unless `--allow-hazards` is given.
   Scripts and the executor run with `check_function_bodies = false` (as pg_dump does), so a

@@ -217,9 +217,11 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		}}, nil
 
 	case diff.OpCreateIndex:
-		return renderCreateIndex(op, opts), nil
+		return renderCreateIndex(op, opts, false), nil
 	case diff.OpDropIndex:
-		return renderDropIndex(op, opts), nil
+		return renderDropIndex(op, opts, false), nil
+	case diff.OpReplaceIndex:
+		return renderReplaceIndex(op, opts), nil
 
 	case diff.OpCreateView:
 		v := op.View

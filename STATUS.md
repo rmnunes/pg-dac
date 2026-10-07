@@ -33,6 +33,7 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Comparison semantics (SSDT options) | ✅ Routine bodies compared modulo whitespace (`--compare-whitespace`), comments optional (`--ignore-comments`), privileges optional (`--ignore-privileges`; revokes follow the drop policy), column order `ignore`/`warn`/`rebuild` (`--column-order`); defaults per project in `pgdac.yaml` `compare:` (WP5) |
 | Table rebuild (declared column order) | ✅ Opt-in: one atomic block creates the table in the declared order, copies rows, swaps; constraints, indexes, triggers, policies, privileges, owned sequences, foreign keys from other tables and dependent views are recreated; the drop policy decides what the target-only columns do (WP5) |
 | Sequence seeding | ✅ A column that gains an identity or a default on a new sequence on a populated table has the sequence seeded past `max(col)` (WP5) |
+| Index rebuild without a gap | ✅ A changed index is built `CONCURRENTLY` under a temporary name while the current one serves, then swapped in (drop old, rename); leftovers from interrupted runs are cleared; offline or partitioned: drop + create in one transaction (WP8) |
 | Refactorlog (renames without drop + create) | ✅ `refactorlog.json` + `pg-dac refactor rename`; applied as `ALTER … RENAME`, recorded per target in `pgdac.refactorlog` (WP4) |
 | Drift detection / `BlockWhenDriftDetected` | ✅ Every publish records a baseline in `pgdac.baseline`; `pg-dac drift` (exit 2 on drift), `pg-dac baseline`; publish refuses a drifted target unless `--allow-drift` (WP4) |
 | Lint | ✅ `pg-dac lint` — hazards by code/severity/object, exit 2 at or above `--fail-on` (WP4) |
@@ -250,6 +251,11 @@ a light editor in a dark shell). Of three options offered, "SSDT faithful" was c
 - **Notes panel** for the engine's warnings: collapsible from the status bar, per-note dismiss.
 - **Foundation**: native `<dialog>` modals (focus trap, Escape, focus return), contrast-checked
   tokens (≥ 4.5:1), 12 px minimum text, dark Monaco themes, Lucide icons, landmarks.
+- **Gap-free index rebuilds** (`diff.OpReplaceIndex`, `sqlgen.renderReplaceIndex`): a changed
+  index is built `CONCURRENTLY` under a deterministic temporary name, the old one is dropped and
+  the replacement renamed — the `REINDEX CONCURRENTLY` sequence — so queries never lose the
+  index and no `INDEX_DROPPED` risk is raised; a leftover from an interrupted run is cleared
+  first; offline or on a partitioned table the rebuild is drop + create in one transaction.
 - **Browser dev harness**: `pnpm dev` without Tauri routes IPC to an in-browser mock daemon
   replaying an anonymized real plan, for UX work and audits without a database.
 

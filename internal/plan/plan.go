@@ -143,7 +143,7 @@ func opPriority(op diff.Op) int {
 			return 160
 		}
 		return 150
-	case diff.OpCreateIndex:
+	case diff.OpCreateIndex, diff.OpReplaceIndex:
 		return 155
 	case diff.OpValidateConstraint:
 		return 165

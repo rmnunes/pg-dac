@@ -557,6 +557,7 @@ func diffIndexes(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromIdx,
 	for _, i := range fromIdx {
 		prevByName[i.Name] = i
 	}
+	taken := indexNamesTaken(table, fromIdx, toIdx)
 	curByName := map[string]*model.Index{}
 	for _, i := range toIdx {
 		curByName[i.Name] = i
@@ -568,8 +569,8 @@ func diffIndexes(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromIdx,
 			continue
 		}
 		if prev.Definition != idx.Definition {
-			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: prev, Replaces: true})
-			cs.add(Op{Type: OpCreateIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx, Replaces: true})
+			cs.add(Op{Type: OpReplaceIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx, PrevIndex: prev,
+				TempIndexName: tempIndexName(idx.Name, taken)})
 			continue
 		}
 		comment(cs, owner, "index", idx.Name, prev.Comment, idx.Comment)

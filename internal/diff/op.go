@@ -62,6 +62,10 @@ const (
 
 	OpCreateIndex OpType = "createIndex"
 	OpDropIndex   OpType = "dropIndex"
+	// OpReplaceIndex rebuilds an index whose definition changed (PostgreSQL
+	// cannot alter one in place); online it is built under a temporary name and
+	// swapped in so the table is never without it — see sqlgen.renderReplaceIndex.
+	OpReplaceIndex OpType = "replaceIndex"
 
 	OpCreateView    OpType = "createView" // emitted as CREATE OR REPLACE VIEW
 	OpDropView      OpType = "dropView"
@@ -191,10 +195,11 @@ type Op struct {
 	// dependent recreated around a blocking change). Rendered as a SQL comment.
 	Reason string
 
-	// Replaces marks the drop + create pair that stands in for an index whose
-	// definition changed (PostgreSQL cannot alter an index definition): the
-	// index is rebuilt, not removed for good.
-	Replaces bool
+	// PrevIndex (OpReplaceIndex) is the target's current definition of the index
+	// that Index replaces; TempIndexName is the deterministic, collision-free
+	// name the replacement is built under before it takes the original name.
+	PrevIndex     *model.Index
+	TempIndexName string
 }
 
 // EnumPosition places a new enum label relative to an existing one.

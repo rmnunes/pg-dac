@@ -2,7 +2,9 @@ package diff
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rmnunes/pg-dac/internal/model"
 )
@@ -193,10 +195,13 @@ func TestFunctionRecreateReason(t *testing.T) {
 }
 
 // TestDiff_IndexDefinitionChangeIsRebuild: PostgreSQL cannot alter an index
-// definition, so a changed index is a drop + create pair; both ops must say so
-// (Replaces) so the rendered statements and hazards read as a rebuild, not as
-// an index removed for good. A plain removal stays a plain drop.
+// definition, so a changed index is one OpReplaceIndex carrying both
+// definitions and the temporary name the rebuild runs under — never a bare
+// drop + create pair, which would read (and in the online path behave) as an
+// index removed and a new one built. A plain removal stays a plain drop.
 func TestDiff_IndexDefinitionChangeIsRebuild(t *testing.T) {
+	const oldDef = "CREATE INDEX t_a ON public.t USING btree (id)"
+	const newDef = "CREATE INDEX t_a ON public.t USING btree (id) WHERE (id > 0)"
 	withIndex := func(def string) *model.Database {
 		db := serialFixture(true, "")
 		tbl := db.Schemas[0].Tables[0]
@@ -205,32 +210,57 @@ func TestDiff_IndexDefinitionChangeIsRebuild(t *testing.T) {
 		}
 		return db
 	}
-	cs := Diff(withIndex("CREATE INDEX t_a ON public.t USING btree (id)"), withIndex("CREATE INDEX t_a ON public.t USING btree (id) WHERE (id > 0)"))
-	var drops, creates int
+	cs := Diff(withIndex(oldDef), withIndex(newDef))
+	var replaces int
 	for _, op := range cs.Ops {
 		switch op.Type {
 		case OpDropIndex, OpCreateIndex:
-			if op.Sub != "t_a" || !op.Replaces {
-				t.Errorf("%s %s: want Replaces on the rebuild pair, got %+v", op.Type, op.Sub, op.Replaces)
+			t.Errorf("changed index must not be a drop/create pair: %v", opSummary(cs))
+		case OpReplaceIndex:
+			replaces++
+			if op.Sub != "t_a" || op.PrevIndex == nil || op.PrevIndex.Definition != oldDef || op.Index.Definition != newDef {
+				t.Errorf("replace op payload wrong: sub=%q prev=%+v new=%+v", op.Sub, op.PrevIndex, op.Index)
 			}
-			if op.Type == OpDropIndex {
-				drops++
-			} else {
-				creates++
+			if op.TempIndexName != "t_a_pgdac_new" {
+				t.Errorf("temp name = %q, want t_a_pgdac_new", op.TempIndexName)
 			}
 		}
 	}
-	if drops != 1 || creates != 1 {
-		t.Errorf("changed index: want one drop and one create, got %v", opSummary(cs))
+	if replaces != 1 {
+		t.Errorf("changed index: want one replace op, got %v", opSummary(cs))
 	}
 
-	cs = Diff(withIndex("CREATE INDEX t_a ON public.t USING btree (id)"), withIndex(""))
-	for _, op := range cs.Ops {
-		if op.Type == OpDropIndex && op.Replaces {
-			t.Errorf("a removed index must not be marked as a rebuild: %v", opSummary(cs))
-		}
+	cs = Diff(withIndex(oldDef), withIndex(""))
+	if !hasOp(cs, OpDropIndex, "t") || hasOp(cs, OpReplaceIndex, "") {
+		t.Errorf("removed index: want a plain drop, got %v", opSummary(cs))
 	}
-	if !hasOp(cs, OpDropIndex, "t") {
-		t.Errorf("removed index: want a drop, got %v", opSummary(cs))
+}
+
+// TestTempIndexName: the rebuild name is deterministic, fits PostgreSQL's
+// 63-byte identifier limit, stays distinct for long names that share a prefix,
+// and steps aside from a name already in use.
+func TestTempIndexName(t *testing.T) {
+	if got := tempIndexName("ix_orders_customer", nil); got != "ix_orders_customer_pgdac_new" {
+		t.Errorf("short name: got %q", got)
+	}
+	long1 := "ix_" + strings.Repeat("a", 55) + "_one"
+	long2 := "ix_" + strings.Repeat("a", 55) + "_two"
+	n1, n2 := tempIndexName(long1, nil), tempIndexName(long2, nil)
+	if len(n1) > 63 || len(n2) > 63 {
+		t.Errorf("too long: %d %d", len(n1), len(n2))
+	}
+	if n1 == n2 {
+		t.Errorf("long names sharing a prefix collided: %q", n1)
+	}
+	if n1 != tempIndexName(long1, nil) {
+		t.Errorf("not deterministic")
+	}
+	taken := map[string]bool{"ix_a_pgdac_new": true}
+	if got := tempIndexName("ix_a", taken); got != "ix_a_2_pgdac_new" {
+		t.Errorf("collision: got %q", got)
+	}
+	multi := strings.Repeat("ü", 40) // 80 bytes, 40 runes
+	if got := tempIndexName(multi, nil); len(got) > 63 || !utf8.ValidString(got) {
+		t.Errorf("multibyte truncation broke the identifier: %q (%d bytes)", got, len(got))
 	}
 }

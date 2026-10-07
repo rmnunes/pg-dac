@@ -221,19 +221,22 @@ func renderAddConstraint(op diff.Op, opts Options) []Statement {
 	return append([]Statement{{SQL: base + ";", Transactional: true}}, comment...)
 }
 
-// renderCreateIndex renders a new index, or (op.Replaces) the rebuild of an
-// index whose definition changed; the note and the hazard say which, so a
-// reader does not take the rebuild for a new index.
-func renderCreateIndex(op diff.Op, opts Options) []Statement {
+// renderCreateIndex renders a new index; rebuild marks the second half of an
+// offline rebuild (see renderReplaceIndex), so the note and the hazard say so
+// and a reader does not take the rebuild for a new index.
+func renderCreateIndex(op diff.Op, opts Options, rebuild bool) []Statement {
 	def := strings.TrimRight(op.Index.Definition, ";")
 	comment := commentOn("INDEX", model.QualifiedName(op.Owner.Schema, op.Index.Name), op.Index.Comment)
 	build := safety.New(safety.IndexBuild, "builds an index")
 	note := ""
-	if op.Replaces {
+	if rebuild {
 		build = safety.New(safety.IndexBuild, "rebuilds the index with its new definition")
 		note = "definition changed: rebuilt"
 	}
-	if opts.Online {
+	if opts.Online && partitionedOwner(op) {
+		// CREATE INDEX CONCURRENTLY is not supported on partitioned tables.
+		note = joinNotes(note, "partitioned table: CONCURRENTLY is not supported, built under a SHARE lock")
+	} else if opts.Online {
 		n := "CONCURRENTLY: builds without blocking writes; cannot run inside a transaction"
 		if note != "" {
 			n = note + "; " + n
@@ -256,18 +259,21 @@ func renderCreateIndex(op diff.Op, opts Options) []Statement {
 	}}, comment...)
 }
 
-// renderDropIndex renders the removal of an index, or (op.Replaces) the first
-// half of a rebuild: the index is gone until the CREATE that follows completes,
-// which is the risk the hazard names.
-func renderDropIndex(op diff.Op, opts Options) []Statement {
+// renderDropIndex renders the removal of an index; rebuild marks the first
+// half of an offline rebuild (see renderReplaceIndex), where the index is gone
+// only until the CREATE in the same transaction completes.
+func renderDropIndex(op diff.Op, opts Options, rebuild bool) []Statement {
 	name := model.QualifiedName(op.Owner.Schema, op.Index.Name)
 	dropped := safety.New(safety.IndexDropped, "removes an index")
 	note := ""
-	if op.Replaces {
-		dropped = safety.New(safety.IndexDropped, "drops the index to rebuild it with its new definition; queries go without it until the rebuild completes")
+	if rebuild {
+		dropped = safety.New(safety.IndexDropped, "drops the index to rebuild it with its new definition in the same transaction")
 		note = "definition changed: dropped, then rebuilt"
 	}
-	if opts.Online {
+	if opts.Online && partitionedOwner(op) {
+		// DROP INDEX CONCURRENTLY is not supported on partitioned indexes.
+		note = joinNotes(note, "partitioned table: CONCURRENTLY is not supported")
+	} else if opts.Online {
 		return []Statement{{
 			SQL:           "DROP INDEX CONCURRENTLY " + name + ";",
 			Transactional: false,
@@ -284,6 +290,107 @@ func renderDropIndex(op diff.Op, opts Options) []Statement {
 			safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table"),
 		},
 	}}
+}
+
+// renderReplaceIndex rebuilds an index whose definition changed.
+//
+// Online, the replacement is built CONCURRENTLY under a temporary name while
+// the current index keeps serving queries; then the old index is dropped and
+// the replacement takes its name. That is the sequence REINDEX CONCURRENTLY
+// performs internally and the one lock-safe migration practice recommends, so
+// the table is never without the index and no INDEX_DROPPED risk is raised.
+// CREATE INDEX CONCURRENTLY leaves an INVALID index behind when it fails, so a
+// leftover from an interrupted earlier run is cleared first; the old index is
+// dropped IF EXISTS because a column drop earlier in the same plan may already
+// have taken it. The rename needs only SHARE UPDATE EXCLUSIVE.
+//
+// Offline, or on a partitioned table (CONCURRENTLY is not supported there), the
+// index is dropped and recreated inside the transaction, where other sessions
+// never observe the gap.
+func renderReplaceIndex(op diff.Op, opts Options) []Statement {
+	if !opts.Online || partitionedOwner(op) {
+		drop := op
+		drop.Index = op.PrevIndex
+		return append(renderDropIndex(drop, opts, true), renderCreateIndex(op, opts, true)...)
+	}
+	final := model.QualifiedName(op.Owner.Schema, op.Index.Name)
+	tmp := model.QualifiedName(op.Owner.Schema, op.TempIndexName)
+	def := strings.TrimRight(op.Index.Definition, ";")
+	stmts := []Statement{
+		{
+			SQL:           "DROP INDEX CONCURRENTLY IF EXISTS " + tmp + ";",
+			Transactional: false,
+			Note:          "clears a leftover from an interrupted earlier rebuild, if any",
+		},
+		{
+			SQL:           concurrentIndexDef(renameIndexDef(def, op.TempIndexName)) + ";",
+			Transactional: false,
+			Note:          "definition changed: rebuilt under a temporary name while the current index stays in use; CONCURRENTLY cannot run inside a transaction",
+			Hazards:       []safety.Hazard{safety.New(safety.IndexBuild, "rebuilds the index with its new definition; the current index serves queries meanwhile")},
+		},
+		{
+			SQL:           "DROP INDEX CONCURRENTLY IF EXISTS " + final + ";",
+			Transactional: false,
+			Note:          "the rebuilt index is valid and in use; the old definition goes",
+		},
+		{
+			SQL:           "ALTER INDEX " + tmp + " RENAME TO " + model.QuoteIdent(op.Index.Name) + ";",
+			Transactional: true,
+			Note:          "takes the original name (SHARE UPDATE EXCLUSIVE, brief)",
+		},
+	}
+	return append(stmts, commentOn("INDEX", final, op.Index.Comment)...)
+}
+
+// partitionedOwner reports whether the index belongs to a partitioned table,
+// on which CREATE/DROP INDEX CONCURRENTLY are not supported.
+func partitionedOwner(op diff.Op) bool {
+	return op.Table != nil && op.Table.PartitionKey != ""
+}
+
+func joinNotes(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + "; " + b
+}
+
+// renameIndexDef rewrites the index name in a pg_get_indexdef statement
+// ("CREATE [UNIQUE] INDEX name ON ..."), where the name may be quoted.
+func renameIndexDef(def, newName string) string {
+	for _, head := range []string{"CREATE UNIQUE INDEX ", "CREATE INDEX "} {
+		if !strings.HasPrefix(def, head) {
+			continue
+		}
+		rest := def[len(head):]
+		nameLen := 0
+		if strings.HasPrefix(rest, `"`) {
+			// A quoted identifier ends at the first quote not doubled.
+			i := 1
+			for i < len(rest) {
+				if rest[i] == '"' {
+					if i+1 < len(rest) && rest[i+1] == '"' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			nameLen = i
+		} else {
+			nameLen = strings.Index(rest, " ")
+			if nameLen < 0 {
+				return def
+			}
+		}
+		return head + model.QuoteIdent(newName) + rest[nameLen:]
+	}
+	return def
 }
 
 func renderCreateSequence(s *model.Sequence) string {

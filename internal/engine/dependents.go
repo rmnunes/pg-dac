@@ -55,7 +55,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 			trigDropped[colKey(op.Owner, op.Sub)] = true
 		case diff.OpCreateTrigger:
 			trigCreated[colKey(op.Owner, op.Sub)] = true
-		case diff.OpCreateIndex:
+		case diff.OpCreateIndex, diff.OpReplaceIndex:
 			idxCreated[colKey(op.Owner, op.Sub)] = true
 		}
 	}
@@ -210,6 +210,13 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		case diff.OpDropIndex, diff.OpDropTrigger, diff.OpDropConstraint, diff.OpDropPolicy:
 			if dropped[op.Owner.Key()] && queued[op.Owner.Key()] && isRelationRecreatedHere(op.Owner, added) {
 				continue
+			}
+		case diff.OpReplaceIndex:
+			// The relation is recreated here, so its old index is gone with it: the
+			// new definition is created afresh instead of swapped in.
+			if dropped[op.Owner.Key()] && queued[op.Owner.Key()] && isRelationRecreatedHere(op.Owner, added) {
+				op = diff.Op{Type: diff.OpCreateIndex, Owner: op.Owner, Sub: op.Sub, Table: op.Table, Index: op.Index,
+					Reason: "the relation is recreated; the index is created with its new definition"}
 			}
 		}
 		out.Ops = append(out.Ops, op)

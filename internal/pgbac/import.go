@@ -198,7 +198,7 @@ func splitPhases(res *engine.Result) (pre, post []sqlgen.Statement) {
 	var refresh []sqlgen.Statement
 	for _, g := range res.Groups {
 		switch g.Op.Type {
-		case diff.OpAddConstraint, diff.OpValidateConstraint, diff.OpCreateIndex,
+		case diff.OpAddConstraint, diff.OpValidateConstraint, diff.OpCreateIndex, diff.OpReplaceIndex,
 			diff.OpCreateTrigger, diff.OpSetTriggerEnabled, diff.OpCreatePolicy, diff.OpEnableRLS, diff.OpDisableRLS:
 			post = append(post, g.Statements...)
 		case diff.OpCreateMatView:

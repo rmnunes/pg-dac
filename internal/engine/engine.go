@@ -179,7 +179,7 @@ func filterByType(cs *diff.ChangeSet, opts Options) *diff.ChangeSet {
 // Options.ExcludeObjectTypes.
 func objectTypeOf(op diff.Op) string {
 	switch op.Type {
-	case diff.OpCreateIndex, diff.OpDropIndex:
+	case diff.OpCreateIndex, diff.OpDropIndex, diff.OpReplaceIndex:
 		return "index"
 	case diff.OpAddConstraint, diff.OpDropConstraint, diff.OpValidateConstraint:
 		return "constraint"
@@ -256,7 +256,7 @@ func identity(op diff.Op) string {
 	switch op.Type {
 	case diff.OpAddConstraint, diff.OpDropConstraint:
 		return op.Owner.Key() + "#c#" + op.Sub
-	case diff.OpCreateIndex, diff.OpDropIndex:
+	case diff.OpCreateIndex, diff.OpDropIndex, diff.OpReplaceIndex:
 		return op.Owner.Key() + "#i#" + op.Sub
 	case diff.OpAddColumn, diff.OpDropColumn:
 		return op.Owner.Key() + "#col#" + op.Sub
@@ -277,7 +277,7 @@ func createdIdentities(cs *diff.ChangeSet) map[string]struct{} {
 		switch op.Type {
 		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView,
 			diff.OpCreateEnum, diff.OpCreateCollation, diff.OpCreateSequence, diff.OpCreateSchema, diff.OpCreateExtension,
-			diff.OpAddConstraint, diff.OpCreateIndex, diff.OpAddColumn,
+			diff.OpAddConstraint, diff.OpCreateIndex, diff.OpReplaceIndex, diff.OpAddColumn,
 			diff.OpCreateFunction, diff.OpCreateTrigger, diff.OpCreatePolicy:
 			m[identity(op)] = struct{}{}
 		}

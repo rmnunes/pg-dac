@@ -48,6 +48,13 @@ production pilot completes without a correctness change.
   (`pnpm dev` without Tauri) replays a real plan through a mock daemon.
 
 ### Changed
+- **Gap-free index rebuilds.** An index whose definition changed is rebuilt the way
+  `REINDEX CONCURRENTLY` works: built `CONCURRENTLY` under a temporary name while the current
+  index keeps serving queries, then the old one is dropped and the replacement takes its name
+  (SHARE UPDATE EXCLUSIVE only). The table is never without the index and no `INDEX_DROPPED`
+  risk is raised; a leftover from an interrupted run is cleared first. Offline, or on a
+  partitioned table, it is dropped and recreated inside the transaction and the statements say
+  they are a rebuild. The GUI shows further risk types on a change as "+N risks".
 - Plan format 2, artifact format 4 (models carry grants). Older artifacts open with a warning.
 - Privilege warnings are gone (privileges are managed); default privileges, view column
   privileges and database-level grants are reported as unmanaged.
@@ -58,10 +65,6 @@ production pilot completes without a correctness change.
 - identity → serial conversions order `CREATE SEQUENCE` after `DROP IDENTITY`.
 - A `CREATE OR REPLACE` of a view or function no longer re-grants its privileges.
 - Column-order warnings name only the misplaced columns.
-- An index whose definition changed is reported as a rebuild: the drop and the create carry a
-  "definition changed" note and their hazards say the index is dropped to be rebuilt, so the
-  `INDEX_DROPPED` risk is not read as an index removed for good. The GUI shows additional risk
-  types on a change as "+N risks" rather than a bare "+N".
 
 ## 0.1.0 — 2026-10-07
 

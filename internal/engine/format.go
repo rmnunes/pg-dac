@@ -294,7 +294,7 @@ func object(op diff.Op) string {
 		kind = "column"
 	case diff.OpAddConstraint, diff.OpDropConstraint, diff.OpValidateConstraint:
 		kind = "constraint"
-	case diff.OpCreateIndex, diff.OpDropIndex:
+	case diff.OpCreateIndex, diff.OpDropIndex, diff.OpReplaceIndex:
 		kind = "index"
 	default:
 		kind = "object"

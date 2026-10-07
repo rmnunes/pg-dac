@@ -50,13 +50,14 @@ export const HAZARDS: Record<string, HazardInfo> = {
   INDEX_BUILD: {
     title: "Builds an index",
     short: "index build",
-    description: "CPU and I/O heavy, and long-running on a large table. Online mode builds it CONCURRENTLY, outside a transaction.",
+    description:
+      "CPU and I/O heavy, and long-running on a large table. Online mode builds it CONCURRENTLY, outside a transaction; a changed index is rebuilt under a temporary name while the current one keeps serving queries, then swapped in.",
   },
   INDEX_DROPPED: {
     title: "Drops an index",
     short: "index dropped",
     description:
-      "Queries that relied on the index may slow down. When the same index is created again in this change, its definition changed and it is being rebuilt: it is missing only until the rebuild completes.",
+      "Queries that relied on the index may slow down. An index whose definition changed is not dropped first: online it is rebuilt under a temporary name and swapped in; offline it is dropped and recreated inside one transaction.",
   },
   TABLE_REWRITE: {
     title: "Rewrites the table",
