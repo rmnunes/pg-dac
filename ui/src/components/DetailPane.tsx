@@ -143,6 +143,7 @@ export function DetailPane() {
                     {stmts.map((s, i) => (
                       <li key={i} title={s.sql}>
                         {firstLine(s.sql)}
+                        {s.note ? <span className="muted"> · {s.note}</span> : null}
                       </li>
                     ))}
                   </ul>

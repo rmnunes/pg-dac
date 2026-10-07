@@ -568,8 +568,8 @@ func diffIndexes(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromIdx,
 			continue
 		}
 		if prev.Definition != idx.Definition {
-			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: prev})
-			cs.add(Op{Type: OpCreateIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx})
+			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: prev, Replaces: true})
+			cs.add(Op{Type: OpCreateIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx, Replaces: true})
 			continue
 		}
 		comment(cs, owner, "index", idx.Name, prev.Comment, idx.Comment)

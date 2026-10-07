@@ -82,6 +82,7 @@ var scenarios = []scenario{
 	{"matview-with-index-from-empty", ``, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, ""},
 	{"matview-index-added", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE UNIQUE INDEX mv_a_key ON mv(a);`, ok, ""},
 	{"matview-index-survives-recreate", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, `CREATE TABLE t(a bigint); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, ""},
+	{"index-definition-changed", `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a);`, `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a) WHERE b IS NOT NULL;`, ok, "the index is dropped and rebuilt with the new predicate"},
 	{"view-with-check-option-from-empty", ``, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH CHECK OPTION;`, ok, ""},
 	{"view-check-option-added", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0;`, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH LOCAL CHECK OPTION;`, ok, ""},
 	{"view-security-barrier-added", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE VIEW v WITH (security_barrier = true) AS SELECT a FROM t;`, ok, ""},

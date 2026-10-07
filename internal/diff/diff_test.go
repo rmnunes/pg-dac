@@ -191,3 +191,46 @@ func TestFunctionRecreateReason(t *testing.T) {
 		t.Errorf("unknown return type (older artifact) must not force a recreate: %q", r)
 	}
 }
+
+// TestDiff_IndexDefinitionChangeIsRebuild: PostgreSQL cannot alter an index
+// definition, so a changed index is a drop + create pair; both ops must say so
+// (Replaces) so the rendered statements and hazards read as a rebuild, not as
+// an index removed for good. A plain removal stays a plain drop.
+func TestDiff_IndexDefinitionChangeIsRebuild(t *testing.T) {
+	withIndex := func(def string) *model.Database {
+		db := serialFixture(true, "")
+		tbl := db.Schemas[0].Tables[0]
+		if def != "" {
+			tbl.Indexes = append(tbl.Indexes, &model.Index{Name: "t_a", Table: tbl.Name, Definition: def})
+		}
+		return db
+	}
+	cs := Diff(withIndex("CREATE INDEX t_a ON public.t USING btree (id)"), withIndex("CREATE INDEX t_a ON public.t USING btree (id) WHERE (id > 0)"))
+	var drops, creates int
+	for _, op := range cs.Ops {
+		switch op.Type {
+		case OpDropIndex, OpCreateIndex:
+			if op.Sub != "t_a" || !op.Replaces {
+				t.Errorf("%s %s: want Replaces on the rebuild pair, got %+v", op.Type, op.Sub, op.Replaces)
+			}
+			if op.Type == OpDropIndex {
+				drops++
+			} else {
+				creates++
+			}
+		}
+	}
+	if drops != 1 || creates != 1 {
+		t.Errorf("changed index: want one drop and one create, got %v", opSummary(cs))
+	}
+
+	cs = Diff(withIndex("CREATE INDEX t_a ON public.t USING btree (id)"), withIndex(""))
+	for _, op := range cs.Ops {
+		if op.Type == OpDropIndex && op.Replaces {
+			t.Errorf("a removed index must not be marked as a rebuild: %v", opSummary(cs))
+		}
+	}
+	if !hasOp(cs, OpDropIndex, "t") {
+		t.Errorf("removed index: want a drop, got %v", opSummary(cs))
+	}
+}

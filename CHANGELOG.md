@@ -58,6 +58,10 @@ production pilot completes without a correctness change.
 - identity → serial conversions order `CREATE SEQUENCE` after `DROP IDENTITY`.
 - A `CREATE OR REPLACE` of a view or function no longer re-grants its privileges.
 - Column-order warnings name only the misplaced columns.
+- An index whose definition changed is reported as a rebuild: the drop and the create carry a
+  "definition changed" note and their hazards say the index is dropped to be rebuilt, so the
+  `INDEX_DROPPED` risk is not read as an index removed for good. The GUI shows additional risk
+  types on a change as "+N risks" rather than a bare "+N".
 
 ## 0.1.0 — 2026-10-07
 

@@ -221,41 +221,66 @@ func renderAddConstraint(op diff.Op, opts Options) []Statement {
 	return append([]Statement{{SQL: base + ";", Transactional: true}}, comment...)
 }
 
+// renderCreateIndex renders a new index, or (op.Replaces) the rebuild of an
+// index whose definition changed; the note and the hazard say which, so a
+// reader does not take the rebuild for a new index.
 func renderCreateIndex(op diff.Op, opts Options) []Statement {
 	def := strings.TrimRight(op.Index.Definition, ";")
 	comment := commentOn("INDEX", model.QualifiedName(op.Owner.Schema, op.Index.Name), op.Index.Comment)
+	build := safety.New(safety.IndexBuild, "builds an index")
+	note := ""
+	if op.Replaces {
+		build = safety.New(safety.IndexBuild, "rebuilds the index with its new definition")
+		note = "definition changed: rebuilt"
+	}
 	if opts.Online {
+		n := "CONCURRENTLY: builds without blocking writes; cannot run inside a transaction"
+		if note != "" {
+			n = note + "; " + n
+		}
 		return append([]Statement{{
 			SQL:           concurrentIndexDef(def) + ";",
 			Transactional: false,
-			Note:          "CONCURRENTLY: builds without blocking writes; cannot run inside a transaction",
-			Hazards:       []safety.Hazard{safety.New(safety.IndexBuild, "builds an index")},
+			Note:          n,
+			Hazards:       []safety.Hazard{build},
 		}}, comment...)
 	}
 	return append([]Statement{{
 		SQL:           def + ";",
 		Transactional: true,
+		Note:          note,
 		Hazards: []safety.Hazard{
 			safety.New(safety.ShareLock, "blocks writes on the table while the index builds"),
-			safety.New(safety.IndexBuild, "builds an index"),
+			build,
 		},
 	}}, comment...)
 }
 
+// renderDropIndex renders the removal of an index, or (op.Replaces) the first
+// half of a rebuild: the index is gone until the CREATE that follows completes,
+// which is the risk the hazard names.
 func renderDropIndex(op diff.Op, opts Options) []Statement {
 	name := model.QualifiedName(op.Owner.Schema, op.Index.Name)
+	dropped := safety.New(safety.IndexDropped, "removes an index")
+	note := ""
+	if op.Replaces {
+		dropped = safety.New(safety.IndexDropped, "drops the index to rebuild it with its new definition; queries go without it until the rebuild completes")
+		note = "definition changed: dropped, then rebuilt"
+	}
 	if opts.Online {
 		return []Statement{{
 			SQL:           "DROP INDEX CONCURRENTLY " + name + ";",
 			Transactional: false,
-			Hazards:       []safety.Hazard{safety.New(safety.IndexDropped, "removes an index")},
+			Note:          note,
+			Hazards:       []safety.Hazard{dropped},
 		}}
 	}
 	return []Statement{{
 		SQL:           "DROP INDEX " + name + ";",
 		Transactional: true,
+		Note:          note,
 		Hazards: []safety.Hazard{
-			safety.New(safety.IndexDropped, "removes an index"),
+			dropped,
 			safety.New(safety.AccessExclusiveLock, "takes ACCESS EXCLUSIVE on the table"),
 		},
 	}}

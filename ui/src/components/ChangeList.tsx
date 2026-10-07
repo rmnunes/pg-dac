@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react";
 
 import { useStore } from "../state/store";
 import type { ChangeKind, ObjectChange } from "../ipc/types";
-import { KIND_ORDER, hazardInfo, kindGlyph, kindLabel, objectName, topHazard } from "../vocab";
+import { KIND_ORDER, hazardInfo, kindGlyph, kindLabel, objectName, sortedHazards, topHazard } from "../vocab";
 
 // The change list, grouped by action (Drop / Change / Add) like SSDT's results
 // grid. Groups collapse, carry a tri-state include checkbox, and the whole list
@@ -263,9 +263,13 @@ export function ChangeList() {
                     {c.name}
                   </span>
                   {top && (
-                    <span className={"badge sev-" + (top.severity || "info")} title={hazardInfo(top.type).title + (more > 0 ? ` and ${more} more` : "")}>
+                    <span className={"badge sev-" + (top.severity || "info")} title={hazardInfo(top.type).title}>
                       {hazardInfo(top.type).short}
-                      {more > 0 ? ` +${more}` : ""}
+                    </span>
+                  )}
+                  {more > 0 && (
+                    <span className="badge sev-info" title={"Also: " + sortedHazards(c).slice(1).map((h) => hazardInfo(h.type).title).join(", ")}>
+                      +{more} risk{more === 1 ? "" : "s"}
                     </span>
                   )}
                 </div>

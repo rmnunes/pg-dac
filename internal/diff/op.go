@@ -190,6 +190,11 @@ type Op struct {
 	// a view recreated because CREATE OR REPLACE cannot drop its columns, or a
 	// dependent recreated around a blocking change). Rendered as a SQL comment.
 	Reason string
+
+	// Replaces marks the drop + create pair that stands in for an index whose
+	// definition changed (PostgreSQL cannot alter an index definition): the
+	// index is rebuilt, not removed for good.
+	Replaces bool
 }
 
 // EnumPosition places a new enum label relative to an existing one.

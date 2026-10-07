@@ -55,7 +55,8 @@ export const HAZARDS: Record<string, HazardInfo> = {
   INDEX_DROPPED: {
     title: "Drops an index",
     short: "index dropped",
-    description: "Queries that relied on the index may slow down.",
+    description:
+      "Queries that relied on the index may slow down. When the same index is created again in this change, its definition changed and it is being rebuilt: it is missing only until the rebuild completes.",
   },
   TABLE_REWRITE: {
     title: "Rewrites the table",
