@@ -396,10 +396,13 @@ pg-dac lint    --from "postgres://…/db" --to ./project --fail-on error
 ```bash
 # build the sidecar for your Rust target triple, then run the app
 $triple = (rustc -Vv | Select-String '^host:').ToString().Split(' ')[1]
-go build -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
+$sha = git rev-parse --short HEAD
+go build -ldflags "-X main.version=0.9.0-dev+$sha" -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
 cd ui && pnpm install && pnpm tauri dev
 ```
-Restart `pnpm tauri dev` after rebuilding the sidecar so it picks up engine changes.
+Restart `pnpm tauri dev` after rebuilding the sidecar: the app runs the copy Tauri placed in
+`src-tauri/target/debug/`, not the file in `binaries/`. The status bar shows the running engine as
+`0.9.0-dev+<commit>` so a stale sidecar is obvious.
 
 **Tests:** `go test -short ./...` (no DB) · `go test -p 1 ./...` (+ embedded-Postgres integration:
 bootstrap gate, scenario matrix, introspection invariants).

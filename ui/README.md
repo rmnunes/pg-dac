@@ -30,12 +30,18 @@ built into `src-tauri/binaries/` with the Rust target-triple suffix:
 ```powershell
 # from the repo root: build the sidecar for your target triple
 $triple = (rustc -Vv | Select-String '^host:').ToString().Split(' ')[1]
-go build -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
+$sha = git rev-parse --short HEAD
+go build -ldflags "-X main.version=0.9.0-dev+$sha" -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
 
 cd ui
 pnpm install
 pnpm tauri dev      # launches the app; it spawns `pg-dac serve` automatically
 ```
+
+The app runs the copy of the sidecar that Tauri places next to its own binary in
+`src-tauri/target/debug/`, so a sidecar rebuilt while the app is running is picked up only after
+`pnpm tauri dev` is restarted. The status bar shows which engine is running: a dev build reports
+`0.9.0-dev+<commit>`, so a stale sidecar is visible at a glance.
 
 The first compare against a project/`.sql`/`.pgdac` source downloads the embedded
 PostgreSQL binaries once (cached afterward), then stays warm for the session.

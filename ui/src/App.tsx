@@ -61,7 +61,9 @@ export default function App() {
           return;
         }
         const pinned = pinnedVersion.trim();
-        const mismatch = h.version.replace(/-dev$/, "").replace(/ \(.*\)$/, "") !== pinned;
+        // A dev engine reports "<version>-dev+<commit>" (see ui/README.md); only
+        // the release part has to match the pin.
+        const mismatch = h.version.replace(/ \(.*\)$/, "").replace(/-dev(\+[0-9a-f]+)?$/, "") !== pinned;
         setEngine({ version: h.version, note: mismatch ? `Engine ${h.version} differs from the UI's pinned ${pinned}; results may differ from a release build.` : undefined });
       })
       .catch((e) => setEngine({ note: `pg-dac engine not reachable: ${String(e)}` }));
