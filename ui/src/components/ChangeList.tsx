@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react";
 
 import { useStore } from "../state/store";
 import type { ChangeKind, ObjectChange } from "../ipc/types";
-import { KIND_ORDER, hazardInfo, kindGlyph, kindLabel, objectName, sortedHazards, topHazard } from "../vocab";
+import { KIND_ORDER, hazardInfo, kindGlyph, kindLabel, objectName, sortedHazards, topHazard, unchangedText } from "../vocab";
 
 // The change list, grouped by action (Drop / Change / Add) like SSDT's results
 // grid. Groups collapse, carry a tri-state include checkbox, and the whole list
@@ -262,6 +262,11 @@ export function ChangeList() {
                     {c.schema ? <span className="schema">{c.schema}.</span> : null}
                     {c.name}
                   </span>
+                  {unchangedText(c) && (
+                    <span className="badge sev-info" title={c.reason || "The definition text is unchanged; see the Generated SQL tab"}>
+                      {c.reason ? "recreated" : "no text change"}
+                    </span>
+                  )}
                   {top && (
                     <span className={"badge sev-" + (top.severity || "info")} title={hazardInfo(top.type).title}>
                       {hazardInfo(top.type).short}

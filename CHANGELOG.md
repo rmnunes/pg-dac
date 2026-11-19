@@ -69,6 +69,10 @@ production pilot completes without a correctness change.
   refused or reset dial) three times with a short backoff before giving up, so a split-DNS
   resolver that answers the first query for a private host with "no such host" no longer fails
   the first compare. Authentication and protocol errors are still returned at once.
+- Each plan object carries `reason`, the engine's explanation when it touches an object beyond the
+  plain diff (a view recreated because a column it reads changes type, a rebuild, an object kept).
+  The GUI marks such objects "recreated" in the list and the Definition tab says why, instead of
+  showing two identical texts with no explanation.
 - Schemas and extensions have a definition in the plan like every other object, so the GUI's
   Definition diff shows `CREATE SCHEMA` (with comment and grants) or `CREATE EXTENSION` (with the
   installed version noted) instead of two empty panes.

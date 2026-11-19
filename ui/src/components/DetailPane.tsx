@@ -4,7 +4,7 @@ import { AlertTriangle, Info, OctagonAlert } from "lucide-react";
 
 import { THEME } from "../monaco-setup";
 import { useStore } from "../state/store";
-import { hazardInfo, kindLabel, objectName, sortedHazards } from "../vocab";
+import { hazardInfo, kindLabel, objectName, sortedHazards, unchangedText } from "../vocab";
 
 // automaticLayout: the editors stay mounted while hidden (switching tabs or
 // changes must not dispose Monaco models — the DiffEditor wrapper disposes
@@ -74,6 +74,18 @@ export function DetailPane() {
           ))}
           <span className="detail-title">
             <b className={"kind-" + change.changeKind}>{kindLabel(change.changeKind)}</b> {change.objectType} <b>{objectName(change)}</b>
+          </span>
+        </div>
+      )}
+
+      {!empty && tab === "diff" && unchangedText(change) && (
+        <div className="info-strip" role="note">
+          <Info className="icon" size={14} aria-hidden="true" />
+          <span>
+            <b>Definition unchanged.</b>{" "}
+            {change.reason
+              ? `This object is ${change.reason}.`
+              : "The change is in an attribute the definition text does not show; see the Generated SQL tab."}
           </span>
         </div>
       )}

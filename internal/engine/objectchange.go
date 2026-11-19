@@ -42,6 +42,12 @@ type ObjectChange struct {
 	Statements    []sqlgen.Statement `json:"statements"`
 	Hazards       []safety.Hazard    `json:"hazards,omitempty"` // distinct, by type
 	Severity      safety.Severity    `json:"severity,omitempty"`
+	// Reason says why the engine touches an object beyond the plain diff — a
+	// dependent recreated because what it reads changes, a table rebuilt for
+	// its column order, an object kept across a rebuild — so a change whose
+	// definition text is unchanged can explain itself. Distinct op reasons,
+	// joined with "; ".
+	Reason string `json:"reason,omitempty"`
 }
 
 // HazardCount aggregates one hazard code across all changed objects.
@@ -93,8 +99,12 @@ func (r *Result) ObjectChanges() []ObjectChange {
 
 	var order []string
 	byKey := map[string]*ObjectChange{}
+	reasons := map[string][]string{}
 	for _, g := range r.Groups {
 		key := g.Op.Owner.Key()
+		if reason := g.Op.Reason; reason != "" && !containsString(reasons[key], reason) {
+			reasons[key] = append(reasons[key], reason)
+		}
 		oc, ok := byKey[key]
 		if !ok {
 			oc = &ObjectChange{
@@ -114,6 +124,7 @@ func (r *Result) ObjectChanges() []ObjectChange {
 	for _, key := range order {
 		oc := byKey[key]
 		oc.Hazards, oc.Severity = aggregateHazards(oc.Statements)
+		oc.Reason = strings.Join(reasons[key], "; ")
 		ref := model.ObjRef{Kind: oc.ObjectType, Schema: oc.Schema, Name: oc.Name}
 		switch oc.ChangeKind {
 		case "add":
@@ -182,6 +193,15 @@ func maxSeverity(a, b safety.Severity) safety.Severity {
 }
 
 // presentKeys returns the set of top-level object keys present in a model.
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func presentKeys(db *model.Database) map[string]model.ObjKind {
 	m := map[string]model.ObjKind{}
 	if db == nil {

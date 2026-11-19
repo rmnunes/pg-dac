@@ -125,3 +125,10 @@ export function kindLabel(k: ChangeKind): string {
 export const kindGlyph = (k: ChangeKind): string => (k === "add" ? "+" : k === "drop" ? "−" : "~");
 
 export const objectName = (c: { schema?: string; name: string }): string => (c.schema ? c.schema + "." : "") + c.name;
+
+/**
+ * A change whose definition text is identical on both sides: the object is
+ * touched for another reason (recreated because something it depends on
+ * changes, or an attribute the definition does not show).
+ */
+export const unchangedText = (c: ObjectChange): boolean => c.changeKind === "alter" && !!c.oldDefinition && c.oldDefinition === c.newDefinition;

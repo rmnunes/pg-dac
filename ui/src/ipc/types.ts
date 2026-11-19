@@ -29,6 +29,8 @@ export interface ObjectChange {
   statements: Statement[];
   hazards?: Hazard[];
   severity?: Severity;
+  /** Why the engine touches the object beyond the plain diff (a dependent recreated, a rebuild). */
+  reason?: string;
 }
 
 export interface HazardCount {
