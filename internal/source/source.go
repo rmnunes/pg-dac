@@ -12,9 +12,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/rmnunes/pg-dac/internal/artifact"
 	"github.com/rmnunes/pg-dac/internal/build"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/model"
 )
@@ -114,7 +114,7 @@ func resolveArtifact(path string, opts Options) (*model.Database, []string, erro
 }
 
 func resolveDB(ctx context.Context, spec string, opts Options) (*model.Database, []string, error) {
-	conn, err := pgx.Connect(ctx, spec)
+	conn, err := dbconn.Connect(ctx, spec)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect to database: %w", err)
 	}

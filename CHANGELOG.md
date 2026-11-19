@@ -65,6 +65,10 @@ production pilot completes without a correctness change.
 - identity → serial conversions order `CREATE SEQUENCE` after `DROP IDENTITY`.
 - A `CREATE OR REPLACE` of a view or function no longer re-grants its privileges.
 - Column-order warnings name only the misplaced columns.
+- Connections to live databases retry transient failures (a name lookup that fails once, a
+  refused or reset dial) three times with a short backoff before giving up, so a split-DNS
+  resolver that answers the first query for a private host with "no such host" no longer fails
+  the first compare. Authentication and protocol errors are still returned at once.
 - Schemas and extensions have a definition in the plan like every other object, so the GUI's
   Definition diff shows `CREATE SCHEMA` (with comment and grants) or `CREATE EXTENSION` (with the
   installed version noted) instead of two empty panes.

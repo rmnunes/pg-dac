@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/rmnunes/pg-dac/internal/artifact"
 	"github.com/rmnunes/pg-dac/internal/build"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/diff"
 	"github.com/rmnunes/pg-dac/internal/drift"
 	"github.com/rmnunes/pg-dac/internal/engine"
@@ -69,7 +68,7 @@ func Import(ctx context.Context, connString, archivePath string, opts ImportOpti
 		}
 	}
 
-	conn, err := pgx.Connect(ctx, connString)
+	conn, err := dbconn.Connect(ctx, connString)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

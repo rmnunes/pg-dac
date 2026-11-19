@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/drift"
 	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/source"
@@ -31,7 +31,7 @@ func newDriftCmd() *cobra.Command {
 			if !source.IsConnString(from) {
 				return fmt.Errorf("--from must be a database connection string (got %q)", from)
 			}
-			conn, err := pgx.Connect(ctx, from)
+			conn, err := dbconn.Connect(ctx, from)
 			if err != nil {
 				return fmt.Errorf("connect: %w", err)
 			}
@@ -92,7 +92,7 @@ func newBaselineCmd() *cobra.Command {
 			if !source.IsConnString(from) {
 				return fmt.Errorf("--from must be a database connection string (got %q)", from)
 			}
-			conn, err := pgx.Connect(ctx, from)
+			conn, err := dbconn.Connect(ctx, from)
 			if err != nil {
 				return fmt.Errorf("connect: %w", err)
 			}

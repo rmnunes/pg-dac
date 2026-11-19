@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
 	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/model"
@@ -120,7 +120,7 @@ func (f *commonFlags) applyRefactorLog(cmd *cobra.Command, from *model.Database)
 	applied := map[string]bool{}
 	if source.IsConnString(f.from) {
 		ctx := cmd.Context()
-		conn, err := pgx.Connect(ctx, f.from)
+		conn, err := dbconn.Connect(ctx, f.from)
 		if err != nil {
 			return nil, nil, fmt.Errorf("--from: %w", err)
 		}
