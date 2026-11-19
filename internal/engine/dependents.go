@@ -40,17 +40,26 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 	trigDropped := map[string]bool{}
 	trigCreated := map[string]bool{}
 	idxCreated := map[string]bool{}
+	colCause := map[string]string{}     // why a column blocks its dependents, in words
+	objRef := map[string]model.ObjRef{} // the object behind a dropped/created key, for the same
 	for _, op := range cs.Ops {
 		switch op.Type {
 		case diff.OpAlterColumnType:
-			blockedCols[colKey(op.Owner, op.Sub)] = true
+			ck := colKey(op.Owner, op.Sub)
+			blockedCols[ck] = true
+			colCause[ck] = fmt.Sprintf("column %s of %s, whose type changes from %s to %s",
+				model.QuoteIdent(op.Sub), op.Owner.String(), columnType(op.PrevColumn), columnType(op.Column))
 		case diff.OpDropColumn:
-			blockedCols[colKey(op.Owner, op.Sub)] = true
-			droppedCols[colKey(op.Owner, op.Sub)] = true
+			ck := colKey(op.Owner, op.Sub)
+			blockedCols[ck] = true
+			droppedCols[ck] = true
+			colCause[ck] = fmt.Sprintf("column %s of %s, which is dropped", model.QuoteIdent(op.Sub), op.Owner.String())
 		case diff.OpDropView, diff.OpDropMatView, diff.OpDropFunction, diff.OpDropTable:
 			dropped[op.Owner.Key()] = true
+			objRef[op.Owner.Key()] = op.Owner
 		case diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateFunction, diff.OpCreateTable:
 			created[op.Owner.Key()] = true
+			objRef[op.Owner.Key()] = op.Owner
 		case diff.OpDropTrigger:
 			trigDropped[colKey(op.Owner, op.Sub)] = true
 		case diff.OpCreateTrigger:
@@ -169,10 +178,23 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		}
 	}
 
+	// objectCause words the object behind a key and what happens to it, for a
+	// dependent's reason.
+	objectCause := func(k string) string {
+		ref, ok := objRef[k]
+		if !ok {
+			return k[len(prefixLen(k)):]
+		}
+		if created[k] {
+			return ref.String() + ", which is dropped and recreated"
+		}
+		return ref.String() + ", which is dropped"
+	}
+
 	// Column-level seeds: views reading a column whose type changes or that is dropped.
 	for ck := range blockedCols {
 		for _, d := range idx.byColumn[ck] {
-			recreate(d, "column "+ck[len(prefixLen(ck)):])
+			recreate(d, colCause[ck])
 		}
 	}
 	// Object-level seeds and everything they cascade to.
@@ -180,7 +202,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		k := frontier[0]
 		frontier = frontier[1:]
 		for _, d := range idx.byObject[k] {
-			recreate(d, k)
+			recreate(d, objectCause(k))
 		}
 		// Triggers executing a dropped function.
 		for _, t := range idx.triggersByFn[k] {
@@ -189,7 +211,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 				continue // already handled, or the relation itself is dropped/recreated
 			}
 			trigDropped[tk] = true
-			reason := "recreated because it executes " + k
+			reason := "recreated because it executes " + objectCause(k)
 			added = append(added, diff.Op{Type: diff.OpDropTrigger, Owner: t.rel, Sub: t.tr.Name, Table: t.table, Trigger: t.tr, Reason: reason})
 			if desired, tbl := findTrigger(to, t.rel, t.tr.Name); desired != nil {
 				addTrigger(t.rel, tbl, desired, reason)
@@ -304,6 +326,13 @@ func indexDependents(db *model.Database) dependentIndex {
 // colKey identifies a column (or any relation sub-object) by its relation and
 // name, matching the differ's Owner + Sub.
 func colKey(rel model.ObjRef, sub string) string { return rel.Key() + "#" + sub }
+
+func columnType(c *model.Column) string {
+	if c == nil {
+		return "?"
+	}
+	return c.Type
+}
 
 func colRefKey(c model.ColumnRef) string {
 	return colKey(model.ObjRef{Kind: model.KindTable, Schema: c.Schema, Name: c.Table}, c.Column)

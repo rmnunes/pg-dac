@@ -85,7 +85,10 @@ export function DetailPane() {
             <b>Definition unchanged.</b>{" "}
             {change.reason
               ? `This object is ${change.reason}.`
-              : "The change is in an attribute the definition text does not show; see the Generated SQL tab."}
+              : "The change is in an attribute the definition text does not show."}{" "}
+            <button type="button" className="link" onClick={() => setTab("sql")}>
+              See the {change.statements.length} statement{change.statements.length === 1 ? "" : "s"} that will run on the Target
+            </button>
           </span>
         </div>
       )}

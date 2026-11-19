@@ -45,7 +45,7 @@ func TestObjectChanges_RecreatedDependentCarriesReason(t *testing.T) {
 		if c.ChangeKind != "alter" || c.OldDefinition == "" || c.OldDefinition != c.NewDefinition {
 			t.Errorf("view: kind=%q old=%q new=%q", c.ChangeKind, c.OldDefinition, c.NewDefinition)
 		}
-		if !strings.Contains(c.Reason, "recreated because it depends on column") {
+		if !strings.Contains(c.Reason, "recreated because it depends on column") || !strings.Contains(c.Reason, "whose type changes from integer to bigint") {
 			t.Errorf("view reason = %q, want the dependent-recreate explanation", c.Reason)
 		}
 		return
