@@ -16,7 +16,7 @@ type Row =
   | { kind: "item"; change: ObjectChange; group: ChangeKind; pos: number; size: number };
 
 export function ChangeList() {
-  const { plan, excluded, autoExcluded, selectedId, select, toggleExclude, setIncluded } = useStore();
+  const { plan, excluded, autoExcluded, selectedId, select, toggleExclude, setIncluded, gatingNotice, clearGatingNotice } = useStore();
   const [collapsed, setCollapsed] = useState<Set<ChangeKind>>(new Set());
   const [filter, setFilter] = useState("");
   const [risksOnly, setRisksOnly] = useState(false);
@@ -170,6 +170,14 @@ export function ChangeList() {
         {excludedCount > 0 ? ` · ${excludedCount} excluded` : ""}
         {autoExcluded.size > 0 ? ` (${autoExcluded.size} by dependency)` : ""}
       </div>
+      {gatingNotice && (
+        <div className="list-notice" role="status">
+          <span>{gatingNotice.text}</span>
+          <button type="button" className="link" onClick={clearGatingNotice}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="list-scroll" ref={parentRef} role="tree" aria-label="Changes" onKeyDown={onKeyDown}>
         {rows.length === 0 ? (
           <div className="empty small">No changes match the filter.</div>
@@ -262,6 +270,11 @@ export function ChangeList() {
                     {c.schema ? <span className="schema">{c.schema}.</span> : null}
                     {c.name}
                   </span>
+                  {gatedBy && (
+                    <span className="badge sev-info" title={`Excluded because it depends on ${gatedName ? objectName(gatedName) : gatedBy}, which is excluded`}>
+                      needs {gatedName ? gatedName.name : "…"}
+                    </span>
+                  )}
                   {unchangedText(c) && (
                     <span className="badge sev-info" title={c.reason || "The definition text is unchanged; see the Generated SQL tab"}>
                       {c.reason ? "recreated" : "no text change"}

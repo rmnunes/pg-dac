@@ -98,7 +98,8 @@
       "name": "team_responsible_emails",
       "changeKind": "add",
       "dependsOn": [
-        "schema:\"\".\"sales\""
+        "schema:\"\".\"sales\"",
+        "table:\"sales\".\"regions\""
       ],
       "newDefinition": "CREATE TABLE \"sales\".\"team_responsible_emails\" (\n    \"id\" bigint DEFAULT nextval('sales.team_responsible_emails_id_seq'::regclass) NOT NULL,\n    \"team_id\" integer,\n    \"rating_id\" integer,\n    \"email\" character varying(100) NOT NULL,\n    \"is_active\" boolean DEFAULT true NOT NULL,\n    \"created_on\" timestamp without time zone DEFAULT now() NOT NULL,\n    \"modified_on\" timestamp without time zone\n);\nALTER TABLE \"sales\".\"team_responsible_emails\" ADD CONSTRAINT \"team_responsible_emails_pkey\" PRIMARY KEY (id);\nCREATE INDEX ix_team_responsible_emails_rating_id ON sales.team_responsible_emails USING btree (rating_id);\nCREATE INDEX ix_team_responsible_emails_team_id ON sales.team_responsible_emails USING btree (team_id);\nGRANT SELECT ON TABLE \"sales\".\"team_responsible_emails\" TO \"app.app.sql.readers\";",
       "statements": [

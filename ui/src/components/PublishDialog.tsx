@@ -20,6 +20,9 @@ export function PublishDialog({ onClose, onOptions }: { onClose: () => void; onO
   const included = (plan?.changes ?? []).filter((c) => c.statements.length > 0);
   const statements = plan?.statementCount ?? included.reduce((n, c) => n + c.statements.length, 0);
   const objectsWith = (code: string) => included.filter((c) => c.hazards?.some((h) => h.type === code)).map(objectName);
+  // Excluded by the user, yet the engine must drop and recreate them (a
+  // dependency changes): worth seeing before Apply.
+  const forced = included.filter((c) => s.excluded.has(c.id) || s.autoExcluded.has(c.id));
 
   const allAcked = errorCodes.every((h) => acked.has(h.code));
   const canApply = !publish.running && !publish.done && allAcked;
@@ -100,6 +103,21 @@ export function PublishDialog({ onClose, onOptions }: { onClose: () => void; onO
               </div>
             );
           })}
+        </div>
+      )}
+
+      {forced.length > 0 && (
+        <div className="ack-group">
+          <h3>Excluded, but still touched for a dependency</h3>
+          {forced.map((c) => (
+            <div className="ack" key={c.id}>
+              <span className="badge sev-warning">recreated</span>
+              <span className="title">
+                {c.objectType} {objectName(c)}
+              </span>
+              <div className="objs">{c.reason || "see its Generated SQL tab"}</div>
+            </div>
+          ))}
         </div>
       )}
 

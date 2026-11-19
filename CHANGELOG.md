@@ -69,6 +69,10 @@ production pilot completes without a correctness change.
   refused or reset dial) three times with a short backoff before giving up, so a split-DNS
   resolver that answers the first query for a private host with "no such host" no longer fails
   the first compare. Authentication and protocol errors are still returned at once.
+- **Dependency visibility**: a Dependencies tab lists what the selected object depends on and what
+  depends on it within the plan, each with its include state and a jump; rows excluded by
+  dependency carry a "needs X" badge; a toggle that pulls other rows out (or back in) says so above
+  the list; the publish dialog lists excluded objects the engine still has to recreate.
 - **Selection re-plans instantly** (daemon `/replan`): the GUI asks the engine what the migration is
   under the current include/exclude selection without re-reading the sources, so an excluded
   object that must still be dropped and recreated for a dependency shows up as "recreated" with

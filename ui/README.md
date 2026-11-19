@@ -86,8 +86,10 @@ The window is laid out like SSDT's Schema Compare:
   collapse/expand a group.
 - **Detail pane**: *Definition* (Monaco side-by-side diff, Source left / Target current right,
   green = added to the Target, red = removed; a toggle shows the Target after the change),
-  *Generated SQL*, and *Risks* — each hazard with a title, the engine's explanation and the
-  statements that carry it.
+  *Generated SQL*, *Risks* — each hazard with a title, the engine's explanation and the
+  statements that carry it — and *Dependencies*: what the object depends on and what depends on
+  it within the plan, each with its include state (included, excluded, excluded with X, still
+  recreated) and a jump to that row.
 - **Notes**: the engine's warnings (labelled Target / Source / Plan) in a collapsible panel
   above the status bar, each dismissible; the status bar toggles it and shows the count.
 - **Publish** summarises the deployment settings (with a link to change them), lists the risks

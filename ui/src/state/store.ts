@@ -110,6 +110,9 @@ interface State extends OptionsState {
   // dependency gating): id -> the excluded dependency that caused it.
   autoExcluded: Map<string, string>;
   selectedId?: string;
+  // What the last include/exclude toggle did to other rows (dependents gated,
+  // dependencies brought back), until dismissed or the next toggle.
+  gatingNotice?: { text: string };
 
   publish: PublishState;
   compareProgress: CompareProgress;
@@ -137,6 +140,7 @@ interface State extends OptionsState {
   toggleExclude: (id: string) => void;
   setIncluded: (ids: string[], included: boolean) => void;
   replan: () => void;
+  clearGatingNotice: () => void;
   select: (id: string) => void;
   dismissWarning: (index: number) => void;
   startPublish: () => Promise<void>;
@@ -343,6 +347,7 @@ export const useStore = create<State>((set, get) => ({
       comparedSignature: optionsSignature(s),
       excluded: new Set(),
       autoExcluded: new Map(),
+      gatingNotice: undefined,
       selectedId: undefined,
       allowHazards: false,
       publish: { running: false, total: 0, applied: 0, log: [], done: false },
@@ -432,14 +437,16 @@ export const useStore = create<State>((set, get) => ({
   toggleExclude: (id) =>
     set((s) => {
       const next = new Set(s.excluded);
-      if (next.has(id) || s.autoExcluded.has(id)) {
+      const including = next.has(id) || s.autoExcluded.has(id);
+      if (including) {
         next.delete(id);
         if (s.basePlan) for (const dep of dependenciesOf(s.basePlan, id)) next.delete(dep);
       } else {
         next.add(id);
       }
+      const auto = computeAutoExcluded(s.basePlan, next);
       replanSoon(get);
-      return { excluded: next, autoExcluded: computeAutoExcluded(s.basePlan, next) };
+      return { excluded: next, autoExcluded: auto, gatingNotice: gatingNotice(s, next, auto, including, new Set([id])) };
     }),
 
   // Group-level include/exclude (the tri-state checkbox on a group header).
@@ -454,9 +461,12 @@ export const useStore = create<State>((set, get) => ({
       } else {
         for (const id of ids) next.add(id);
       }
+      const auto = computeAutoExcluded(s.basePlan, next);
       replanSoon(get);
-      return { excluded: next, autoExcluded: computeAutoExcluded(s.basePlan, next) };
+      return { excluded: next, autoExcluded: auto, gatingNotice: gatingNotice(s, next, auto, included, new Set(ids)) };
     }),
+
+  clearGatingNotice: () => set({ gatingNotice: undefined }),
 
   // Ask the daemon what the migration is under the current selection: an
   // excluded object that must still be recreated for a dependency shows up as
@@ -531,6 +541,37 @@ function replanSoon(get: () => State) {
     replanTimer = undefined;
     void get().replan();
   }, 250);
+}
+
+// gatingNotice words what a toggle did beyond the rows the user clicked:
+// dependents that were excluded with them, dependencies that came back with
+// them. Undefined when nothing else moved.
+function gatingNotice(
+  s: State,
+  nextExcluded: Set<string>,
+  nextAuto: Map<string, string>,
+  including: boolean,
+  toggled: Set<string>,
+): { text: string } | undefined {
+  const name = (id: string) => {
+    const c = s.basePlan?.changes.find((x) => x.id === id);
+    return c ? `${c.objectType} ${c.schema ? c.schema + "." : ""}${c.name}` : id;
+  };
+  const list = (ids: string[]) => {
+    const shown = ids.slice(0, 3).map(name).join(", ");
+    return ids.length > 3 ? `${shown} and ${ids.length - 3} more` : shown;
+  };
+  const parts: string[] = [];
+  if (including) {
+    const deps = [...s.excluded].filter((id) => !nextExcluded.has(id) && !toggled.has(id));
+    if (deps.length) parts.push(`Also included ${deps.length} dependenc${deps.length === 1 ? "y" : "ies"} it needs: ${list(deps)}`);
+    const freed = [...s.autoExcluded.keys()].filter((id) => !nextAuto.has(id) && !toggled.has(id));
+    if (freed.length) parts.push(`${freed.length} dependent change${freed.length === 1 ? " is" : "s are"} included again: ${list(freed)}`);
+  } else {
+    const gated = [...nextAuto.keys()].filter((id) => !s.autoExcluded.has(id) && !toggled.has(id));
+    if (gated.length) parts.push(`Also excluded ${gated.length} change${gated.length === 1 ? "" : "s"} that depend${gated.length === 1 ? "s" : ""} on it: ${list(gated)}`);
+  }
+  return parts.length ? { text: parts.join(". ") + "." } : undefined;
 }
 
 // overlayPlan keeps the full comparison's object list (so excluded objects stay

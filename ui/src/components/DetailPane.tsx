@@ -2,16 +2,18 @@ import { useId, useState } from "react";
 import { DiffEditor, Editor } from "@monaco-editor/react";
 import { AlertTriangle, Info, OctagonAlert } from "lucide-react";
 
+import type { ObjectChange } from "../ipc/types";
+
 import { THEME } from "../monaco-setup";
 import { useStore } from "../state/store";
-import { hazardInfo, kindLabel, objectName, sortedHazards, unchangedText } from "../vocab";
+import { hazardInfo, kindGlyph, kindLabel, objectName, sortedHazards, unchangedText } from "../vocab";
 
 // automaticLayout: the editors stay mounted while hidden (switching tabs or
 // changes must not dispose Monaco models — the DiffEditor wrapper disposes
 // them in an order Monaco rejects), so they re-measure themselves when shown.
 const monacoOpts = { readOnly: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, automaticLayout: true } as const;
 
-type Tab = "diff" | "sql" | "risks";
+type Tab = "diff" | "sql" | "risks" | "deps";
 
 const firstLine = (sql: string): string => {
   const i = sql.indexOf("\n");
@@ -19,7 +21,7 @@ const firstLine = (sql: string): string => {
 };
 
 export function DetailPane() {
-  const { plan, selectedId } = useStore();
+  const { plan, selectedId, excluded, autoExcluded, select } = useStore();
   const [tab, setTab] = useState<Tab>("diff");
   const [showResult, setShowResult] = useState(false);
   const uid = useId();
@@ -39,11 +41,48 @@ export function DetailPane() {
     : "";
   const hazards = change ? sortedHazards(change) : [];
 
+  // Dependencies within this plan, both ways, from the plan's dependsOn edges.
+  const all = plan?.changes ?? [];
+  const byId = new Map(all.map((c) => [c.id, c]));
+  const upstream = change ? (change.dependsOn ?? []).map((id) => byId.get(id)).filter((c): c is ObjectChange => !!c) : [];
+  const downstream = change ? all.filter((c) => c.id !== change.id && (c.dependsOn ?? []).includes(change.id)) : [];
+  const stateOf = (c: ObjectChange): { label: string; cls: string } => {
+    const gate = autoExcluded.get(c.id);
+    if (gate !== undefined) {
+      const g = byId.get(gate);
+      return { label: `excluded with ${g ? objectName(g) : gate}`, cls: "sev-info" };
+    }
+    if (excluded.has(c.id)) return c.statements.length > 0 ? { label: "excluded, still recreated", cls: "sev-warning" } : { label: "excluded", cls: "sev-info" };
+    return { label: "included", cls: "ok" };
+  };
+
   const tabs: { key: Tab; label: string; count?: number }[] = [
     { key: "diff", label: "Definition" },
     { key: "sql", label: "Generated SQL" },
     { key: "risks", label: "Risks", count: hazards.length },
+    { key: "deps", label: "Dependencies", count: upstream.length + downstream.length },
   ];
+  const depList = (items: ObjectChange[], empty: string) =>
+    items.length === 0 ? (
+      <p className="muted small">{empty}</p>
+    ) : (
+      <ul>
+        {items.map((d) => {
+          const st = stateOf(d);
+          return (
+            <li key={d.id}>
+              <button type="button" className="link" onClick={() => select(d.id)} title="Show this change">
+                <span className={"glyph kind-" + d.changeKind} aria-hidden="true">
+                  {kindGlyph(d.changeKind)}
+                </span>{" "}
+                {d.objectType} {objectName(d)}
+              </button>
+              <span className={"badge " + st.cls}>{st.label}</span>
+            </li>
+          );
+        })}
+      </ul>
+    );
   const onTabKey = (e: React.KeyboardEvent) => {
     const i = tabs.findIndex((t) => t.key === tab);
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
@@ -170,6 +209,23 @@ export function DetailPane() {
               </article>
             );
           })}
+        </div>
+      )}
+
+      {!empty && tab === "deps" && (
+        <div className="deps" id={`${uid}-panel-deps`} role="tabpanel" aria-labelledby={`${uid}-tab-deps`}>
+          <section>
+            <h4>Depends on, in this plan ({upstream.length})</h4>
+            {depList(upstream, "Nothing else in this plan. Objects already in the Target are not listed.")}
+          </section>
+          <section>
+            <h4>Depended on by, in this plan ({downstream.length})</h4>
+            {depList(downstream, "Nothing in this plan depends on it.")}
+          </section>
+          <p className="muted small">
+            Excluding this object also excludes everything listed under "depended on by"; including it brings back what it depends on. An
+            excluded object the engine still has to recreate for a dependency is marked "still recreated".
+          </p>
         </div>
       )}
     </section>
