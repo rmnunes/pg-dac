@@ -69,6 +69,14 @@ production pilot completes without a correctness change.
   refused or reset dial) three times with a short backoff before giving up, so a split-DNS
   resolver that answers the first query for a private host with "no such host" no longer fails
   the first compare. Authentication and protocol errors are still returned at once.
+- **Selection re-plans instantly** (daemon `/replan`): the GUI asks the engine what the migration is
+  under the current include/exclude selection without re-reading the sources, so an excluded
+  object that must still be dropped and recreated for a dependency shows up as "recreated" with
+  the reason, an excluded object nothing runs for says so, and the statement count is the one a
+  publish runs. Excluded objects stay listed so they can be re-included.
+- Statement failures carry PostgreSQL's DETAIL and HINT (which object blocks a drop, which value
+  violates a constraint). The GUI's publish, the pre-publish rename check and the drift report
+  connect through the same retrying helper as the CLI.
 - Each plan object carries `reason`, the engine's explanation when it touches an object beyond the
   plain diff (a view recreated because a column it reads changes type, a rebuild, an object kept).
   The GUI marks such objects "recreated" in the list and the Definition tab says why, instead of

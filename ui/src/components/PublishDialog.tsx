@@ -16,8 +16,9 @@ export function PublishDialog({ onClose, onOptions }: { onClose: () => void; onO
   const warnCodes = useMemo(() => (plan?.hazardSummary ?? []).filter((h) => h.severity !== "error"), [plan]);
   const [acked, setAcked] = useState<Set<string>>(new Set());
 
-  const included = (plan?.changes ?? []).filter((c) => !s.excluded.has(c.id) && !s.autoExcluded.has(c.id));
-  const statements = included.reduce((n, c) => n + c.statements.length, 0);
+  // The plan is already re-planned for the selection: what has statements runs.
+  const included = (plan?.changes ?? []).filter((c) => c.statements.length > 0);
+  const statements = plan?.statementCount ?? included.reduce((n, c) => n + c.statements.length, 0);
   const objectsWith = (code: string) => included.filter((c) => c.hazards?.some((h) => h.type === code)).map(objectName);
 
   const allAcked = errorCodes.every((h) => acked.has(h.code));

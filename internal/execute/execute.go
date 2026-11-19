@@ -101,11 +101,29 @@ func ApplyStream(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opt
 			onStmt(i+1, len(stmts), s)
 		}
 		if err := runWithRetry(ctx, conn, s.SQL, opts); err != nil {
-			return applied, fmt.Errorf("statement failed: %s: %w", firstLine(s.SQL), err)
+			return applied, fmt.Errorf("statement failed: %s: %w%s", firstLine(s.SQL), err, serverDetail(err))
 		}
 		applied++
 	}
 	return applied, nil
+}
+
+// serverDetail appends PostgreSQL's DETAIL and HINT to a statement failure.
+// They carry what the message alone does not — which object blocks a drop,
+// which value violates a constraint — and are otherwise lost.
+func serverDetail(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return ""
+	}
+	out := ""
+	if pgErr.Detail != "" {
+		out += "; DETAIL: " + pgErr.Detail
+	}
+	if pgErr.Hint != "" {
+		out += "; HINT: " + pgErr.Hint
+	}
+	return out
 }
 
 // applyBatched is ApplyStream in single-transaction mode (see
@@ -119,7 +137,7 @@ func applyBatched(ctx context.Context, conn Execer, stmts []sqlgen.Statement, op
 				onStmt(i+1, len(stmts), stmts[i])
 			}
 			if err := runWithRetry(ctx, conn, stmts[i].SQL, opts); err != nil {
-				return applied, fmt.Errorf("statement failed: %s: %w", firstLine(stmts[i].SQL), err)
+				return applied, fmt.Errorf("statement failed: %s: %w%s", firstLine(stmts[i].SQL), err, serverDetail(err))
 			}
 			applied++
 			i++
@@ -164,7 +182,7 @@ func runBatch(ctx context.Context, conn Execer, stmts []sqlgen.Statement, from, 
 		}
 		_, _ = conn.Exec(ctx, "ROLLBACK")
 		if !isLockTimeout(failed) || attempt >= opts.MaxRetries {
-			return fmt.Errorf("statement failed (transaction rolled back, nothing from this batch applied): %s: %w", firstLine(stmts[failedAt].SQL), failed)
+			return fmt.Errorf("statement failed (transaction rolled back, nothing from this batch applied): %s: %w%s", firstLine(stmts[failedAt].SQL), failed, serverDetail(failed))
 		}
 		select {
 		case <-ctx.Done():
@@ -229,7 +247,7 @@ func ApplyStatements(ctx context.Context, e Execer, stmts []sqlgen.Statement) er
 	}
 	for _, s := range stmts {
 		if _, err := e.Exec(ctx, s.SQL); err != nil {
-			return fmt.Errorf("statement failed: %s: %w", firstLine(s.SQL), err)
+			return fmt.Errorf("statement failed: %s: %w%s", firstLine(s.SQL), err, serverDetail(err))
 		}
 	}
 	return nil

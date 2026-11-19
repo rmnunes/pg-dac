@@ -93,7 +93,12 @@ interface State extends OptionsState {
   // results
   status: Status;
   error?: string;
+  // plan is what will run under the current selection (re-planned by the daemon
+  // on every include/exclude change); basePlan is the full comparison it was
+  // derived from, which keeps excluded objects listed so they can be re-included.
   plan?: PlanDoc;
+  basePlan?: PlanDoc;
+  replanning: boolean;
   warnings: Warning[];
   comparedAt?: number;
   // The sources and options the current plan was computed with, so the UI can
@@ -131,6 +136,7 @@ interface State extends OptionsState {
   generateScript: () => Promise<string>;
   toggleExclude: (id: string) => void;
   setIncluded: (ids: string[], included: boolean) => void;
+  replan: () => void;
   select: (id: string) => void;
   dismissWarning: (index: number) => void;
   startPublish: () => Promise<void>;
@@ -235,6 +241,7 @@ export const useStore = create<State>((set, get) => ({
   allowHazards: false,
 
   status: "idle",
+  replanning: false,
   warnings: [],
   excluded: new Set<string>(),
   autoExcluded: new Map<string, string>(),
@@ -329,6 +336,8 @@ export const useStore = create<State>((set, get) => ({
       status: "comparing",
       error: undefined,
       plan: undefined,
+      basePlan: undefined,
+      replanning: false,
       warnings: [],
       comparedAt: undefined,
       comparedSignature: optionsSignature(s),
@@ -387,6 +396,7 @@ export const useStore = create<State>((set, get) => ({
             compareProgress: p,
             status: "idle",
             plan,
+            basePlan: plan,
             warnings: e.data.warnings ?? [],
             comparedAt: Date.now(),
             selectedId: plan?.changes[0]?.id,
@@ -424,11 +434,12 @@ export const useStore = create<State>((set, get) => ({
       const next = new Set(s.excluded);
       if (next.has(id) || s.autoExcluded.has(id)) {
         next.delete(id);
-        if (s.plan) for (const dep of dependenciesOf(s.plan, id)) next.delete(dep);
+        if (s.basePlan) for (const dep of dependenciesOf(s.basePlan, id)) next.delete(dep);
       } else {
         next.add(id);
       }
-      return { excluded: next, autoExcluded: computeAutoExcluded(s.plan, next) };
+      replanSoon(get);
+      return { excluded: next, autoExcluded: computeAutoExcluded(s.basePlan, next) };
     }),
 
   // Group-level include/exclude (the tri-state checkbox on a group header).
@@ -438,13 +449,35 @@ export const useStore = create<State>((set, get) => ({
       if (included) {
         for (const id of ids) {
           next.delete(id);
-          if (s.plan) for (const dep of dependenciesOf(s.plan, id)) next.delete(dep);
+          if (s.basePlan) for (const dep of dependenciesOf(s.basePlan, id)) next.delete(dep);
         }
       } else {
         for (const id of ids) next.add(id);
       }
-      return { excluded: next, autoExcluded: computeAutoExcluded(s.plan, next) };
+      replanSoon(get);
+      return { excluded: next, autoExcluded: computeAutoExcluded(s.basePlan, next) };
     }),
+
+  // Ask the daemon what the migration is under the current selection: an
+  // excluded object that must still be recreated for a dependency shows up as
+  // such, and the statement count is the one a publish would run. The full
+  // comparison stays the list's backbone so excluded objects remain visible.
+  replan: async () => {
+    const s = get();
+    if (!s.basePlan || s.status === "comparing") return;
+    const seq = ++replanSeq;
+    set({ replanning: true });
+    try {
+      const res = await api.replan(s.request());
+      if (seq !== replanSeq || get().basePlan !== s.basePlan) return; // superseded
+      set({ plan: overlayPlan(s.basePlan, res.plan), replanning: false });
+    } catch (e) {
+      // No cached comparison on the daemon (restarted?) or a transport error:
+      // keep showing the full comparison; publish still sends the selection.
+      console.warn("replan failed:", e);
+      if (seq === replanSeq) set({ replanning: false });
+    }
+  },
 
   select: (id) => set({ selectedId: id }),
 
@@ -487,6 +520,34 @@ export const useStore = create<State>((set, get) => ({
       return { publish: p };
     }),
 }));
+
+// A selection change re-plans after a short pause so a run of clicks costs one
+// round trip; the sequence number lets a late answer be ignored.
+let replanTimer: ReturnType<typeof setTimeout> | undefined;
+let replanSeq = 0;
+function replanSoon(get: () => State) {
+  if (replanTimer) clearTimeout(replanTimer);
+  replanTimer = setTimeout(() => {
+    replanTimer = undefined;
+    void get().replan();
+  }, 250);
+}
+
+// overlayPlan keeps the full comparison's object list (so excluded objects stay
+// visible and re-includable) and takes everything that will actually run —
+// statements, hazards, reasons, counts — from the re-planned migration. An
+// object the migration no longer touches is marked omitted.
+export function overlayPlan(base: PlanDoc, effective: PlanDoc): PlanDoc {
+  const byId = new Map(effective.changes.map((c) => [c.id, c]));
+  const changes: ObjectChange[] = base.changes.map((b) => {
+    const e = byId.get(b.id);
+    if (e) return e;
+    return { ...b, statements: [], hazards: [], severity: "", reason: "", omitted: true };
+  });
+  const known = new Set(base.changes.map((b) => b.id));
+  for (const e of effective.changes) if (!known.has(e.id)) changes.push(e);
+  return { ...effective, changes };
+}
 
 function firstLine(sql: string): string {
   const i = sql.indexOf("\n");

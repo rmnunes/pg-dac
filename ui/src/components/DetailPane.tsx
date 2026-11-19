@@ -26,7 +26,11 @@ export function DetailPane() {
 
   const change = plan?.changes.find((c) => c.id === selectedId);
   const empty = !change;
-  const sql = change ? change.statements.map((s) => (s.note ? `-- ${s.note}\n` : "") + s.sql).join("\n\n") : "";
+  const sql = !change
+    ? ""
+    : change.statements.length === 0
+      ? "-- Nothing will run for this object under the current selection."
+      : change.statements.map((s) => (s.note ? `-- ${s.note}\n` : "") + s.sql).join("\n\n");
   // The Target after the change is applied is the desired (Source) definition;
   // a drop leaves nothing.
   const result = change

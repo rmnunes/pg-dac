@@ -63,6 +63,16 @@ async fn pgdac_cancel(state: State<'_, AppState>, op_id: String) -> Result<Value
         .map_err(|e| e.to_string())?
 }
 
+/// Re-plans the last comparison with a changed selection or options, without
+/// reading the sources again (see the daemon's /replan).
+#[tauri::command]
+async fn pgdac_replan(state: State<'_, AppState>, req: Value) -> Result<Value, String> {
+    let daemon = state.daemon.clone();
+    tauri::async_runtime::spawn_blocking(move || daemon.post("/replan", req))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn pgdac_script(state: State<'_, AppState>, req: Value) -> Result<Value, String> {
     let daemon = state.daemon.clone();
@@ -159,6 +169,7 @@ pub fn run() {
             pgdac_plan,
             pgdac_cancel,
             pgdac_script,
+            pgdac_replan,
             pgdac_publish,
             pgdac_build,
             pgdac_inspect,

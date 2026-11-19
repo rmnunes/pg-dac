@@ -6,7 +6,7 @@
 // sources in localStorage. Never bundled into the desktop app's behavior: the
 // client only routes here when Tauri's runtime is absent.
 
-import type { CompareEvent, CompareRequest, Health, PlanDoc, Profile, PublishEvent, ScriptResponse, Warning } from "./types";
+import type { CompareEvent, CompareRequest, Health, PlanDoc, PlanResponse, Profile, PublishEvent, ScriptResponse, Warning } from "./types";
 import fixture from "../dev/fixture-plan.json";
 
 type Listener<T> = (e: T) => void;
@@ -93,6 +93,15 @@ export const mock = {
     const entry = { cb };
     compareListeners.add(entry);
     return () => compareListeners.delete(entry);
+  },
+
+  replan: async (req: CompareRequest): Promise<PlanResponse> => {
+    await sleep(150);
+    const excluded = new Set(req.excludeIds ?? []);
+    const plan: PlanDoc = { ...fixturePlan, changes: fixturePlan.changes.filter((c) => !excluded.has(c.id)) };
+    plan.statementCount = plan.changes.reduce((n, c) => n + c.statements.length, 0);
+    plan.dataLoss = plan.changes.some((c) => c.hazards?.some((h) => h.type === "DELETES_DATA"));
+    return { plan, warnings: fixtureWarnings };
   },
 
   script: async (req: CompareRequest): Promise<ScriptResponse> => {

@@ -29,6 +29,7 @@ export function StatusBar({ notesOpen, onToggleNotes, engine }: { notesOpen: boo
   return (
     <footer className="statusbar" aria-label="Status">
       <span role="status">{plan ? parts.join(" · ") : "No comparison yet"}</span>
+      {s.replanning && <span className="muted">updating the plan…</span>}
       {plan?.dataLoss && (
         <span className="flag">
           <OctagonAlert size={13} aria-hidden="true" /> Deletes data

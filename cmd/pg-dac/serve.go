@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
 	"github.com/rmnunes/pg-dac/internal/artifact"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/devdb"
 	"github.com/rmnunes/pg-dac/internal/drift"
@@ -73,6 +73,7 @@ func runServe(cmd *cobra.Command, addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", d.auth(d.health))
 	mux.HandleFunc("/plan", d.auth(d.plan))
+	mux.HandleFunc("/replan", d.auth(d.replan))
 	mux.HandleFunc("/cancel", d.auth(d.cancelOp))
 	mux.HandleFunc("/script", d.auth(d.script))
 	mux.HandleFunc("/publish", d.auth(d.publish))
@@ -114,6 +115,22 @@ type daemon struct {
 	// pgx-based introspection and scratch build, freeing the warm Postgres).
 	mu  sync.Mutex
 	ops map[string]context.CancelFunc
+
+	// last is what the latest successful /plan computed from, so /replan can
+	// re-run the engine for a changed selection or option without reading the
+	// sources again (SSDT re-scripts a selection change the same way).
+	lastMu sync.Mutex
+	last   *lastCompare
+}
+
+// lastCompare holds the resolved sides of the latest comparison.
+type lastCompare struct {
+	fromSpec, toSpec string
+	schemas          []string
+	from, to         []byte // canonical models, marshalled: each re-plan works on a fresh copy
+	prelude          []sqlgen.Statement
+	dplan            *deploy.Plan
+	warnings         []sideWarning // target/source/rename warnings from that read
 }
 
 // track derives a cancelable child of the daemon context for one request and,
@@ -356,8 +373,68 @@ func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Prelude = prelude
+	d.remember(req, from, to, prelude, dplan, mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns)))
 	send("result", map[string]any{"plan": res.PlanDoc(),
 		"warnings": mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns), tagWarnings("plan", res.Warnings))})
+}
+
+// remember keeps the resolved sides of a comparison for /replan.
+func (d *daemon) remember(req compareReq, from, to *model.Database, prelude []sqlgen.Statement, dplan *deploy.Plan, warnings []sideWarning) {
+	fb, err1 := from.Marshal()
+	tb, err2 := to.Marshal()
+	if err1 != nil || err2 != nil {
+		return
+	}
+	d.lastMu.Lock()
+	d.last = &lastCompare{fromSpec: req.From, toSpec: req.To, schemas: req.Schemas, from: fb, to: tb, prelude: prelude, dplan: dplan, warnings: warnings}
+	d.lastMu.Unlock()
+}
+
+// replan re-runs the engine on the sides of the latest /plan with the
+// request's current selection and options, without reading the sources again.
+// Sub-second, so the GUI can keep the plan in step with every include/exclude
+// toggle: an excluded object that still has to be recreated for a dependency
+// shows up as such, and the statement count is the one a publish would run.
+// 409 when the sources differ from the last comparison (or none ran yet).
+func (d *daemon) replan(w http.ResponseWriter, r *http.Request) {
+	req, err := decode(r)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	d.lastMu.Lock()
+	last := d.last
+	d.lastMu.Unlock()
+	if last == nil || last.fromSpec != req.From || last.toSpec != req.To || !sameStrings(last.schemas, req.Schemas) {
+		http.Error(w, "no comparison of these sources to re-plan; run Compare first", http.StatusConflict)
+		return
+	}
+	from, err1 := model.Unmarshal(last.from)
+	to, err2 := model.Unmarshal(last.to)
+	if err1 != nil || err2 != nil {
+		http.Error(w, "stored comparison is unreadable; run Compare again", http.StatusConflict)
+		return
+	}
+	res, err := engine.Compare(from, to, req.engineOptions(last.dplan))
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	res.Prelude = last.prelude
+	writeJSON(w, http.StatusOK, map[string]any{"plan": res.PlanDoc(),
+		"warnings": mergeWarnings(last.warnings, tagWarnings("plan", res.Warnings))})
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // pendingRenames applies the desired state's pending refactorlog renames to
@@ -369,7 +446,7 @@ func pendingRenames(ctx context.Context, fromSpec string, from *model.Database, 
 	}
 	applied := map[string]bool{}
 	if source.IsConnString(fromSpec) {
-		conn, err := pgx.Connect(ctx, fromSpec)
+		conn, err := dbconn.Connect(ctx, fromSpec)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -461,7 +538,7 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := pgx.Connect(d.ctx, req.From)
+	conn, err := dbconn.Connect(d.ctx, req.From)
 	if err != nil {
 		send("error", map[string]any{"message": err.Error()})
 		return
@@ -632,7 +709,7 @@ func (d *daemon) drift(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fmt.Errorf("drift target (from) must be a database connection string"))
 		return
 	}
-	conn, err := pgx.Connect(d.ctx, req.From)
+	conn, err := dbconn.Connect(d.ctx, req.From)
 	if err != nil {
 		badRequest(w, err)
 		return

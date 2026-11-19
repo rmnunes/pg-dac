@@ -9,6 +9,7 @@ import type {
   CompareEvent,
   CompareRequest,
   Health,
+  PlanResponse,
   Profile,
   PublishEvent,
   ScriptResponse,
@@ -35,6 +36,10 @@ export const cancelCompare = (opId: string): Promise<unknown> => (inTauri ? invo
 
 export const onCompare = (cb: (e: CompareEvent) => void): Promise<UnlistenFn> =>
   inTauri ? listen<CompareEvent>("pgdac://compare", (event) => cb(event.payload)) : mock.onCompare(cb);
+
+// Re-plans the last comparison for a changed selection without re-reading the
+// sources (sub-second). Rejects when no comparison of these sources is cached.
+export const replan = (req: CompareRequest): Promise<PlanResponse> => (inTauri ? invoke("pgdac_replan", { req }) : mock.replan(req));
 
 export const script = (req: CompareRequest): Promise<ScriptResponse> => (inTauri ? invoke("pgdac_script", { req }) : mock.script(req));
 

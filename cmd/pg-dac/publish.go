@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/drift"
 	"github.com/rmnunes/pg-dac/internal/engine"
@@ -45,7 +45,7 @@ func newPublishCmd() *cobra.Command {
 				}
 				return fmt.Errorf("--from must be a database connection string or a project directory for publish (got %q)", f.from)
 			}
-			conn, err := pgx.Connect(ctx, f.from)
+			conn, err := dbconn.Connect(ctx, f.from)
 			if err != nil {
 				return fmt.Errorf("connect to target: %w", err)
 			}

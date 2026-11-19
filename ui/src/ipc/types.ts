@@ -31,6 +31,8 @@ export interface ObjectChange {
   severity?: Severity;
   /** Why the engine touches the object beyond the plain diff (a dependent recreated, a rebuild). */
   reason?: string;
+  /** UI only: the object is in the comparison but nothing runs for it under the current selection. */
+  omitted?: boolean;
 }
 
 export interface HazardCount {

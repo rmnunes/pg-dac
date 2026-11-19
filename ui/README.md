@@ -77,7 +77,11 @@ The window is laid out like SSDT's Schema Compare:
   include checkbox per group and one per change. Filter by name or type, or show risks only.
   Each row's badge names its most serious risk ("data loss", "rewrite", "exclusive lock", …).
   Excluding a change also excludes every change that depends on it (shown disabled, with the
-  cause); including one brings its dependencies back — the SSDT behaviour. The list is a
+  cause); including one brings its dependencies back — the SSDT behaviour. Every selection change
+  re-plans the migration on the daemon (sub-second, no re-read of the sources), so the list,
+  the Generated SQL and the statement count always show what a publish would run: an excluded
+  object the engine must still recreate for a dependency is marked "recreated" with the reason,
+  and one nothing runs for says so. The list is a
   keyboard tree: arrows move, `Space` includes/excludes, `Enter` selects, `Left`/`Right`
   collapse/expand a group.
 - **Detail pane**: *Definition* (Monaco side-by-side diff, Source left / Target current right,
