@@ -7,18 +7,21 @@ import { Dialog } from "./Dialog";
 // Shown while a compare runs: it narrates what the daemon is doing (reading
 // each side, then diffing/planning) and offers Cancel, which aborts the work on
 // the daemon. It closes itself when the result arrives; a canceled compare
-// leaves a dismissible "Canceled." state. Escape cancels while running.
+// leaves a dismissible "Canceled." state. Escape cancels while running; a click
+// on the backdrop never does (a stray click must not abort minutes of work).
 export function CompareProgress() {
-  const { compareProgress: cp, cancelCompare, set, profiles } = useStore();
+  const cp = useStore((s) => s.compareProgress);
+  const profiles = useStore((s) => s.profiles);
+  const { cancelCompare, dismissCanceled } = useStore.getState();
   if (!cp.running && !cp.canceled) return null;
 
   const close = () => {
     if (cp.running) cancelCompare();
-    else set({ compareProgress: { ...cp, canceled: false } });
+    else dismissCanceled();
   };
 
   return (
-    <Dialog title={cp.canceled ? "Compare canceled" : "Comparing…"} onClose={close} width={560}>
+    <Dialog title={cp.canceled ? "Compare canceled" : "Comparing…"} onClose={close} backdropCloses={!cp.running} width={560}>
       <div className="compare-sources">
         <div>
           <span className="muted">Source</span>

@@ -3,8 +3,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 
 import { useStore } from "../state/store";
+import { isExcluded } from "../state/plan";
 import type { ChangeKind, ObjectChange } from "../ipc/types";
-import { KIND_ORDER, hazardInfo, kindGlyph, kindLabel, objectName, sortedHazards, topHazard, unchangedText } from "../vocab";
+import { KIND_ORDER, gatedTitle, hazardInfo, kindGlyph, kindLabel, objectLabel, objectName, plural, sortedHazards, topHazard, unchangedText } from "../vocab";
 
 // The change list, grouped by action (Drop / Change / Add) like SSDT's results
 // grid. Groups collapse, carry a tri-state include checkbox, and the whole list
@@ -16,7 +17,14 @@ type Row =
   | { kind: "item"; change: ObjectChange; group: ChangeKind; pos: number; size: number };
 
 export function ChangeList() {
-  const { plan, excluded, autoExcluded, selectedId, select, toggleExclude, setIncluded, gatingNotice, clearGatingNotice } = useStore();
+  const plan = useStore((s) => s.plan);
+  const basePlan = useStore((s) => s.basePlan);
+  const excluded = useStore((s) => s.excluded);
+  const autoExcluded = useStore((s) => s.autoExcluded);
+  const selectedId = useStore((s) => s.selectedId);
+  const gatingNotice = useStore((s) => s.gatingNotice);
+  const replanError = useStore((s) => s.replanError);
+  const { select, toggleExclude, setIncluded, clearGatingNotice, runCompare } = useStore.getState();
   const [collapsed, setCollapsed] = useState<Set<ChangeKind>>(new Set());
   const [filter, setFilter] = useState("");
   const [risksOnly, setRisksOnly] = useState(false);
@@ -24,15 +32,14 @@ export function ChangeList() {
   const wantFocus = useRef(false);
   const parentRef = useRef<HTMLDivElement>(null);
 
-  // A new plan starts the list fresh.
+  // A new comparison starts the list fresh; a re-plan (selection change) keeps
+  // the filter, the collapsed groups and the keyboard position.
   useEffect(() => {
     setCollapsed(new Set());
     setFilter("");
     setRisksOnly(false);
     setActive(0);
-  }, [plan]);
-
-  const isExcluded = (id: string) => excluded.has(id) || autoExcluded.has(id);
+  }, [basePlan]);
 
   const rows = useMemo<Row[]>(() => {
     const all = plan?.changes ?? [];
@@ -46,11 +53,10 @@ export function ChangeList() {
     for (const g of KIND_ORDER) {
       const items = shown.filter((c) => c.changeKind === g);
       if (!items.length) continue;
-      out.push({ kind: "group", group: g, items, included: items.filter((c) => !isExcluded(c.id)).length });
+      out.push({ kind: "group", group: g, items, included: items.filter((c) => !isExcluded(c.id, excluded, autoExcluded)).length });
       if (!collapsed.has(g)) items.forEach((c, i) => out.push({ kind: "item", change: c, group: g, pos: i + 1, size: items.length }));
     }
     return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan, filter, risksOnly, collapsed, excluded, autoExcluded]);
 
   const rv = useVirtualizer({
@@ -59,6 +65,20 @@ export function ChangeList() {
     estimateSize: (i) => (rows[i]?.kind === "group" ? 30 : 28),
     overscan: 14,
   });
+
+  // A selection made elsewhere (the Dependencies tab's jumps) moves the
+  // keyboard position to that row and scrolls it into view, without taking
+  // focus from where the user clicked.
+  const lastSelected = useRef(selectedId);
+  useEffect(() => {
+    if (selectedId === lastSelected.current) return;
+    lastSelected.current = selectedId;
+    const i = rows.findIndex((r) => r.kind === "item" && r.change.id === selectedId);
+    if (i >= 0 && i !== active) {
+      setActive(i);
+      rv.scrollToIndex(i, { align: "auto" });
+    }
+  }, [selectedId, rows, active, rv]);
 
   // After a keyboard move, focus the row once it is rendered (it may need a
   // scroll first, hence the second attempt on the next frame).
@@ -79,7 +99,8 @@ export function ChangeList() {
   const toggleGroup = (g: ChangeKind) =>
     setCollapsed((prev) => {
       const n = new Set(prev);
-      n.has(g) ? n.delete(g) : n.add(g);
+      if (n.has(g)) n.delete(g);
+      else n.add(g);
       return n;
     });
 
@@ -110,8 +131,9 @@ export function ChangeList() {
         break;
       case " ":
         e.preventDefault();
-        if (row.kind === "item") toggleExclude(row.change.id);
-        else setIncluded(row.items.map((c) => c.id), row.included < row.items.length);
+        if (row.kind === "item") {
+          if (!autoExcluded.has(row.change.id)) toggleExclude(row.change.id);
+        } else setIncluded(row.items.map((c) => c.id), row.included < row.items.length);
         break;
       case "ArrowRight":
         if (row.kind === "group" && collapsed.has(row.group)) {
@@ -149,9 +171,10 @@ export function ChangeList() {
     );
   }
 
+  const byId = new Map(plan.changes.map((c) => [c.id, c]));
   const total = plan.changes.length;
-  const shownCount = rows.filter((r) => r.kind === "group").reduce((n, r) => n + (r.kind === "group" ? r.items.length : 0), 0);
-  const excludedCount = plan.changes.filter((c) => isExcluded(c.id)).length;
+  const shownCount = rows.reduce((n, r) => n + (r.kind === "group" ? r.items.length : 0), 0);
+  const excludedCount = plan.changes.filter((c) => isExcluded(c.id, excluded, autoExcluded)).length;
 
   return (
     <>
@@ -166,10 +189,18 @@ export function ChangeList() {
         </label>
       </div>
       <div className="list-summary" role="status">
-        {shownCount === total ? `${total} change${total === 1 ? "" : "s"}` : `${shownCount} of ${total} changes`}
+        {shownCount === total ? plural(total, "change") : `${shownCount} of ${plural(total, "change")}`}
         {excludedCount > 0 ? ` · ${excludedCount} excluded` : ""}
         {autoExcluded.size > 0 ? ` (${autoExcluded.size} by dependency)` : ""}
       </div>
+      {replanError && (
+        <div className="list-notice warn" role="alert">
+          <span>The plan could not be updated for this selection, so the counts and statements shown are the previous selection's. {replanError}</span>
+          <button type="button" className="link" onClick={() => void runCompare()}>
+            Compare again
+          </button>
+        </div>
+      )}
       {gatingNotice && (
         <div className="list-notice" role="status">
           <span>{gatingNotice.text}</span>
@@ -230,10 +261,11 @@ export function ChangeList() {
               }
               const c = r.change;
               const gatedBy = autoExcluded.get(c.id);
-              const off = isExcluded(c.id);
+              const gate = gatedBy !== undefined ? byId.get(gatedBy) : undefined;
+              const gateName = gate ? objectName(gate) : gatedBy;
+              const off = isExcluded(c.id, excluded, autoExcluded);
               const top = topHazard(c);
               const more = (c.hazards?.length ?? 0) - 1;
-              const gatedName = gatedBy ? plan.changes.find((x) => x.id === gatedBy) : undefined;
               return (
                 <div
                   key={c.id}
@@ -246,7 +278,7 @@ export function ChangeList() {
                   aria-setsize={r.size}
                   aria-selected={c.id === selectedId}
                   tabIndex={tabIndex}
-                  title={gatedBy ? `Excluded because it depends on ${gatedName ? objectName(gatedName) : gatedBy}, which is excluded` : undefined}
+                  title={gateName ? gatedTitle(gateName) : undefined}
                   onClick={() => {
                     setActive(vi.index);
                     select(c.id);
@@ -258,7 +290,7 @@ export function ChangeList() {
                     tabIndex={-1}
                     checked={!off}
                     disabled={gatedBy !== undefined}
-                    aria-label={`Include ${c.objectType} ${objectName(c)}`}
+                    aria-label={`Include ${objectLabel(c)}`}
                     onClick={(e) => e.stopPropagation()}
                     onChange={() => toggleExclude(c.id)}
                   />
@@ -270,9 +302,9 @@ export function ChangeList() {
                     {c.schema ? <span className="schema">{c.schema}.</span> : null}
                     {c.name}
                   </span>
-                  {gatedBy && (
-                    <span className="badge sev-info" title={`Excluded because it depends on ${gatedName ? objectName(gatedName) : gatedBy}, which is excluded`}>
-                      needs {gatedName ? gatedName.name : "…"}
+                  {gateName && (
+                    <span className="badge sev-info" title={gatedTitle(gateName)}>
+                      needs {gateName}
                     </span>
                   )}
                   {unchangedText(c) && (
@@ -287,7 +319,7 @@ export function ChangeList() {
                   )}
                   {more > 0 && (
                     <span className="badge sev-info" title={"Also: " + sortedHazards(c).slice(1).map((h) => hazardInfo(h.type).title).join(", ")}>
-                      +{more} risk{more === 1 ? "" : "s"}
+                      +{plural(more, "risk")}
                     </span>
                   )}
                 </div>

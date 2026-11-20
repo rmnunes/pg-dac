@@ -80,13 +80,21 @@ func TestRun_PublishLifecycle(t *testing.T) {
 		t.Fatalf("drifted target must be refused: %v", err)
 	}
 
+	// A dry run reports drift instead of refusing it, but refuses data loss
+	// that was not allowed, exactly like a real publish would.
 	dry := req
 	dry.DryRun = true
 	dry.Engine.DropObjectsNotInSource = true
 	var driftNote string
-	res, err = publish.Run(ctx, conn, dry, publish.Observer{Drift: func(msg string) { driftNote = msg }})
-	if err != nil || res.UpToDate || res.Migration.Empty() || driftNote == "" {
-		t.Fatalf("dry run: %+v err=%v drift=%q", res, err, driftNote)
+	_, err = publish.Run(ctx, conn, dry, publish.Observer{Drift: func(msg string) { driftNote = msg }})
+	var refused *publish.BlockedError
+	if !errors.As(err, &refused) || driftNote == "" {
+		t.Fatalf("dry run with unallowed data loss: err=%v drift=%q", err, driftNote)
+	}
+	dry.Engine.AllowHazards = true
+	res, err = publish.Run(ctx, conn, dry, publish.Observer{})
+	if err != nil || res.UpToDate || res.Migration.Empty() || res.Applied != 0 {
+		t.Fatalf("dry run: %+v err=%v", res, err)
 	}
 	var n int
 	if err := conn.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname = 'app' AND tablename = 'extra'").Scan(&n); err != nil || n != 1 {

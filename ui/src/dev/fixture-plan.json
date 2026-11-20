@@ -1,6 +1,6 @@
 {
   "formatVersion": 2,
-  "statementCount": 11,
+  "statementCount": 14,
   "dataLoss": true,
   "changes": [
     {
@@ -217,6 +217,36 @@
         }
       ],
       "severity": "warning"
+    },
+    {
+      "id": "view:\"sales\".\"v_region_contacts\"",
+      "objectType": "view",
+      "schema": "sales",
+      "name": "v_region_contacts",
+      "changeKind": "alter",
+      "dependsOn": [
+        "schema:\"\".\"sales\"",
+        "table:\"sales\".\"regions\""
+      ],
+      "oldDefinition": "CREATE OR REPLACE VIEW \"sales\".\"v_region_contacts\" AS\n SELECT r.id,\n    r.name,\n    r.rvp_email\n   FROM sales.regions r;\nGRANT SELECT ON TABLE \"sales\".\"v_region_contacts\" TO \"app.app.sql.readers\";",
+      "newDefinition": "CREATE OR REPLACE VIEW \"sales\".\"v_region_contacts\" AS\n SELECT r.id,\n    r.name,\n    r.rvp_email\n   FROM sales.regions r;\nGRANT SELECT ON TABLE \"sales\".\"v_region_contacts\" TO \"app.app.sql.readers\";",
+      "statements": [
+        {
+          "sql": "DROP VIEW \"sales\".\"v_region_contacts\";",
+          "transactional": true,
+          "note": "recreated because it depends on column \"name\" of \"sales\".\"regions\", whose type changes from character varying(100) to text (kept with its current definition; it is not part of the desired state)"
+        },
+        {
+          "sql": "CREATE OR REPLACE VIEW \"sales\".\"v_region_contacts\" AS\n SELECT r.id,\n    r.name,\n    r.rvp_email\n   FROM sales.regions r;",
+          "transactional": true,
+          "note": "recreated because it depends on column \"name\" of \"sales\".\"regions\", whose type changes from character varying(100) to text (kept with its current definition; it is not part of the desired state)"
+        },
+        {
+          "sql": "GRANT SELECT ON TABLE \"sales\".\"v_region_contacts\" TO \"app.app.sql.readers\";",
+          "transactional": true
+        }
+      ],
+      "reason": "recreated because it depends on column \"name\" of \"sales\".\"regions\", whose type changes from character varying(100) to text (kept with its current definition; it is not part of the desired state)"
     },
     {
       "id": "table:\"qa\".\"unusual_transaction_log\"",

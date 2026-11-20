@@ -33,8 +33,8 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Comparison semantics (SSDT options) | ✅ Routine bodies compared modulo whitespace (`--compare-whitespace`), comments optional (`--ignore-comments`), privileges optional (`--ignore-privileges`; revokes follow the drop policy), column order `ignore`/`warn`/`rebuild` (`--column-order`); defaults per project in `pgdac.yaml` `compare:` (WP5) |
 | Table rebuild (declared column order) | ✅ Opt-in: one atomic block creates the table in the declared order, copies rows, swaps; constraints, indexes, triggers, policies, privileges, owned sequences, foreign keys from other tables and dependent views are recreated; the drop policy decides what the target-only columns do (WP5) |
 | Sequence seeding | ✅ A column that gains an identity or a default on a new sequence on a populated table has the sequence seeded past `max(col)` (WP5) |
-| Connection resiliency | ✅ Live-database connects (`internal/dbconn`) retry DNS and dial failures with backoff (250 ms, 500 ms, 1 s); server-answered errors are not retried (WP8) |
-| Index rebuild without a gap | ✅ A changed index is built `CONCURRENTLY` under a temporary name while the current one serves, then swapped in (drop old, rename); leftovers from interrupted runs are cleared; offline or partitioned: drop + create in one transaction (WP8) |
+| Connection resiliency | ✅ Live-database connects (`internal/dbconn`) retry with backoff (250 ms, 500 ms, 1 s) what heals by waiting — DNS, dial/read failures before the handshake, a server starting up (57P03), full (53300) or reporting a connection exception (08xxx); authentication and other server answers are not retried; errors name the server, never the password (WP8 follow-up) |
+| Index rebuild without a gap | ✅ A changed index is built `CONCURRENTLY` under a temporary name while the current one serves, then swapped in (drop old, rename); an index left under its rebuild name by an interrupted run is removed whatever the drop policy; offline or partitioned: drop + create in one transaction, the drop `IF EXISTS` (WP8 follow-up) |
 | Refactorlog (renames without drop + create) | ✅ `refactorlog.json` + `pg-dac refactor rename`; applied as `ALTER … RENAME`, recorded per target in `pgdac.refactorlog` (WP4) |
 | Drift detection / `BlockWhenDriftDetected` | ✅ Every publish records a baseline in `pgdac.baseline`; `pg-dac drift` (exit 2 on drift), `pg-dac baseline`; publish refuses a drifted target unless `--allow-drift` (WP4) |
 | Lint | ✅ `pg-dac lint` — hazards by code/severity/object, exit 2 at or above `--fail-on` (WP4) |
@@ -344,7 +344,7 @@ deferred:
 
 ```
 pg-dac/
-  cmd/pg-dac/            CLI + verbs: diff script report plan lint publish build extract inspect serve init refactor drift baseline
+  cmd/pg-dac/            CLI + verbs: diff script report plan lint publish build extract inspect serve init refactor drift baseline export import
   .github/workflows/     CI (Go matrix + embedded-PG integration + GUI + cargo) and tag-driven release
   internal/
     model/              canonical schema model (+ JSON); lookups, identity-sequence predicate
@@ -357,12 +357,18 @@ pg-dac/
     safety/             hazard taxonomy + severity + version gating
     execute/            apply (session preamble, lock_timeout + retry; ApplyStream for SSE)
     engine/             Compare(), Result (+Warnings), dependents.go (drop/recreate dependents), ObjectChanges()/PlanDoc(), ObjectScripts (plan-ordered extract)
-    artifact/           .pgdac read/write (format 3: signed manifest, deploy parts), Merkle, Ed25519 signing, trusted_keys
+    artifact/           .pgdac read/write (format 4: signed manifest, deploy parts, grants), Merkle, Ed25519 signing, trusted_keys
     deploy/             pre/post-deploy scripts, dropPolicy and refactorlog from a project or artifact; publish runs them
     refactor/           refactorlog.json: renames applied as ALTER … RENAME, recorded in pgdac.refactorlog
     drift/              baselines in pgdac.baseline; drift detection and explanation
     project/            pgdac.yaml manifest (+ doublestar globs)
-    source/             resolve any source spec → model
+    source/             resolve any source spec → model; OptionsFor (schemas, target major, signer trust)
+    dbconn/             live-database connect with retry of transient failures
+    publish/            the publish pipeline the CLI and the daemon share (drift gate, refactorlog, deploy scripts, baseline)
+    projsync/           update a project's files from a desired state (publish with a project as target)
+    pgbac/              .pgbac export/import of schema and data
+    sqltext/            SQL statement splitting, head parsing and whitespace-insensitive normalization
+    validate/           replay a migration in a scratch database and check convergence
   ui/                   Tauri GUI (src/ React, src-tauri/ Rust supervisor, binaries/ sidecar)
   testdata/             demo project + fixtures
 ```
@@ -397,13 +403,15 @@ pg-dac lint    --from "postgres://…/db" --to ./project --fail-on error
 ```bash
 # build the sidecar for your Rust target triple, then run the app
 $triple = (rustc -Vv | Select-String '^host:').ToString().Split(' ')[1]
-$sha = git rev-parse --short HEAD
-go build -ldflags "-X main.version=0.9.0-dev+$sha" -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
+$version = "$((Get-Content ui/PGDAC_VERSION).Trim())-dev+$(git rev-parse --short HEAD)"
+go build -ldflags "-X main.version=$version" -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
 cd ui && pnpm install && pnpm tauri dev
 ```
 Restart `pnpm tauri dev` after rebuilding the sidecar: the app runs the copy Tauri placed in
 `src-tauri/target/debug/`, not the file in `binaries/`. The status bar shows the running engine as
-`0.9.0-dev+<commit>` so a stale sidecar is obvious.
+`<version>-dev+<commit>` so a stale sidecar is obvious.
 
 **Tests:** `go test -short ./...` (no DB) · `go test -p 1 ./...` (+ embedded-Postgres integration:
-bootstrap gate, scenario matrix, introspection invariants).
+bootstrap gate, scenario matrix, introspection invariants, publish lifecycle) · in `ui/`:
+`pnpm lint`, `pnpm test` (vitest), `pnpm exec tsc --noEmit` · in `ui/src-tauri/`:
+`cargo clippy --all-targets -- -D warnings`.

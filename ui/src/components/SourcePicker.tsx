@@ -2,11 +2,11 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, Database, FolderOpen, Package, Save, Trash2, X } from "lucide-react";
 
 import { pickDirectory, pickFile } from "../ipc/client";
-import { useStore } from "../state/store";
+import { useStore, type Side } from "../state/store";
 import { defaultName, displaySpec, inferKind, isProfileRef, maskValue, profileOf, profileRef } from "../state/profiles";
 import type { ProfileKind } from "../ipc/types";
 
-export function KindIcon({ kind, size = 15 }: { kind: ProfileKind | undefined; size?: number }) {
+function KindIcon({ kind, size = 15 }: { kind: ProfileKind | undefined; size?: number }) {
   const cls = "kind-icon" + (kind ? " kind-" + kind : "");
   if (kind === "db") return <Database className={cls} size={size} aria-hidden="true" />;
   if (kind === "project") return <FolderOpen className={cls} size={size} aria-hidden="true" />;
@@ -19,12 +19,14 @@ export function KindIcon({ kind, size = 15 }: { kind: ProfileKind | undefined; s
 // project folder, open a .pgdac artifact, type a connection string or path).
 // A typed connection string is shown masked ("database @ host"); it can be kept
 // as a saved source. Bound to store[side] (from | to).
-export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label: string; hint: string }) {
-  const s = useStore();
-  const value = s[side];
-  const profile = profileOf(value, s.profiles);
+export function SourcePicker({ side, label, hint }: { side: Side; label: string; hint: string }) {
+  const value = useStore((s) => s[side]);
+  const profiles = useStore((s) => s.profiles);
+  const { setSource, addProfile, removeProfile } = useStore.getState();
+  const profile = profileOf(value, profiles);
   const isProfile = isProfileRef(value);
   const labelId = useId();
+  const savedId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -34,7 +36,23 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
   const [saving, setSaving] = useState(false);
   const [saveName, setSaveName] = useState("");
 
-  const set = (v: string) => s.set({ [side]: v } as never);
+  const set = (v: string) => setSource(side, v);
+  // Leaving the typing or saving row hands focus back to the picker button.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!typing && !saving && refocus.current) {
+      refocus.current = false;
+      buttonRef.current?.focus();
+    }
+  }, [typing, saving]);
+  const endTyping = () => {
+    refocus.current = true;
+    setTyping(false);
+  };
+  const endSaving = () => {
+    refocus.current = true;
+    setSaving(false);
+  };
 
   // Close the menu on an outside click.
   useEffect(() => {
@@ -62,6 +80,8 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
     if (e.key === "Escape") {
       e.preventDefault();
       closeMenu();
+    } else if (e.key === "Tab") {
+      closeMenu(false);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       items[(i + 1) % items.length]?.focus();
@@ -96,7 +116,7 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
   };
   const commitTyping = () => {
     set(draft.trim());
-    setTyping(false);
+    endTyping();
   };
 
   const beginSave = () => {
@@ -104,8 +124,8 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
     setSaving(true);
   };
   const commitSave = async () => {
-    const saved = await s.addProfile({ name: saveName.trim() || defaultName(value), kind: inferKind(value), value });
-    setSaving(false);
+    const saved = await addProfile({ name: saveName.trim() || defaultName(value), kind: inferKind(value), value });
+    endSaving();
     // Switch this side to the just-saved profile so the value is now masked.
     if (saved) set(profileRef(saved.id));
   };
@@ -130,13 +150,13 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
               placeholder="postgres://user@host/db  ·  C:\path\to\project  ·  app.pgdac"
               onKeyDown={(e) => {
                 if (e.key === "Enter") commitTyping();
-                if (e.key === "Escape") setTyping(false);
+                if (e.key === "Escape") endTyping();
               }}
             />
             <button type="button" className="primary" onClick={commitTyping}>
               Use
             </button>
-            <button type="button" onClick={() => setTyping(false)}>
+            <button type="button" onClick={endTyping}>
               Cancel
             </button>
           </>
@@ -161,7 +181,7 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
                     <span className="muted">{maskValue(profile.kind, profile.value)}</span>
                   </>
                 ) : (
-                  displaySpec(value, s.profiles)
+                  displaySpec(value, profiles)
                 )}
               </span>
               <ChevronDown className="chev" size={16} aria-hidden="true" />
@@ -182,48 +202,57 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
 
       {menuOpen && (
         <div className="picker-menu" role="menu" aria-label={`${label} sources`} ref={menuRef} onKeyDown={onMenuKey}>
-          <div className="menu-heading">Saved sources</div>
-          {s.profiles.length === 0 ? (
-            <div className="menu-empty">None yet. Choose a source below, then use the save button next to it.</div>
-          ) : (
-            s.profiles.map((p) => (
-              <div className="menu-item" key={p.id}>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    set(profileRef(p.id));
-                    closeMenu();
-                  }}
-                >
-                  <KindIcon kind={p.kind} />
-                  <span className="item-name">{p.name}</span>
-                  <span className="item-sub">{maskValue(p.kind, p.value)}</span>
-                </button>
-                <button type="button" className="icon-btn" aria-label={`Delete saved source ${p.name}`} title="Delete" onClick={() => void s.removeProfile(p.id)}>
-                  <Trash2 size={14} aria-hidden="true" />
-                </button>
+          <div role="group" aria-labelledby={savedId}>
+            <div className="menu-heading" id={savedId} role="presentation">
+              Saved sources
+            </div>
+            {profiles.length === 0 ? (
+              <div className="menu-empty" role="menuitem" aria-disabled="true" tabIndex={-1}>
+                None yet. Choose a source below, then use the save button next to it.
               </div>
-            ))
-          )}
-          <div className="menu-sep" />
-          <div className="menu-item">
-            <button type="button" role="menuitem" onClick={browseDir}>
-              <FolderOpen className="kind-icon kind-project" size={15} aria-hidden="true" />
-              Browse for a project folder…
-            </button>
+            ) : (
+              profiles.map((p) => (
+                <div className="menu-item" role="none" key={p.id}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    onClick={() => {
+                      set(profileRef(p.id));
+                      closeMenu();
+                    }}
+                  >
+                    <KindIcon kind={p.kind} />
+                    <span className="item-name">{p.name}</span>
+                    <span className="item-sub">{maskValue(p.kind, p.value)}</span>
+                  </button>
+                  <button type="button" role="menuitem" tabIndex={-1} className="icon-btn" aria-label={`Delete saved source ${p.name}`} title="Delete" onClick={() => void removeProfile(p.id)}>
+                    <Trash2 size={14} aria-hidden="true" />
+                  </button>
+                </div>
+              ))
+            )}
           </div>
-          <div className="menu-item">
-            <button type="button" role="menuitem" onClick={browseFile}>
-              <Package className="kind-icon kind-artifact" size={15} aria-hidden="true" />
-              Open a .pgdac artifact…
-            </button>
-          </div>
-          <div className="menu-item">
-            <button type="button" role="menuitem" onClick={startTyping}>
-              <Database className="kind-icon kind-db" size={15} aria-hidden="true" />
-              Type a connection string or path…
-            </button>
+          <div className="menu-sep" role="separator" />
+          <div role="group" aria-label="Other sources">
+            <div className="menu-item" role="none">
+              <button type="button" role="menuitem" tabIndex={-1} onClick={browseDir}>
+                <FolderOpen className="kind-icon kind-project" size={15} aria-hidden="true" />
+                Browse for a project folder…
+              </button>
+            </div>
+            <div className="menu-item" role="none">
+              <button type="button" role="menuitem" tabIndex={-1} onClick={browseFile}>
+                <Package className="kind-icon kind-artifact" size={15} aria-hidden="true" />
+                Open a .pgdac artifact…
+              </button>
+            </div>
+            <div className="menu-item" role="none">
+              <button type="button" role="menuitem" tabIndex={-1} onClick={startTyping}>
+                <Database className="kind-icon kind-db" size={15} aria-hidden="true" />
+                Type a connection string or path…
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -237,14 +266,14 @@ export function SourcePicker({ side, label, hint }: { side: "from" | "to"; label
             onChange={(e) => setSaveName(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") void commitSave();
-              if (e.key === "Escape") setSaving(false);
+              if (e.key === "Escape") endSaving();
             }}
             placeholder="Name, e.g. Dev"
           />
           <button type="button" className="primary" onClick={() => void commitSave()}>
             Save
           </button>
-          <button type="button" onClick={() => setSaving(false)}>
+          <button type="button" onClick={endSaving}>
             Cancel
           </button>
         </div>

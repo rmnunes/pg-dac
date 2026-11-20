@@ -30,8 +30,8 @@ built into `src-tauri/binaries/` with the Rust target-triple suffix:
 ```powershell
 # from the repo root: build the sidecar for your target triple
 $triple = (rustc -Vv | Select-String '^host:').ToString().Split(' ')[1]
-$sha = git rev-parse --short HEAD
-go build -ldflags "-X main.version=0.9.0-dev+$sha" -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
+$version = "$((Get-Content ui/PGDAC_VERSION).Trim())-dev+$(git rev-parse --short HEAD)"
+go build -ldflags "-X main.version=$version" -o "ui/src-tauri/binaries/pg-dac-$triple.exe" ./cmd/pg-dac
 
 cd ui
 pnpm install
@@ -41,7 +41,7 @@ pnpm tauri dev      # launches the app; it spawns `pg-dac serve` automatically
 The app runs the copy of the sidecar that Tauri places next to its own binary in
 `src-tauri/target/debug/`, so a sidecar rebuilt while the app is running is picked up only after
 `pnpm tauri dev` is restarted. The status bar shows which engine is running: a dev build reports
-`0.9.0-dev+<commit>`, so a stale sidecar is visible at a glance.
+`<version>-dev+<commit>`, so a stale sidecar is visible at a glance.
 
 The first compare against a project/`.sql`/`.pgdac` source downloads the embedded
 PostgreSQL binaries once (cached afterward), then stays warm for the session.
@@ -50,8 +50,10 @@ PostgreSQL binaries once (cached afterward), then stays warm for the session.
 
 `pnpm dev` and http://localhost:1420 run the frontend without Tauri: `src/ipc/client.ts` routes
 every command to the in-browser mock daemon (`src/ipc/mock.ts`), which replays a real plan
-(`src/dev/fixture-plan.json`: five changes, data loss, three engine notes) with the same event
-choreography as the Rust supervisor and keeps saved sources in `localStorage`. Use it for UX
+(`src/dev/fixture-plan.json`: six changes, data loss, a dependent view the engine recreates, three
+engine notes) with the same event choreography and refusals as the daemon (a re-plan of sources
+that were not compared answers 409, a publish with unapproved data loss is refused) and keeps
+saved sources in `localStorage`. Use it for UX
 work, visual review and accessibility audits (axe-core from the console) — no database needed.
 The desktop app never takes this path.
 
@@ -78,7 +80,8 @@ The window is laid out like SSDT's Schema Compare:
   Each row's badge names its most serious risk ("data loss", "rewrite", "exclusive lock", …).
   Excluding a change also excludes every change that depends on it (shown disabled, with the
   cause); including one brings its dependencies back — the SSDT behaviour. Every selection change
-  re-plans the migration on the daemon (sub-second, no re-read of the sources), so the list,
+  re-plans the migration on the daemon (sub-second, no re-read of the sources; if the daemon
+  cannot, the list says so and offers Compare again), so the list,
   the Generated SQL and the statement count always show what a publish would run: an excluded
   object the engine must still recreate for a dependency is marked "recreated" with the reason,
   and one nothing runs for says so. The list is a
@@ -94,7 +97,8 @@ The window is laid out like SSDT's Schema Compare:
   above the status bar, each dismissible; the status bar toggles it and shows the count.
 - **Publish** summarises the deployment settings (with a link to change them), lists the risks
   to acknowledge — each with the objects it affects — and streams per-statement progress.
-  `Apply` stays disabled until every acknowledgement is ticked.
+  `Apply` stays disabled until every acknowledgement is ticked, and while the plan is being
+  re-planned for the selection, could not be, or the options changed since the comparison.
 
 Every dialog is a native `<dialog>`: `Escape` closes it (or cancels a running compare), focus is
 trapped inside and returns to the opener. Every control has an accessible name; the colour
@@ -107,4 +111,19 @@ led to this layout and the re-audit after it.
 cd ui && pnpm tauri build
 ```
 
-Bundles the signed `pg-dac` sidecar (`bundle.externalBin`) alongside the app.
+Bundles the `pg-dac` sidecar (`bundle.externalBin`) alongside the app. Neither the sidecar nor
+the installers are code-signed: `release.yml` does not sign them yet, which is an open release
+prerequisite. (`.pgdac` artifacts and `.pgbac` archives are signed by pg-dac itself; that is a
+different thing.)
+
+## Checks
+
+```powershell
+cd ui
+pnpm exec tsc --noEmit   # types
+pnpm lint                # ESLint: recommended JS/TS rules + React Hooks rules
+pnpm test                # vitest: selection gating, plan overlay, version parsing, mock parity
+```
+
+The pure selection logic lives in `src/state/plan.ts` (no store, no I/O) so it is unit-tested on
+its own; the store (`src/state/store.ts`) wires it to the daemon.

@@ -1,6 +1,7 @@
 import { AlertTriangle, Info, OctagonAlert } from "lucide-react";
 
 import { optionsStale, useStore } from "../state/store";
+import { plural } from "../vocab";
 
 export interface EngineInfo {
   version?: string;
@@ -10,41 +11,46 @@ export interface EngineInfo {
 const fmtTime = (t: number): string => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 export function StatusBar({ notesOpen, onToggleNotes, engine }: { notesOpen: boolean; onToggleNotes: () => void; engine: EngineInfo }) {
-  const s = useStore();
-  const plan = s.plan;
-  const stale = optionsStale(s);
+  const plan = useStore((s) => s.plan);
+  const comparedAt = useStore((s) => s.comparedAt);
+  const replanning = useStore((s) => s.replanning);
+  const warningCount = useStore((s) => s.warnings.length);
+  const stale = useStore(optionsStale);
+
   const counts = (plan?.changes ?? []).reduce<Record<string, number>>((a, c) => {
     a[c.changeKind] = (a[c.changeKind] ?? 0) + 1;
     return a;
   }, {});
   const parts: string[] = [];
   if (plan) {
-    parts.push(`${plan.statementCount} statement${plan.statementCount === 1 ? "" : "s"}`);
+    parts.push(plural(plan.statementCount, "statement"));
     const kinds = [counts.drop ? `${counts.drop} drop` : "", counts.alter ? `${counts.alter} change` : "", counts.add ? `${counts.add} add` : ""].filter(Boolean);
     if (kinds.length) parts.push(kinds.join(" · "));
-    if (plan.prelude?.length) parts.push(`${plan.prelude.length} refactorlog rename${plan.prelude.length === 1 ? "" : "s"}`);
-    if (s.comparedAt) parts.push(`compared at ${fmtTime(s.comparedAt)}`);
+    if (plan.prelude?.length) parts.push(plural(plan.prelude.length, "refactorlog rename"));
+    if (comparedAt) parts.push(`compared at ${fmtTime(comparedAt)}`);
   }
 
   return (
     <footer className="statusbar" aria-label="Status">
-      <span role="status">{plan ? parts.join(" · ") : "No comparison yet"}</span>
-      {s.replanning && <span className="muted">updating the plan…</span>}
+      <span role="status">
+        {plan ? parts.join(" · ") : "No comparison yet"}
+        {replanning && <span className="muted"> · updating the plan…</span>}
+      </span>
       {plan?.dataLoss && (
         <span className="flag">
           <OctagonAlert size={13} aria-hidden="true" /> Deletes data
         </span>
       )}
       {stale && (
-        <span className="kind-alter">
-          <AlertTriangle size={13} aria-hidden="true" style={{ verticalAlign: -2 }} /> Options or sources changed — compare again
+        <span className="stale">
+          <AlertTriangle size={13} aria-hidden="true" /> Options or sources changed — compare again
         </span>
       )}
       <div className="right">
-        {s.warnings.length > 0 && (
+        {warningCount > 0 && (
           <button type="button" aria-expanded={notesOpen} aria-controls="notes-panel" onClick={onToggleNotes} title={notesOpen ? "Hide the notes" : "Show the notes"}>
             <AlertTriangle size={13} aria-hidden="true" />
-            Notes ({s.warnings.length})
+            Notes ({warningCount})
           </button>
         )}
         {(engine.version || engine.note) && (

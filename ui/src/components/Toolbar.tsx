@@ -4,20 +4,24 @@ import { changedOptionCount, useStore } from "../state/store";
 import { specIsDb, specIsProject } from "../state/profiles";
 
 export function Toolbar({ onOptions, onScript, onPublish }: { onOptions: () => void; onScript: () => void; onPublish: () => void }) {
-  const s = useStore();
-  const hasChanges = !!s.plan && s.plan.changes.length > 0;
+  const hasChanges = useStore((s) => !!s.plan && s.plan.changes.length > 0);
+  const from = useStore((s) => s.from);
+  const to = useStore((s) => s.to);
+  const profiles = useStore((s) => s.profiles);
+  const status = useStore((s) => s.status);
+  const optionCount = useStore(changedOptionCount);
+  const runCompare = useStore((s) => s.runCompare);
   // A Target is published to when it is a live database (the migration runs
   // there) or a project directory (its files are updated from the Source). An
   // artifact cannot be a Target.
-  const targetIsDb = specIsDb(s.from, s.profiles);
-  const targetIsProject = specIsProject(s.from, s.profiles);
-  const optionCount = changedOptionCount(s);
-  const comparing = s.status === "comparing";
-  const scripting = s.status === "scripting";
+  const targetIsDb = specIsDb(from, profiles);
+  const targetIsProject = specIsProject(from, profiles);
+  const comparing = status === "comparing";
+  const scripting = status === "scripting";
 
   return (
     <div className="toolbar" role="toolbar" aria-label="Actions">
-      <button type="button" className="primary" disabled={!s.from || !s.to || comparing} title="Compare (Ctrl+Enter)" onClick={() => void s.runCompare()}>
+      <button type="button" className="primary" disabled={!from || !to || comparing} title="Compare (Ctrl+Enter)" onClick={() => void runCompare()}>
         <Play size={14} aria-hidden="true" />
         {comparing ? "Comparing…" : "Compare"}
       </button>

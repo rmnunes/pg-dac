@@ -17,8 +17,11 @@ import { OptionsDialog, type OptionsTab } from "./components/OptionsDialog";
 import { CompareProgress } from "./components/CompareProgress";
 
 export default function App() {
-  const { plan, warnings, error, generateScript, loadProfiles, handlePublishEvent, handleCompareEvent, set } = useStore();
-  const { treeWidth, setTreeWidth, persistTreeWidth } = useStore();
+  const basePlan = useStore((s) => s.basePlan);
+  const hasWarnings = useStore((s) => s.warnings.length > 0);
+  const error = useStore((s) => s.error);
+  const treeWidth = useStore((s) => s.treeWidth);
+  const { generateScript, loadProfiles, handlePublishEvent, handleCompareEvent, dismissError, setTreeWidth, persistTreeWidth, resetPublish } = useStore.getState();
   const [showPublish, setShowPublish] = useState(false);
   const [scriptText, setScriptText] = useState<string | null>(null);
   const [optionsTab, setOptionsTab] = useState<OptionsTab | null>(null);
@@ -72,12 +75,12 @@ export default function App() {
     };
   }, [handlePublishEvent, handleCompareEvent, loadProfiles]);
 
-  // A fresh result re-opens the notes so new warnings are seen; the user can
-  // collapse them again from the status bar.
+  // A new comparison re-opens the notes so its warnings are seen; the user can
+  // collapse them again from the status bar. A selection change (which only
+  // re-plans) leaves the panel as the user set it.
   useEffect(() => {
-    if (warnings.length > 0) setNotesOpen(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan]);
+    if (basePlan && hasWarnings) setNotesOpen(true);
+  }, [basePlan, hasWarnings]);
 
   // Ctrl+Enter compares (the toolbar button's shortcut).
   useEffect(() => {
@@ -106,7 +109,10 @@ export default function App() {
             const sql = await generateScript();
             if (sql) setScriptText(sql);
           }}
-          onPublish={() => setShowPublish(true)}
+          onPublish={() => {
+            resetPublish();
+            setShowPublish(true);
+          }}
         />
       </header>
 
@@ -115,7 +121,7 @@ export default function App() {
       {error && (
         <div className="error-banner" role="alert">
           <span className="msg">{error}</span>
-          <button type="button" className="icon-btn ghost" aria-label="Dismiss this error" onClick={() => set({ error: undefined, status: "idle" })}>
+          <button type="button" className="icon-btn ghost" aria-label="Dismiss this error" onClick={dismissError}>
             <X size={14} aria-hidden="true" />
           </button>
         </div>

@@ -46,52 +46,77 @@ production pilot completes without a correctness change.
   engine's warnings, native dialogs with focus management, contrast-checked dark theme (editors
   included), Lucide icons; axe-core reports no violations. A browser-only dev harness
   (`pnpm dev` without Tauri) replays a real plan through a mock daemon.
+- **Selection re-plans instantly** (daemon `/replan`): the GUI asks the engine what the migration
+  is under the current include/exclude selection without re-reading the sources, so an excluded
+  object that must still be dropped and recreated for a dependency shows up as "recreated" with
+  the reason, an excluded object nothing runs for says so, and the statement count is the one a
+  publish runs. Excluded objects stay listed so they can be re-included. A re-plan the daemon
+  refuses is reported above the list, and Apply waits for the re-plan.
+- **Dependency visibility**: a Dependencies tab lists what the selected object depends on and what
+  depends on it within the plan, each with its include state and a jump; rows excluded by
+  dependency carry a "needs X" badge; a toggle that pulls other rows out (or back in) says so above
+  the list; the publish dialog lists excluded objects the engine still has to recreate.
+- Each plan object carries `reason`, the engine's explanation when it touches an object beyond the
+  plain diff (a view recreated because a column it reads changes type, a rebuild, an object kept).
+  The GUI marks such objects "recreated" in the list and the Definition tab says why.
+- Schemas and extensions have a definition in the plan like every other object, so the GUI's
+  Definition diff shows `CREATE SCHEMA` (with comment and grants) or `CREATE EXTENSION` (with the
+  installed version noted) instead of two empty panes.
+- Frontend checks: ESLint (recommended JS/TS and React Hooks rules) and vitest unit tests for the
+  selection logic, version parsing and mock parity; CI runs them, and rustfmt and clippy
+  (`-D warnings`) on the Tauri layer.
 
 ### Changed
 - **Gap-free index rebuilds.** An index whose definition changed is rebuilt the way
   `REINDEX CONCURRENTLY` works: built `CONCURRENTLY` under a temporary name while the current
   index keeps serving queries, then the old one is dropped and the replacement takes its name
   (SHARE UPDATE EXCLUSIVE only). The table is never without the index and no `INDEX_DROPPED`
-  risk is raised; a leftover from an interrupted run is cleared first. Offline, or on a
-  partitioned table, it is dropped and recreated inside the transaction and the statements say
-  they are a rebuild. The GUI shows further risk types on a change as "+N risks".
+  risk is raised. Offline, or on a partitioned table, it is dropped and recreated inside the
+  transaction and the statements say they are a rebuild. The GUI shows further risk types on a
+  change as "+N risks".
+- **One publish pipeline.** `internal/publish` holds the publish the CLI and the GUI both run —
+  drift gate, refactorlog renames, missing-roles retry, deploy scripts, migration, baseline — with
+  typed refusals (drift, blocked hazards, partial apply, baseline); a project update shares
+  `publish.Project`. The two copies had begun to differ.
+- **Connections retry what heals by waiting**: DNS, dial/read failures before the handshake, and a
+  server that is starting up (57P03), full (53300) or reports a connection exception (08xxx);
+  authentication and other answers fail at once. Connection errors name the server, never the
+  password.
+- **Daemon hardening**: every endpoint answers errors as `{"error": …}`, checks its method, bounds
+  the request body and the header read; binding a non-loopback address requires `PGDAC_TOKEN`;
+  the re-plan cache is keyed by everything that shapes how the sources are read (target major and
+  signer key included). Request JSON spells the selection `includeIds` / `excludeIds`, like the rest of the API.
+- Statement failures carry PostgreSQL's DETAIL and HINT on every path — streaming, batched,
+  deferred project builds and deploy scripts.
 - Plan format 2, artifact format 4 (models carry grants). Older artifacts open with a warning.
 - Privilege warnings are gone (privileges are managed); default privileges, view column
   privileges and database-level grants are reported as unmanaged.
 - `extract --to-project` refuses an existing project directory: use `publish` with the project as
   the target to update it.
+- The GUI's Tauri layer is a single proxy and stream helper; the unused one-shot build/inspect
+  commands are gone.
 
 ### Fixed
+- Functions that depend on a dropped object — a relation whose row type their signature uses, an
+  enum in their signature, what a SQL-standard body references — are recreated around the drop,
+  like dependent views and triggers: dropped before it, recreated after it, kept with their
+  current definition when the source does not define them, and dropped only (saying so) when
+  what they need disappears for good. Before, PostgreSQL refused the drop ("other objects depend
+  on it") at publish time.
+- An offline index rebuild on a table whose indexed column the same plan drops failed (the column
+  drop had already taken the index); the rebuild's drop is now `IF EXISTS`.
+- An index left under its rebuild name by an interrupted run was kept forever when the drop policy
+  kept unknown indexes; it is pg-dac's own leftover, so it is removed, and the next rebuild takes
+  the name back.
+- A definition that failed to render showed as an empty pane; the error now reaches the caller.
+- The GUI list no longer resets its filter, collapsed groups and keyboard position on every
+  include/exclude toggle, and the notes panel no longer reopens after the user collapsed it.
+- A jump from the Dependencies tab moves the list's keyboard position to that row and keeps focus
+  on the tab; a backdrop click no longer cancels a running compare; a dialog Chromium closes on a
+  repeated Escape is reopened while its operation runs.
 - identity → serial conversions order `CREATE SEQUENCE` after `DROP IDENTITY`.
 - A `CREATE OR REPLACE` of a view or function no longer re-grants its privileges.
 - Column-order warnings name only the misplaced columns.
-- Functions whose signature uses a relation's row type (or whose SQL-standard body references it)
-  are now recreated around a drop of that relation, like dependent views and triggers: dropped
-  before it, recreated after it, kept with their current definition when the source does not
-  define them. Before, PostgreSQL refused the drop ("other objects depend on it") at publish time.
-- Connections to live databases retry transient failures (a name lookup that fails once, a
-  refused or reset dial) three times with a short backoff before giving up, so a split-DNS
-  resolver that answers the first query for a private host with "no such host" no longer fails
-  the first compare. Authentication and protocol errors are still returned at once.
-- **Dependency visibility**: a Dependencies tab lists what the selected object depends on and what
-  depends on it within the plan, each with its include state and a jump; rows excluded by
-  dependency carry a "needs X" badge; a toggle that pulls other rows out (or back in) says so above
-  the list; the publish dialog lists excluded objects the engine still has to recreate.
-- **Selection re-plans instantly** (daemon `/replan`): the GUI asks the engine what the migration is
-  under the current include/exclude selection without re-reading the sources, so an excluded
-  object that must still be dropped and recreated for a dependency shows up as "recreated" with
-  the reason, an excluded object nothing runs for says so, and the statement count is the one a
-  publish runs. Excluded objects stay listed so they can be re-included.
-- Statement failures carry PostgreSQL's DETAIL and HINT (which object blocks a drop, which value
-  violates a constraint). The GUI's publish, the pre-publish rename check and the drift report
-  connect through the same retrying helper as the CLI.
-- Each plan object carries `reason`, the engine's explanation when it touches an object beyond the
-  plain diff (a view recreated because a column it reads changes type, a rebuild, an object kept).
-  The GUI marks such objects "recreated" in the list and the Definition tab says why, instead of
-  showing two identical texts with no explanation.
-- Schemas and extensions have a definition in the plan like every other object, so the GUI's
-  Definition diff shows `CREATE SCHEMA` (with comment and grants) or `CREATE EXTENSION` (with the
-  installed version noted) instead of two empty panes.
 
 ## 0.1.0 — 2026-10-07
 

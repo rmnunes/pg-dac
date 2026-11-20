@@ -67,3 +67,15 @@ monaco.editor.defineTheme(THEME, {
     "diffEditorOverview.insertedForeground": "#ef9393",
   },
 });
+
+// The options every read-only editor shares (definitions, generated SQL, the
+// script). automaticLayout: editors stay mounted while hidden (switching tabs
+// or changes must not dispose Monaco models — the DiffEditor wrapper disposes
+// them in an order Monaco rejects), so they re-measure themselves when shown.
+export const READ_ONLY_OPTIONS = {
+  readOnly: true,
+  minimap: { enabled: false },
+  scrollBeyondLastLine: false,
+  fontSize: 13,
+  automaticLayout: true,
+} as const;

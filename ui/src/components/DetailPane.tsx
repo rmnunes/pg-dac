@@ -4,24 +4,19 @@ import { AlertTriangle, Info, OctagonAlert } from "lucide-react";
 
 import type { ObjectChange } from "../ipc/types";
 
-import { THEME } from "../monaco-setup";
+import { READ_ONLY_OPTIONS, THEME } from "../monaco-setup";
 import { useStore } from "../state/store";
-import { hazardInfo, kindGlyph, kindLabel, objectName, sortedHazards, unchangedText } from "../vocab";
-
-// automaticLayout: the editors stay mounted while hidden (switching tabs or
-// changes must not dispose Monaco models — the DiffEditor wrapper disposes
-// them in an order Monaco rejects), so they re-measure themselves when shown.
-const monacoOpts = { readOnly: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, automaticLayout: true } as const;
+import { firstLine, hazardInfo, kindGlyph, kindLabel, objectLabel, objectName, plural, sortedHazards, unchangedText } from "../vocab";
+import { TabList, panelId, tabId, type TabSpec } from "./TabList";
 
 type Tab = "diff" | "sql" | "risks" | "deps";
 
-const firstLine = (sql: string): string => {
-  const i = sql.indexOf("\n");
-  return i >= 0 ? sql.slice(0, i) + " …" : sql;
-};
-
 export function DetailPane() {
-  const { plan, selectedId, excluded, autoExcluded, select } = useStore();
+  const plan = useStore((s) => s.plan);
+  const selectedId = useStore((s) => s.selectedId);
+  const excluded = useStore((s) => s.excluded);
+  const autoExcluded = useStore((s) => s.autoExcluded);
+  const select = useStore((s) => s.select);
   const [tab, setTab] = useState<Tab>("diff");
   const [showResult, setShowResult] = useState(false);
   const uid = useId();
@@ -56,7 +51,7 @@ export function DetailPane() {
     return { label: "included", cls: "ok" };
   };
 
-  const tabs: { key: Tab; label: string; count?: number }[] = [
+  const tabs: TabSpec<Tab>[] = [
     { key: "diff", label: "Definition" },
     { key: "sql", label: "Generated SQL" },
     { key: "risks", label: "Risks", count: hazards.length },
@@ -71,11 +66,21 @@ export function DetailPane() {
           const st = stateOf(d);
           return (
             <li key={d.id}>
-              <button type="button" className="link" onClick={() => select(d.id)} title="Show this change">
+              <button
+                type="button"
+                className="link"
+                title="Show this change"
+                onClick={() => {
+                  select(d.id);
+                  // The link belongs to the previous object's list and goes
+                  // away; keep the keyboard on the Dependencies tab.
+                  requestAnimationFrame(() => document.getElementById(tabId(uid, "deps"))?.focus());
+                }}
+              >
                 <span className={"glyph kind-" + d.changeKind} aria-hidden="true">
                   {kindGlyph(d.changeKind)}
                 </span>{" "}
-                {d.objectType} {objectName(d)}
+                {objectLabel(d)}
               </button>
               <span className={"badge " + st.cls}>{st.label}</span>
             </li>
@@ -83,42 +88,17 @@ export function DetailPane() {
         })}
       </ul>
     );
-  const onTabKey = (e: React.KeyboardEvent) => {
-    const i = tabs.findIndex((t) => t.key === tab);
-    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-      e.preventDefault();
-      const n = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length].key;
-      setTab(n);
-      document.getElementById(`${uid}-tab-${n}`)?.focus();
-    }
-  };
 
   return (
     <section className="detail" aria-label="Change details">
       {empty ? (
         <div className="empty">Select a change to see its definition, the generated SQL and its risks.</div>
       ) : (
-        <div className="tabs" role="tablist" aria-label="Detail views" onKeyDown={onTabKey}>
-          {tabs.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              id={`${uid}-tab-${t.key}`}
-              role="tab"
-              className="tab"
-              aria-selected={tab === t.key}
-              aria-controls={`${uid}-panel-${t.key}`}
-              tabIndex={tab === t.key ? 0 : -1}
-              onClick={() => setTab(t.key)}
-            >
-              {t.label}
-              {t.count ? <span className="count-pill">{t.count}</span> : null}
-            </button>
-          ))}
+        <TabList base={uid} tabs={tabs} active={tab} onSelect={setTab} label="Detail views" className="tabs">
           <span className="detail-title">
             <b className={"kind-" + change.changeKind}>{kindLabel(change.changeKind)}</b> {change.objectType} <b>{objectName(change)}</b>
           </span>
-        </div>
+        </TabList>
       )}
 
       {!empty && tab === "diff" && unchangedText(change) && (
@@ -130,7 +110,7 @@ export function DetailPane() {
               ? `This object is ${change.reason}.`
               : "The change is in an attribute the definition text does not show."}{" "}
             <button type="button" className="link" onClick={() => setTab("sql")}>
-              See the {change.statements.length} statement{change.statements.length === 1 ? "" : "s"} that will run on the Target
+              See the {plural(change.statements.length, "statement")} that will run on the Target
             </button>
           </span>
         </div>
@@ -163,24 +143,26 @@ export function DetailPane() {
           (added to the Target) and Target-only lines red (removed);
           renderIndicators:false hides the +/- glyphs so they can't contradict
           the colours. */}
-      <div className="editor" id={`${uid}-panel-diff`} role="tabpanel" aria-labelledby={`${uid}-tab-diff`} hidden={empty || tab !== "diff" || showResult}>
-        <DiffEditor
-          language="sql"
-          theme={THEME}
-          original={change?.newDefinition ?? ""}
-          modified={change?.oldDefinition ?? ""}
-          options={{ ...monacoOpts, renderSideBySide: true, renderIndicators: false }}
-        />
+      <div className="editor-stack" id={panelId(uid, "diff")} role="tabpanel" aria-labelledby={tabId(uid, "diff")} hidden={empty || tab !== "diff"}>
+        <div className="editor" hidden={showResult}>
+          <DiffEditor
+            language="sql"
+            theme={THEME}
+            original={change?.newDefinition ?? ""}
+            modified={change?.oldDefinition ?? ""}
+            options={{ ...READ_ONLY_OPTIONS, renderSideBySide: true, renderIndicators: false }}
+          />
+        </div>
+        <div className="editor" hidden={!showResult}>
+          <Editor language="sql" theme={THEME} value={result} options={READ_ONLY_OPTIONS} />
+        </div>
       </div>
-      <div className="editor" hidden={empty || tab !== "diff" || !showResult}>
-        <Editor language="sql" theme={THEME} value={result} options={monacoOpts} />
-      </div>
-      <div className="editor" id={`${uid}-panel-sql`} role="tabpanel" aria-labelledby={`${uid}-tab-sql`} hidden={empty || tab !== "sql"}>
-        <Editor language="sql" theme={THEME} value={sql} options={monacoOpts} />
+      <div className="editor" id={panelId(uid, "sql")} role="tabpanel" aria-labelledby={tabId(uid, "sql")} hidden={empty || tab !== "sql"}>
+        <Editor language="sql" theme={THEME} value={sql} options={READ_ONLY_OPTIONS} />
       </div>
 
       {!empty && tab === "risks" && (
-        <div className="risks" id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`}>
+        <div className="risks" id={panelId(uid, "risks")} role="tabpanel" aria-labelledby={tabId(uid, "risks")}>
           {hazards.length === 0 && <div className="muted">No risks were identified for this change.</div>}
           {hazards.map((h) => {
             const info = hazardInfo(h.type);
@@ -213,7 +195,7 @@ export function DetailPane() {
       )}
 
       {!empty && tab === "deps" && (
-        <div className="deps" id={`${uid}-panel-deps`} role="tabpanel" aria-labelledby={`${uid}-tab-deps`}>
+        <div className="deps" id={panelId(uid, "deps")} role="tabpanel" aria-labelledby={tabId(uid, "deps")}>
           <section>
             <h4>Depends on, in this plan ({upstream.length})</h4>
             {depList(upstream, "Nothing else in this plan. Objects already in the Target are not listed.")}

@@ -2,11 +2,13 @@
 // outside the desktop shell (plain `vite` in a browser): UX work, visual
 // review and accessibility audits without a database or the daemon. It
 // replays a real plan captured from the CLI (src/dev/fixture-plan.json) with
-// the same event choreography the Rust supervisor relays, and keeps saved
-// sources in localStorage. Never bundled into the desktop app's behavior: the
-// client only routes here when Tauri's runtime is absent.
+// the same event choreography the Rust supervisor relays and the same refusals
+// the daemon makes (a re-plan of sources that were not compared, a publish
+// with data loss that was not approved), and keeps saved sources in
+// localStorage. Never bundled into the desktop app's behavior: the client only
+// routes here when Tauri's runtime is absent.
 
-import type { CompareEvent, CompareRequest, Health, PlanDoc, PlanResponse, Profile, PublishEvent, ScriptResponse, Warning } from "./types";
+import type { CompareEvent, CompareRequest, Health, HazardCount, PlanDoc, PlanResponse, Profile, PublishEvent, ScriptResponse, Severity, Warning } from "./types";
 import fixture from "../dev/fixture-plan.json";
 
 type Listener<T> = (e: T) => void;
@@ -50,6 +52,37 @@ const fixtureWarnings: Warning[] = [
   { side: "plan", message: 'table "qa"."reviews_audit": column finish_date declared in a position the target does not have (the target appended it later); PostgreSQL cannot reorder columns in place, so the order is left as is. To make the target match, set compare.columnOrder: rebuild (the table is rebuilt); to make the project match the target instead, update the project from it: pg-dac publish --from <project> --to <target>' },
 ];
 
+/**
+ * The migration under a selection, as the engine computes it: excluded changes
+ * drop out, except one the engine must still recreate because a change it
+ * depends on runs (the fixture marks those with a reason); counts, the data
+ * loss flag and the hazard summary follow what remains.
+ */
+export function effectivePlan(excludeIds: string[] = []): PlanDoc {
+  const excluded = new Set(excludeIds);
+  const running = new Set(fixturePlan.changes.filter((c) => !excluded.has(c.id)).map((c) => c.id));
+  const changes = fixturePlan.changes.filter((c) => running.has(c.id) || (!!c.reason && (c.dependsOn ?? []).some((d) => running.has(d))));
+  const summary = new Map<string, HazardCount>();
+  for (const c of changes) {
+    for (const h of c.hazards ?? []) {
+      const s = summary.get(h.type) ?? { code: h.type, severity: h.severity as Severity, count: 0 };
+      s.count++;
+      summary.set(h.type, s);
+    }
+  }
+  return {
+    ...fixturePlan,
+    changes,
+    statementCount: changes.reduce((n, c) => n + c.statements.length, 0),
+    dataLoss: changes.some((c) => c.hazards?.some((h) => h.type === "DELETES_DATA")),
+    hazardSummary: [...summary.values()],
+  };
+}
+
+// What the daemon remembers of the last compare, so a re-plan of other sources
+// is refused the same way (the Rust supervisor reports it as "daemon returned
+// 409: …").
+let compared: { from: string; to: string } | undefined;
 let cancelled = false;
 
 export const mock = {
@@ -79,10 +112,8 @@ export const mock = {
       emitCompare({ event: "phase", data: { step: "diff", message: "Diffing and generating plan…", toCount: 914 } });
       await sleep(400);
       if (cancelled) return emitCompare({ event: "canceled", data: {} });
-      const excluded = new Set(req.excludeIds ?? []);
-      const plan: PlanDoc = { ...fixturePlan, changes: fixturePlan.changes.filter((c) => !excluded.has(c.id)) };
-      plan.statementCount = plan.changes.reduce((n, c) => n + c.statements.length, 0);
-      emitCompare({ event: "result", data: { plan, warnings: fixtureWarnings } });
+      compared = { from: req.from, to: req.to };
+      emitCompare({ event: "result", data: { plan: effectivePlan(req.excludeIds), warnings: fixtureWarnings } });
     })();
   },
   cancelCompare: async (): Promise<unknown> => {
@@ -97,28 +128,30 @@ export const mock = {
 
   replan: async (req: CompareRequest): Promise<PlanResponse> => {
     await sleep(150);
-    const excluded = new Set(req.excludeIds ?? []);
-    const plan: PlanDoc = { ...fixturePlan, changes: fixturePlan.changes.filter((c) => !excluded.has(c.id)) };
-    plan.statementCount = plan.changes.reduce((n, c) => n + c.statements.length, 0);
-    plan.dataLoss = plan.changes.some((c) => c.hazards?.some((h) => h.type === "DELETES_DATA"));
-    return { plan, warnings: fixtureWarnings };
+    if (!compared || compared.from !== req.from || compared.to !== req.to) {
+      // Tauri's invoke rejects with the command's error string, not an Error.
+      return Promise.reject("daemon returned 409: no comparison of these sources to re-plan; run Compare first");
+    }
+    return { plan: effectivePlan(req.excludeIds), warnings: fixtureWarnings };
   },
 
   script: async (req: CompareRequest): Promise<ScriptResponse> => {
-    const excluded = new Set(req.excludeIds ?? []);
-    const body = fixturePlan.changes
-      .filter((c) => !excluded.has(c.id))
-      .flatMap((c) => c.statements.map((s) => (s.note ? `-- ${s.note}\n` : "") + s.sql))
+    const body = effectivePlan(req.excludeIds)
+      .changes.flatMap((c) => c.statements.map((s) => (s.note ? `-- ${s.note}\n` : "") + s.sql))
       .join("\n\n");
     return { sql: `-- pg-dac migration script (browser mock)\nSET check_function_bodies = false;\n\n${body}\n`, warnings: fixtureWarnings };
   },
 
   startPublish: async (req: CompareRequest): Promise<void> => {
     void (async () => {
-      const excluded = new Set(req.excludeIds ?? []);
-      const stmts = fixturePlan.changes.filter((c) => !excluded.has(c.id)).flatMap((c) => c.statements);
-      emitPublish({ event: "start", data: { statementCount: stmts.length, dataLoss: fixturePlan.dataLoss, deployScripts: 1, warnings: fixtureWarnings } });
+      const plan = effectivePlan(req.excludeIds);
+      const stmts = plan.changes.flatMap((c) => c.statements);
+      emitPublish({ event: "start", data: { statementCount: stmts.length, dataLoss: plan.dataLoss, deployScripts: 1, warnings: fixtureWarnings } });
       await sleep(300);
+      if (plan.dataLoss && !req.allowHazards) {
+        emitPublish({ event: "error", data: { applied: 0, total: stmts.length, message: "refusing to publish: the migration contains data-loss or unsupported changes; set allowHazards to proceed" } });
+        return;
+      }
       emitPublish({ event: "progress", data: { index: 0, total: stmts.length, sql: "-- pre-deploy script: pre/001_roles.sql" } });
       for (let i = 0; i < stmts.length; i++) {
         await sleep(120);
