@@ -4,7 +4,7 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
-## Unreleased
+## 0.9.1 — 2026-11-20
 
 ### Added
 - **The desktop app updates itself** (docs/UPDATES.md): it checks the signed release manifest
