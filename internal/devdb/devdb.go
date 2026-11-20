@@ -50,12 +50,8 @@ type Config struct {
 	StartTimeout time.Duration
 }
 
-// DefaultConfig returns the recommended scratch configuration.
-func DefaultConfig() Config {
-	return Config{Version: embeddedpostgres.V16, StartTimeout: 60 * time.Second}
-}
-
-// Start launches a scratch PostgreSQL instance on a free local port.
+// Start launches a scratch PostgreSQL instance on a free local port. A zero
+// Config means PostgreSQL 16 and a 60 s start timeout.
 func Start(ctx context.Context, cfg Config) (*Instance, error) {
 	if cfg.Version == "" {
 		cfg.Version = embeddedpostgres.V16

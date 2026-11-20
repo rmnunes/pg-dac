@@ -178,13 +178,13 @@ func parseCreate(h *Head, toks []token, i int) {
 	}
 	switch h.Kind {
 	case "TABLE", "VIEW", "MATERIALIZED VIEW", "FUNCTION", "PROCEDURE", "SEQUENCE", "TYPE", "DOMAIN", "EXTENSION", "COLLATION":
-		h.Name, i = qualifiedName(toks, i)
+		h.Name, _ = qualifiedName(toks, i)
 		h.Declarative = len(h.Name) > 0
 	case "SCHEMA":
 		if is(toks, i, "AUTHORIZATION") {
 			i++
 		}
-		h.Name, i = qualifiedName(toks, i)
+		h.Name, _ = qualifiedName(toks, i)
 		h.Declarative = len(h.Name) > 0
 	case "INDEX":
 		h.Name, i = qualifiedName(toks, i)
@@ -193,7 +193,7 @@ func parseCreate(h *Head, toks []token, i int) {
 			if is(toks, i, "ONLY") {
 				i++
 			}
-			h.On, i = qualifiedName(toks, i)
+			h.On, _ = qualifiedName(toks, i)
 		}
 		h.Declarative = len(h.On) > 0
 	case "TRIGGER", "POLICY":
@@ -203,7 +203,7 @@ func parseCreate(h *Head, toks []token, i int) {
 		}
 		if is(toks, i, "ON") {
 			i++
-			h.On, i = qualifiedName(toks, i)
+			h.On, _ = qualifiedName(toks, i)
 		}
 		h.Declarative = len(h.On) > 0
 	}

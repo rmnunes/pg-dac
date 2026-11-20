@@ -53,7 +53,7 @@ const fixtureWarnings: Warning[] = [
 let cancelled = false;
 
 export const mock = {
-  health: async (): Promise<Health> => ({ status: "ok", version: "0.9.0-dev (browser mock)", formatVersion: fixturePlan.formatVersion }),
+  health: async (): Promise<Health> => ({ status: "ok", version: "0.9.0-dev+mock", formatVersion: fixturePlan.formatVersion }),
 
   listProfiles: async (): Promise<Profile[]> => loadProfiles(),
   addProfile: async (profile: Profile): Promise<Profile[]> => {
@@ -133,8 +133,6 @@ export const mock = {
     return () => publishListeners.delete(entry);
   },
 
-  buildArtifact: async (): Promise<string> => "Wrote app.pgdac (browser mock)",
-  inspectArtifact: async (): Promise<string> => "Name: app\nIntegrity: OK (browser mock)",
   pickFile: async (): Promise<string | null> => window.prompt("Path of a .pgdac artifact (browser mock)", "C:\\artifacts\\app.pgdac"),
   pickDirectory: async (): Promise<string | null> => window.prompt("Project directory (browser mock)", "C:\\dev\\app\\schema"),
 };

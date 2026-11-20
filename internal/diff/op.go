@@ -118,6 +118,29 @@ func (t OpType) IsDrop() bool {
 	return false
 }
 
+// IsObjectDrop reports whether the op drops a top-level object — as opposed
+// to a column, constraint, index, trigger or policy of a relation, whose op
+// names the relation as Owner and the sub-object as Sub.
+func (t OpType) IsObjectDrop() bool {
+	switch t {
+	case OpDropSchema, OpDropExtension, OpDropEnum, OpDropDomain, OpDropCompositeType,
+		OpDropCollation, OpDropSequence, OpDropTable, OpDropView, OpDropMatView, OpDropFunction:
+		return true
+	}
+	return false
+}
+
+// IsObjectCreate reports whether the op creates a top-level object (the
+// counterpart of IsObjectDrop).
+func (t OpType) IsObjectCreate() bool {
+	switch t {
+	case OpCreateSchema, OpCreateExtension, OpCreateEnum, OpCreateDomain, OpCreateCompositeType,
+		OpCreateCollation, OpCreateSequence, OpCreateTable, OpCreateView, OpCreateMatView, OpCreateFunction:
+		return true
+	}
+	return false
+}
+
 // Op is a single structured schema-change operation. Only the payload fields
 // relevant to Type are populated; consumers switch on Type.
 type Op struct {
@@ -182,6 +205,11 @@ type Op struct {
 	// the drop and re-owned after the rename (they would go with the old table).
 	Rebuild        bool
 	OwnedSequences []*model.Sequence
+
+	// Cleanup (OpDropIndex) marks the removal of something pg-dac itself left
+	// behind — an index still under its rebuild name after an interrupted run
+	// (see OpReplaceIndex). The drop policy never keeps such an object.
+	Cleanup bool
 
 	// SeedSequence (OpAlterColumnIdentity, OpSetColumnDefault) marks that the
 	// column of an EXISTING table gets a value generator that did not exist

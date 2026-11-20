@@ -139,15 +139,12 @@ func newImportCmd() *cobra.Command {
 			"materialized views — pg_dump's order. The target must not already hold the archive's schemas;\n" +
 			"roles the archive grants to must exist. Records the result as the target's drift baseline.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			opts := pgbac.ImportOptions{RequireKey: requireKey, NoBaseline: noBaseline, Generator: "pg-dac " + appVersion(),
-				Progress: func(msg string) { fmt.Fprintln(cmd.ErrOrStderr(), msg) }}
-			if requireKey == "" {
-				keys, err := artifact.LoadTrustedKeys()
-				if err != nil {
-					return fmt.Errorf("read trusted keys: %w", err)
-				}
-				opts.TrustedKeys = keys
+			keys, err := artifact.TrustedKeysFor(requireKey)
+			if err != nil {
+				return err
 			}
+			opts := pgbac.ImportOptions{RequireKey: requireKey, TrustedKeys: keys, NoBaseline: noBaseline, Generator: "pg-dac " + appVersion(),
+				Progress: func(msg string) { fmt.Fprintln(cmd.ErrOrStderr(), msg) }}
 			rep, err := pgbac.Import(cmd.Context(), target, file, opts)
 			if err != nil {
 				return err

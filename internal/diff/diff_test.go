@@ -236,6 +236,53 @@ func TestDiff_IndexDefinitionChangeIsRebuild(t *testing.T) {
 	}
 }
 
+// TestDiff_IndexRebuildLeftover: an index the target still has under a rebuild
+// name (an earlier rebuild was interrupted) and the source does not declare is
+// a leftover: a rebuild of its index takes the name again (the rebuild's first
+// statement clears it), and without such a rebuild it is removed with a drop
+// flagged as cleanup, which the drop policy never keeps.
+func TestDiff_IndexRebuildLeftover(t *testing.T) {
+	const oldDef = "CREATE INDEX t_a ON public.t USING btree (id)"
+	const newDef = "CREATE INDEX t_a ON public.t USING btree (id) WHERE (id > 0)"
+	withIndexes := func(defs map[string]string) *model.Database {
+		db := serialFixture(true, "")
+		tbl := db.Schemas[0].Tables[0]
+		for _, name := range []string{"t_a", "t_a_pgdac_new"} { // deterministic order
+			if def, ok := defs[name]; ok {
+				tbl.Indexes = append(tbl.Indexes, &model.Index{Name: name, Table: tbl.Name, Definition: def})
+			}
+		}
+		return db
+	}
+	// Interrupted after the concurrent build: old index and leftover present.
+	cs := Diff(withIndexes(map[string]string{"t_a": oldDef, "t_a_pgdac_new": newDef}), withIndexes(map[string]string{"t_a": newDef}))
+	for _, op := range cs.Ops {
+		switch op.Type {
+		case OpReplaceIndex:
+			if op.TempIndexName != "t_a_pgdac_new" {
+				t.Errorf("the rebuild must take the leftover's name back, got %q", op.TempIndexName)
+			}
+		case OpDropIndex:
+			if !op.Cleanup || op.Sub != "t_a_pgdac_new" || op.Reason == "" {
+				t.Errorf("leftover drop must be flagged as cleanup with a reason: %+v", op)
+			}
+		}
+	}
+	if !hasOp(cs, OpReplaceIndex, "t") || !hasOp(cs, OpDropIndex, "t") {
+		t.Errorf("want a rebuild and a cleanup drop, got %v", opSummary(cs))
+	}
+	// Interrupted after the old index was dropped: only the leftover is there.
+	cs = Diff(withIndexes(map[string]string{"t_a_pgdac_new": newDef}), withIndexes(map[string]string{"t_a": newDef}))
+	if !hasOp(cs, OpCreateIndex, "t") || !hasOp(cs, OpDropIndex, "t") || hasOp(cs, OpReplaceIndex, "") {
+		t.Errorf("want a plain create and a cleanup drop, got %v", opSummary(cs))
+	}
+	// An index the source declares under such a name is a real index, not a leftover.
+	cs = Diff(withIndexes(map[string]string{"t_a_pgdac_new": newDef}), withIndexes(map[string]string{"t_a_pgdac_new": newDef}))
+	if !cs.Empty() {
+		t.Errorf("a declared index with the suffix must not be treated as a leftover: %v", opSummary(cs))
+	}
+}
+
 // TestTempIndexName: the rebuild name is deterministic, fits PostgreSQL's
 // 63-byte identifier limit, stays distinct for long names that share a prefix,
 // and steps aside from a name already in use.

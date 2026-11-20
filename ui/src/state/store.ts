@@ -583,7 +583,7 @@ export function overlayPlan(base: PlanDoc, effective: PlanDoc): PlanDoc {
   const changes: ObjectChange[] = base.changes.map((b) => {
     const e = byId.get(b.id);
     if (e) return e;
-    return { ...b, statements: [], hazards: [], severity: "", reason: "", omitted: true };
+    return { ...b, statements: [], hazards: [], severity: "", reason: "" };
   });
   const known = new Set(base.changes.map((b) => b.id));
   for (const e of effective.changes) if (!known.has(e.id)) changes.push(e);
@@ -594,7 +594,3 @@ function firstLine(sql: string): string {
   const i = sql.indexOf("\n");
   return i >= 0 ? sql.slice(0, i) + " …" : sql;
 }
-
-// Selectors / helpers used by components.
-export const includedChanges = (plan: PlanDoc | undefined, excluded: Set<string>): ObjectChange[] =>
-  (plan?.changes ?? []).filter((c) => !excluded.has(c.id));

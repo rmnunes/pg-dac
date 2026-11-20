@@ -75,6 +75,20 @@ func TrustedKeysPath() (string, error) {
 	return filepath.Join(dir, trustedKeysFile), nil
 }
 
+// TrustedKeysFor applies the signer-trust policy of every verb: an explicitly
+// required key is the whole policy, otherwise the trusted_keys file (if any)
+// decides which signers are accepted.
+func TrustedKeysFor(requireKey string) ([]string, error) {
+	if requireKey != "" {
+		return nil, nil
+	}
+	keys, err := LoadTrustedKeys()
+	if err != nil {
+		return nil, fmt.Errorf("read trusted keys: %w", err)
+	}
+	return keys, nil
+}
+
 // LoadTrustedKeys reads the trusted-keys file. A missing file means "no trust
 // list configured" (nil, nil): any signer is accepted with a warning.
 func LoadTrustedKeys() ([]string, error) {

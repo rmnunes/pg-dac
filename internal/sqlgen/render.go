@@ -237,14 +237,10 @@ func renderCreateIndex(op diff.Op, opts Options, rebuild bool) []Statement {
 		// CREATE INDEX CONCURRENTLY is not supported on partitioned tables.
 		note = joinNotes(note, "partitioned table: CONCURRENTLY is not supported, built under a SHARE lock")
 	} else if opts.Online {
-		n := "CONCURRENTLY: builds without blocking writes; cannot run inside a transaction"
-		if note != "" {
-			n = note + "; " + n
-		}
 		return append([]Statement{{
 			SQL:           concurrentIndexDef(def) + ";",
 			Transactional: false,
-			Note:          n,
+			Note:          joinNotes(note, "CONCURRENTLY: builds without blocking writes; cannot run inside a transaction"),
 			Hazards:       []safety.Hazard{build},
 		}}, comment...)
 	}
@@ -261,28 +257,32 @@ func renderCreateIndex(op diff.Op, opts Options, rebuild bool) []Statement {
 
 // renderDropIndex renders the removal of an index; rebuild marks the first
 // half of an offline rebuild (see renderReplaceIndex), where the index is gone
-// only until the CREATE in the same transaction completes.
+// only until the CREATE in the same transaction completes. A rebuild drops IF
+// EXISTS: a column drop earlier in the plan may already have taken the old
+// index with it.
 func renderDropIndex(op diff.Op, opts Options, rebuild bool) []Statement {
 	name := model.QualifiedName(op.Owner.Schema, op.Index.Name)
 	dropped := safety.New(safety.IndexDropped, "removes an index")
 	note := ""
+	ifExists := ""
 	if rebuild {
 		dropped = safety.New(safety.IndexDropped, "drops the index to rebuild it with its new definition in the same transaction")
 		note = "definition changed: dropped, then rebuilt"
+		ifExists = "IF EXISTS "
 	}
 	if opts.Online && partitionedOwner(op) {
 		// DROP INDEX CONCURRENTLY is not supported on partitioned indexes.
 		note = joinNotes(note, "partitioned table: CONCURRENTLY is not supported")
 	} else if opts.Online {
 		return []Statement{{
-			SQL:           "DROP INDEX CONCURRENTLY " + name + ";",
+			SQL:           "DROP INDEX CONCURRENTLY " + ifExists + name + ";",
 			Transactional: false,
 			Note:          note,
 			Hazards:       []safety.Hazard{dropped},
 		}}
 	}
 	return []Statement{{
-		SQL:           "DROP INDEX " + name + ";",
+		SQL:           "DROP INDEX " + ifExists + name + ";",
 		Transactional: true,
 		Note:          note,
 		Hazards: []safety.Hazard{
@@ -358,21 +358,23 @@ func joinNotes(a, b string) string {
 	return a + "; " + b
 }
 
-// renameIndexDef rewrites the index name in a pg_get_indexdef statement
-// ("CREATE [UNIQUE] INDEX name ON ..."), where the name may be quoted.
-func renameIndexDef(def, newName string) string {
-	for _, head := range []string{"CREATE UNIQUE INDEX ", "CREATE INDEX "} {
-		if !strings.HasPrefix(def, head) {
+// splitIndexDef splits a pg_get_indexdef statement ("CREATE [UNIQUE] INDEX
+// name ON ...") into its head ("CREATE [UNIQUE] INDEX "), the index name as
+// written (possibly quoted) and the rest (" ON ..."). ok is false for any
+// other text, which the callers pass through unchanged.
+func splitIndexDef(def string) (head, name, rest string, ok bool) {
+	for _, h := range []string{"CREATE UNIQUE INDEX ", "CREATE INDEX "} {
+		if !strings.HasPrefix(def, h) {
 			continue
 		}
-		rest := def[len(head):]
-		nameLen := 0
-		if strings.HasPrefix(rest, `"`) {
+		after := def[len(h):]
+		n := 0
+		if strings.HasPrefix(after, `"`) {
 			// A quoted identifier ends at the first quote not doubled.
 			i := 1
-			for i < len(rest) {
-				if rest[i] == '"' {
-					if i+1 < len(rest) && rest[i+1] == '"' {
+			for i < len(after) {
+				if after[i] == '"' {
+					if i+1 < len(after) && after[i+1] == '"' {
 						i += 2
 						continue
 					}
@@ -381,16 +383,32 @@ func renameIndexDef(def, newName string) string {
 				}
 				i++
 			}
-			nameLen = i
-		} else {
-			nameLen = strings.Index(rest, " ")
-			if nameLen < 0 {
-				return def
-			}
+			n = i
+		} else if n = strings.Index(after, " "); n < 0 {
+			return "", "", "", false
 		}
-		return head + model.QuoteIdent(newName) + rest[nameLen:]
+		return h, after[:n], after[n:], true
 	}
-	return def
+	return "", "", "", false
+}
+
+// renameIndexDef rewrites the index name in a pg_get_indexdef statement.
+func renameIndexDef(def, newName string) string {
+	head, _, rest, ok := splitIndexDef(def)
+	if !ok {
+		return def
+	}
+	return head + model.QuoteIdent(newName) + rest
+}
+
+// concurrentIndexDef turns a pg_get_indexdef statement into its CONCURRENTLY
+// form.
+func concurrentIndexDef(def string) string {
+	head, name, rest, ok := splitIndexDef(def)
+	if !ok {
+		return def
+	}
+	return head + "CONCURRENTLY " + name + rest
 }
 
 func renderCreateSequence(s *model.Sequence) string {
@@ -451,16 +469,6 @@ func renderSequenceOwner(s *model.Sequence) string {
 	}
 	return "ALTER SEQUENCE " + s.QualifiedName() + " OWNED BY " +
 		model.QualifiedName(s.OwnedBy.Schema, s.OwnedBy.Table) + "." + model.QuoteIdent(s.OwnedBy.Column) + ";"
-}
-
-func concurrentIndexDef(def string) string {
-	switch {
-	case strings.HasPrefix(def, "CREATE UNIQUE INDEX "):
-		return "CREATE UNIQUE INDEX CONCURRENTLY " + def[len("CREATE UNIQUE INDEX "):]
-	case strings.HasPrefix(def, "CREATE INDEX "):
-		return "CREATE INDEX CONCURRENTLY " + def[len("CREATE INDEX "):]
-	}
-	return def
 }
 
 // renderAlterColumnIdentity reconciles a column's identity attribute, including
@@ -595,7 +603,7 @@ func renderCreatePolicy(op diff.Op) []Statement {
 		b.WriteString(" WITH CHECK (" + p.WithCheck + ")")
 	}
 	b.WriteString(";")
-	return one(b.String(), p.Comment, commentOn("POLICY", model.QuoteIdent(p.Name)+" ON "+op.Table.QualifiedName(), p.Comment))
+	return one(b.String(), commentOn("POLICY", model.QuoteIdent(p.Name)+" ON "+op.Table.QualifiedName(), p.Comment))
 }
 
 func renderEnableRLS(op diff.Op) []Statement {

@@ -17,7 +17,6 @@ use serde_json::Value;
 pub struct Daemon {
     addr: String,
     token: String,
-    bin: PathBuf,
     child: Mutex<Option<Child>>,
 }
 
@@ -68,7 +67,6 @@ impl Daemon {
         Ok(Daemon {
             addr,
             token,
-            bin,
             child: Mutex::new(Some(child)),
         })
     }
@@ -132,29 +130,6 @@ impl Daemon {
         }
     }
 
-    /// Ask the daemon to cancel the in-flight operation with the given opId.
-    pub fn cancel(&self, op_id: &str) -> Result<Value, String> {
-        self.post("/cancel", serde_json::json!({ "opId": op_id }))
-    }
-
-    /// Run the sidecar one-shot (for stateless verbs like build/extract/inspect)
-    /// and return combined stdout/stderr text.
-    pub fn run_oneshot(&self, args: &[String], env: &[(String, String)]) -> Result<String, String> {
-        let mut cmd = Command::new(&self.bin);
-        cmd.args(args);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let out = cmd.output().map_err(|e| format!("run pg-dac: {e}"))?;
-        let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&out.stdout));
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        if !out.status.success() {
-            return Err(text);
-        }
-        Ok(text)
-    }
-
     /// Best-effort graceful stop: ask the daemon to shut down (so it stops its
     /// embedded Postgres cleanly), then kill the child if it lingers.
     pub fn stop(&self) {
@@ -169,11 +144,18 @@ impl Daemon {
     }
 }
 
+/// Turns a failed call into the message the frontend shows. The daemon answers
+/// every failure as {"error": "..."}; the message is kept and the status code
+/// prefixed so the frontend can tell a 409 (compare again) from the rest.
 fn stringify(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, resp) => {
             let body = resp.into_string().unwrap_or_default();
-            format!("daemon returned {code}: {body}")
+            let message = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or(body);
+            format!("daemon returned {code}: {message}")
         }
         ureq::Error::Transport(t) => format!("daemon transport error: {t}"),
     }
@@ -181,7 +163,9 @@ fn stringify(e: ureq::Error) -> String {
 
 fn random_token() -> String {
     let mut rng = rand::thread_rng();
-    (0..32).map(|_| format!("{:x}", rng.gen_range(0..16u8))).collect()
+    (0..32)
+        .map(|_| format!("{:x}", rng.gen_range(0..16u8)))
+        .collect()
 }
 
 /// find_sidecar looks for the pg-dac binary next to the running app (where Tauri

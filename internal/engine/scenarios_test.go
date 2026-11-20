@@ -82,13 +82,6 @@ var scenarios = []scenario{
 	{"matview-with-index-from-empty", ``, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, ""},
 	{"matview-index-added", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE UNIQUE INDEX mv_a_key ON mv(a);`, ok, ""},
 	{"matview-index-survives-recreate", `CREATE TABLE t(a int); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, `CREATE TABLE t(a bigint); CREATE MATERIALIZED VIEW mv AS SELECT a FROM t; CREATE INDEX mv_idx ON mv(a);`, ok, ""},
-	{"index-definition-changed", `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a);`, `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a) WHERE b IS NOT NULL;`, ok, "the index is rebuilt under a temporary name and swapped in"},
-	{"unique-index-definition-changed", `CREATE TABLE t(a int, b int); CREATE UNIQUE INDEX t_u ON t(a);`, `CREATE TABLE t(a int, b int); CREATE UNIQUE INDEX t_u ON t(a, b);`, ok, "a unique index is rebuilt the same way"},
-	{"index-rebuild-leftover-cleared", `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a); CREATE INDEX t_a_pgdac_new ON t(a);`, `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a) WHERE b IS NOT NULL;`, ok, "a temporary index left by an interrupted rebuild does not block the next one"},
-	{"partitioned-index-added", `CREATE TABLE p(a int, b int) PARTITION BY RANGE (a); CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10);`, `CREATE TABLE p(a int, b int) PARTITION BY RANGE (a); CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10); CREATE INDEX p_b ON p(b);`, ok, "CONCURRENTLY is not available on a partitioned table"},
-	{"function-returning-view-rowtype-survives-column-change", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION f() RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION f() RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';`, ok, "the function's signature uses the view's row type: dropped before the view, recreated after"},
-	{"function-taking-view-rowtype-survives-column-change", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION g(x v) RETURNS int LANGUAGE sql AS 'SELECT 1';`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION g(x v) RETURNS int LANGUAGE sql AS 'SELECT 1';`, ok, "same for an argument of the view's row type"},
-	{"index-changed-on-dropped-column", `CREATE TABLE t(a int, b int, c int); CREATE INDEX t_ab ON t(a, b);`, `CREATE TABLE t(a int, c int); CREATE INDEX t_ab ON t(a, c);`, ok, "the old index vanishes with its column before the rebuild; the drop is IF EXISTS"},
 	{"view-with-check-option-from-empty", ``, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH CHECK OPTION;`, ok, ""},
 	{"view-check-option-added", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0;`, `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t WHERE a > 0 WITH LOCAL CHECK OPTION;`, ok, ""},
 	{"view-security-barrier-added", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE t(a int); CREATE VIEW v WITH (security_barrier = true) AS SELECT a FROM t;`, ok, ""},
@@ -114,6 +107,18 @@ var scenarios = []scenario{
 	{"domain-with-default-not-null-from-empty", ``, `CREATE DOMAIN code AS text NOT NULL DEFAULT 'x' CONSTRAINT code_len CHECK (length(VALUE) < 5); CREATE TABLE t(c code);`, ok, ""},
 	{"domain-changed", `CREATE DOMAIN d AS int CHECK (VALUE > 0);`, `CREATE DOMAIN d AS int CHECK (VALUE > 1);`, noconv, "altering a domain is reported as UNSUPPORTED_CHANGE"},
 	{"composite-type-used-by-table-from-empty", ``, `CREATE TYPE pt AS (x int, y int); CREATE TABLE t(p pt);`, ok, ""},
+	// --- index rebuilds and functions as dependents (WP8) ---
+	{"index-definition-changed", `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a);`, `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a) WHERE b IS NOT NULL;`, ok, "the index is rebuilt under a temporary name and swapped in"},
+	{"unique-index-definition-changed", `CREATE TABLE t(a int, b int); CREATE UNIQUE INDEX t_u ON t(a);`, `CREATE TABLE t(a int, b int); CREATE UNIQUE INDEX t_u ON t(a, b);`, ok, "a unique index is rebuilt the same way"},
+	{"index-rebuild-leftover-cleared", `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a); CREATE INDEX t_a_pgdac_new ON t(a);`, `CREATE TABLE t(a int, b int); CREATE INDEX t_a ON t(a) WHERE b IS NOT NULL;`, ok, "a temporary index left by an interrupted rebuild does not block the next one"},
+	{"partitioned-index-added", `CREATE TABLE p(a int, b int) PARTITION BY RANGE (a); CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10);`, `CREATE TABLE p(a int, b int) PARTITION BY RANGE (a); CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10); CREATE INDEX p_b ON p(b);`, ok, "CONCURRENTLY is not available on a partitioned table"},
+	{"function-returning-view-rowtype-survives-column-change", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION f() RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION f() RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';`, ok, "the function's signature uses the view's row type: dropped before the view, recreated after"},
+	{"function-taking-view-rowtype-survives-column-change", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION g(x v) RETURNS int LANGUAGE sql AS 'SELECT 1';`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION g(x v) RETURNS int LANGUAGE sql AS 'SELECT 1';`, ok, "same for an argument of the view's row type"},
+	{"index-changed-on-dropped-column", `CREATE TABLE t(a int, b int, c int); CREATE INDEX t_ab ON t(a, b);`, `CREATE TABLE t(a int, c int); CREATE INDEX t_ab ON t(a, c);`, ok, "the old index vanishes with its column before the rebuild; the drop is IF EXISTS"},
+	{"function-over-view-body-changed-survives-column-change", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION f() RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION f() RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v WHERE a > 0';`, ok, "the differ's CREATE OR REPLACE of the new body lands after the view is back; the drop is added for the view's sake"},
+	{"function-over-view-signature-changed-survives-column-change", `CREATE TABLE t(a int); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION g(x v) RETURNS int LANGUAGE sql AS 'SELECT 1';`, `CREATE TABLE t(a bigint); CREATE VIEW v AS SELECT a FROM t; CREATE FUNCTION g(x v, y int) RETURNS int LANGUAGE sql AS 'SELECT 1';`, ok, "the differ drops and creates the function itself; the drop is ordered before the view's, the create after"},
+	{"function-using-enum-dropped-with-it", `CREATE TYPE mood AS ENUM ('a'); CREATE FUNCTION h(m mood) RETURNS int LANGUAGE sql AS 'SELECT 1';`, ``, ok, "both drops are the differ's; the function goes first"},
+
 	// --- privileges (WP5): GRANT/REVOKE are part of the model ---
 	{"grant-from-empty", role, role + ` CREATE TABLE t(a int); GRANT SELECT ON t TO scn_reader;`, ok, ""},
 	{"grant-added", role + ` CREATE TABLE t(a int);`, role + ` CREATE TABLE t(a int); GRANT SELECT, INSERT ON t TO scn_reader;`, ok, ""},
@@ -220,6 +225,66 @@ func TestScenarios(t *testing.T) {
 				} else {
 					t.Logf("still not converging as expected (%s)", sc.reason)
 				}
+			}
+		})
+	}
+}
+
+// scenariosOffline names the scenarios whose migration differs offline — index
+// rebuilds (drop + create inside the transaction instead of the concurrent
+// swap) and what they interact with. They run again with Online off.
+var scenariosOffline = []string{
+	"index-definition-changed",
+	"unique-index-definition-changed",
+	"index-rebuild-leftover-cleared",
+	"index-changed-on-dropped-column",
+	"partitioned-index-added",
+	"matview-index-survives-recreate",
+	"function-returning-view-rowtype-survives-column-change",
+}
+
+func TestScenariosOffline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs embedded postgres")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	ctx, cleanup := devdb.WithShared(ctx)
+	defer cleanup()
+
+	opts := engine.DefaultOptions()
+	opts.DropObjectsNotInSource = true
+	opts.AllowHazards = true
+	opts.Online = false
+
+	byName := map[string]scenario{}
+	for _, sc := range scenarios {
+		byName[sc.name] = sc
+	}
+	for _, name := range scenariosOffline {
+		sc, ok := byName[name]
+		if !ok {
+			t.Fatalf("no scenario %q", name)
+		}
+		t.Run(sc.name, func(t *testing.T) {
+			from, _, err := build.FromSQL(ctx, sc.from, build.Options{})
+			if err != nil {
+				t.Fatalf("build from: %v", err)
+			}
+			to, _, err := build.FromSQL(ctx, sc.to, build.Options{})
+			if err != nil {
+				t.Fatalf("build to: %v", err)
+			}
+			res, err := engine.Compare(from, to, opts)
+			if err != nil {
+				t.Fatalf("compare: %v", err)
+			}
+			vr, err := validate.Plan(ctx, from, to, opts)
+			if err != nil {
+				t.Fatalf("offline migration failed to apply: %v\n--- script ---\n%s", shortErr(err), res.Script(true))
+			}
+			if !vr.Converged {
+				t.Fatalf("offline migration did not converge; residual:\n%s", vr.Residual.Script(true))
 			}
 		})
 	}

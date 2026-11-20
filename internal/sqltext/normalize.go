@@ -147,12 +147,6 @@ func normalize(sql string, dropComments bool, bodyDepth int) string {
 	return strings.TrimSpace(out.String())
 }
 
-// Equal reports whether a and b are the same SQL modulo formatting (and
-// comments, when ignoreComments is set).
-func Equal(a, b string, ignoreComments bool) bool {
-	return a == b || Normalize(a, ignoreComments) == Normalize(b, ignoreComments)
-}
-
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }

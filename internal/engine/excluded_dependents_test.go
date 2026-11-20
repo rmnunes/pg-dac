@@ -130,14 +130,71 @@ CREATE FUNCTION f(ids text[]) RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';
 	if !(dropF < dropV && dropV < alter && alter < createV && createV < createF) {
 		t.Errorf("wrong order (function before view on the way down, after it on the way up):\n%s", script)
 	}
+	changes, err := res.ObjectChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var fnReason string
-	for _, c := range res.ObjectChanges() {
+	for _, c := range changes {
 		if c.ObjectType == model.KindFunction {
 			fnReason = c.Reason
 		}
 	}
 	if !strings.Contains(fnReason, "recreated because it depends on view") {
 		t.Errorf("function reason = %q", fnReason)
+	}
+	vr, err := validate.Plan(ctx, from, to, opts)
+	if err != nil {
+		t.Fatalf("migration failed to apply: %v\n%s", err, script)
+	}
+	if !vr.Converged {
+		t.Fatalf("did not converge; residual:\n%s", vr.Residual.Script(true))
+	}
+}
+
+// TestExcludedFunctionOverDroppedEnumIsDropped: the target has an enum and a
+// function taking it; the source has neither, and the user excludes the
+// function's drop. The enum cannot go while the function uses it and the
+// function cannot come back without the enum, so it is dropped only — and the
+// plan says so instead of claiming a recreate.
+func TestExcludedFunctionOverDroppedEnumIsDropped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs embedded postgres")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ctx, cleanup := devdb.WithShared(ctx)
+	defer cleanup()
+
+	from, _, err := build.FromSQL(ctx, `CREATE TYPE mood AS ENUM ('a'); CREATE FUNCTION h(m mood) RETURNS int LANGUAGE sql AS 'SELECT 1';`, build.Options{})
+	if err != nil {
+		t.Fatalf("build from: %v", err)
+	}
+	to, _, err := build.FromSQL(ctx, ``, build.Options{})
+	if err != nil {
+		t.Fatalf("build to: %v", err)
+	}
+	opts := engine.DefaultOptions()
+	opts.DropObjectsNotInSource = true
+	fnKey := from.Schemas[0].Functions[0].Ref().Key()
+	opts.ExcludeIDs = map[string]bool{fnKey: true}
+	res, err := engine.Compare(from, to, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := res.Script(true)
+	dropF, dropE := strings.Index(script, "DROP FUNCTION"), strings.Index(script, `DROP TYPE "public"."mood"`)
+	if dropF < 0 || dropE < 0 || dropF > dropE || strings.Contains(script, "CREATE OR REPLACE FUNCTION") {
+		t.Fatalf("want the function dropped before the enum and not recreated:\n%s", script)
+	}
+	changes, err := res.ObjectChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range changes {
+		if c.ID == fnKey && !strings.HasPrefix(c.Reason, "dropped because it depends on enum") {
+			t.Errorf("function reason = %q", c.Reason)
+		}
 	}
 	vr, err := validate.Plan(ctx, from, to, opts)
 	if err != nil {

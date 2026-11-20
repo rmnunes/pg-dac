@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -15,7 +17,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rmnunes/pg-dac/internal/artifact"
 	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/devdb"
@@ -25,8 +26,7 @@ import (
 	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/model"
 	"github.com/rmnunes/pg-dac/internal/project"
-	"github.com/rmnunes/pg-dac/internal/projsync"
-	"github.com/rmnunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/publish"
 	"github.com/rmnunes/pg-dac/internal/source"
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
@@ -36,7 +36,9 @@ import (
 // re-paying the embedded-PG cold start) and exposes the comparison verbs over a
 // loopback HTTP/SSE API. The first stdout line is the bound address (the
 // handshake the GUI supervisor reads); a bearer token from $PGDAC_TOKEN, when
-// set, is required on every request.
+// set, is required on every request — and must be set to bind anything but a
+// loopback address, since the daemon connects to whatever it is told and runs
+// DDL there.
 func newServeCmd() *cobra.Command {
 	var addr string
 	cmd := &cobra.Command{
@@ -44,14 +46,37 @@ func newServeCmd() *cobra.Command {
 		Short:  "Run pg-dac as a local daemon (warm scratch Postgres + HTTP/SSE API) for the GUI",
 		Hidden: true, // a tooling/integration entry point, not a day-to-day verb
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runServe(cmd, addr)
+			return runServe(cmd, addr, os.Getenv("PGDAC_TOKEN"))
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "address to bind (default: loopback, OS-chosen port)")
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, addr string) error {
+// maxRequestBody bounds a request body; a compare request is a few hundred
+// bytes of specs and options plus the selection, far below this.
+const maxRequestBody = 1 << 20
+
+// bindAllowed refuses to expose the daemon beyond the local machine without a
+// token: it accepts connection strings and runs DDL on behalf of its callers.
+func bindAllowed(addr, token string) error {
+	if token != "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", addr, err)
+	}
+	if ip := net.ParseIP(host); host == "localhost" || ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("refusing to bind %s without PGDAC_TOKEN: the daemon connects to the databases it is told to and runs DDL there", addr)
+}
+
+func runServe(cmd *cobra.Command, addr, token string) error {
+	if err := bindAllowed(addr, token); err != nil {
+		return err
+	}
 	// One warm scratch Postgres for the whole process lifetime.
 	ctx, cleanup := devdb.WithShared(context.Background())
 	defer cleanup()
@@ -61,29 +86,25 @@ func runServe(cmd *cobra.Command, addr string) error {
 		return fmt.Errorf("bind %s: %w", addr, err)
 	}
 
-	trusted, err := artifact.LoadTrustedKeys()
-	if err != nil {
-		return fmt.Errorf("read trusted keys: %w", err)
-	}
-	d := &daemon{ctx: ctx, token: os.Getenv("PGDAC_TOKEN"), version: appVersion(), trustedKeys: trusted}
+	d := &daemon{ctx: ctx, token: token, version: appVersion(), log: cmd.ErrOrStderr()}
 	var once sync.Once
 	stop := make(chan struct{})
 	shutdown := func() { once.Do(func() { close(stop) }) }
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", d.auth(d.health))
-	mux.HandleFunc("/plan", d.auth(d.plan))
-	mux.HandleFunc("/replan", d.auth(d.replan))
-	mux.HandleFunc("/cancel", d.auth(d.cancelOp))
-	mux.HandleFunc("/script", d.auth(d.script))
-	mux.HandleFunc("/publish", d.auth(d.publish))
-	mux.HandleFunc("/drift", d.auth(d.drift))
-	mux.HandleFunc("/shutdown", d.auth(func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", d.handle(http.MethodGet, d.health))
+	mux.HandleFunc("/plan", d.handle(http.MethodPost, d.plan))
+	mux.HandleFunc("/replan", d.handle(http.MethodPost, d.replan))
+	mux.HandleFunc("/cancel", d.handle(http.MethodPost, d.cancelOp))
+	mux.HandleFunc("/script", d.handle(http.MethodPost, d.script))
+	mux.HandleFunc("/publish", d.handle(http.MethodPost, d.publish))
+	mux.HandleFunc("/drift", d.handle(http.MethodPost, d.drift))
+	mux.HandleFunc("/shutdown", d.handle(http.MethodPost, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		shutdown()
 	}))
 
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	// Handshake: first stdout line is the address the supervisor connects to.
 	fmt.Fprintln(cmd.OutOrStdout(), ln.Addr().String())
@@ -105,10 +126,10 @@ func runServe(cmd *cobra.Command, addr string) error {
 }
 
 type daemon struct {
-	ctx         context.Context
-	token       string
-	version     string
-	trustedKeys []string
+	ctx     context.Context
+	token   string
+	version string
+	log     interface{ Write([]byte) (int, error) }
 
 	// ops tracks in-flight cancelable operations by client-supplied opId so a
 	// /cancel request can abort a running compare (which propagates through the
@@ -123,14 +144,24 @@ type daemon struct {
 	last   *lastCompare
 }
 
+// compareKey identifies what a comparison was computed from: the two specs
+// and everything that shapes how they are read.
+type compareKey struct {
+	from, to, schemas, requireKey string
+	targetMajor                   int
+}
+
+func (r compareReq) key() compareKey {
+	return compareKey{from: r.From, to: r.To, schemas: strings.Join(r.Schemas, "\x00"), requireKey: r.RequireKey, targetMajor: r.TargetMajor}
+}
+
 // lastCompare holds the resolved sides of the latest comparison.
 type lastCompare struct {
-	fromSpec, toSpec string
-	schemas          []string
-	from, to         []byte // canonical models, marshalled: each re-plan works on a fresh copy
-	prelude          []sqlgen.Statement
-	dplan            *deploy.Plan
-	warnings         []sideWarning // target/source/rename warnings from that read
+	key      compareKey
+	from, to []byte // canonical models, marshalled: each re-plan works on a fresh copy
+	prelude  []sqlgen.Statement
+	dplan    *deploy.Plan
+	warnings []sideWarning // target/source/rename warnings from that read
 }
 
 // track derives a cancelable child of the daemon context for one request and,
@@ -161,7 +192,10 @@ func (d *daemon) cancelOp(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OpID string `json:"opId"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := decodeInto(w, r, &body); err != nil {
+		badRequest(w, err)
+		return
+	}
 	d.mu.Lock()
 	cancel := d.ops[body.OpID]
 	d.mu.Unlock()
@@ -171,10 +205,15 @@ func (d *daemon) cancelOp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"canceled": cancel != nil})
 }
 
-func (d *daemon) auth(h http.HandlerFunc) http.HandlerFunc {
+// handle wraps a handler with the bearer-token check and the method check.
+func (d *daemon) handle(method string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if d.token != "" && r.Header.Get("Authorization") != "Bearer "+d.token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			fail(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if r.Method != method {
+			fail(w, http.StatusMethodNotAllowed, "method not allowed; use "+method)
 			return
 		}
 		h(w, r)
@@ -189,7 +228,8 @@ func (d *daemon) health(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// compareReq is the request body for /plan, /script, and /publish.
+// compareReq is the request body for /plan, /replan, /script, /publish and
+// /drift.
 type compareReq struct {
 	From                   string   `json:"from"`
 	To                     string   `json:"to"`
@@ -199,8 +239,8 @@ type compareReq struct {
 	Online                 *bool    `json:"online"`
 	AllowHazards           bool     `json:"allowHazards"`
 	DropObjectsNotInSource bool     `json:"dropObjectsNotInSource"`
-	IncludeIDs             []string `json:"includeIDs"`
-	ExcludeIDs             []string `json:"excludeIDs"`
+	IncludeIDs             []string `json:"includeIds"`
+	ExcludeIDs             []string `json:"excludeIds"`
 	RequireKey             string   `json:"requireKey"`
 	SkipDeployScripts      bool     `json:"skipDeployScripts"`
 	AllowDrift             bool     `json:"allowDrift"`
@@ -221,7 +261,8 @@ type compareReq struct {
 
 // sideWarning is a warning tagged with the side of the comparison it concerns:
 // "target" (the engine's --from, the database that gets updated), "source"
-// (--to, the desired state) or "plan" (the generated migration).
+// (--to, the desired state) or "plan" (the generated migration, the refactorlog
+// included).
 type sideWarning struct {
 	Side    string `json:"side"`
 	Message string `json:"message"`
@@ -277,15 +318,26 @@ func (r compareReq) engineOptions(dplan *deploy.Plan) engine.Options {
 	return opts
 }
 
-// sourceOptions derives source resolution options (schemas, target major,
-// signer trust) for a request.
-func (d *daemon) sourceOptions(r compareReq) source.Options {
-	opts := source.Options{Schemas: r.Schemas, TargetMajor: r.TargetMajor, RequireKey: r.RequireKey}
-	if r.RequireKey == "" {
-		opts.TrustedKeys = d.trustedKeys
+// sourceOptions derives the source resolution options (schemas, target major,
+// signer trust) of a request.
+func (r compareReq) sourceOptions() (source.Options, error) {
+	return source.OptionsFor(r.Schemas, r.TargetMajor, r.RequireKey)
+}
+
+// execOptions derives the lock-safety and batching options of a publish.
+func (r compareReq) execOptions() execute.Options {
+	opts := execute.DefaultOptions()
+	opts.SingleTransaction = r.SingleTransaction
+	if r.LockTimeoutMs > 0 {
+		opts.LockTimeout = time.Duration(r.LockTimeoutMs) * time.Millisecond
+	}
+	if r.StatementTimeoutMs > 0 {
+		opts.StatementTimeout = time.Duration(r.StatementTimeoutMs) * time.Millisecond
 	}
 	return opts
 }
+
+func (r compareReq) recordBaseline() bool { return r.RecordBaseline == nil || *r.RecordBaseline }
 
 // deployPlan reads the desired-state source's deployment plan, tolerating
 // sources that have none.
@@ -297,97 +349,120 @@ func deployPlan(spec string) *deploy.Plan {
 	return p
 }
 
-// plan streams the comparison over Server-Sent Events so the GUI can show what
-// it is doing (reading each side, then diffing/planning) and cancel mid-flight:
-// "phase" events narrate progress, then a single "result" (the PlanDoc),
-// "canceled", or "error". Resolving a side is the slow part (introspecting a live
-// DB, or applying a project to the scratch Postgres and re-introspecting), so a
-// phase is emitted before each.
-func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
-	req, err := decode(r)
-	if err != nil {
-		badRequest(w, err)
-		return
-	}
+// sse prepares a Server-Sent Events response and returns the function that
+// emits one event, or an error when the connection cannot stream.
+func sse(w http.ResponseWriter) (func(event string, v any), error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
+		return nil, errors.New("streaming unsupported")
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	send := func(event string, v any) {
+	return func(event string, v any) {
 		b, _ := json.Marshal(v)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
+	}, nil
+}
+
+// compared is a comparison of two resolved sides.
+type compared struct {
+	from, to *model.Database
+	res      *engine.Result
+	dplan    *deploy.Plan
+	prelude  []sqlgen.Statement
+	warnings []sideWarning // target, source and refactorlog warnings from the read
+}
+
+// compare resolves both sides of a request and runs the engine; phase, when
+// set, narrates the slow steps (reading each side, then diffing).
+func (d *daemon) compare(ctx context.Context, req compareReq, phase func(step, message string, extra map[string]any)) (*compared, error) {
+	if phase == nil {
+		phase = func(string, string, map[string]any) {}
 	}
-
-	ctx, done := d.track(req.OpID)
-	defer done()
-
-	// canceled reports the canceled event when an error is actually a cancellation,
-	// returning true so the caller stops.
-	canceled := func() bool {
-		if ctx.Err() != nil {
-			send("canceled", map[string]any{})
-			return true
-		}
-		return false
+	srcOpts, err := req.sourceOptions()
+	if err != nil {
+		return nil, err
 	}
-
-	srcOpts := d.sourceOptions(req)
 	dplan := deployPlan(req.To)
-	send("phase", map[string]any{"step": "read-from", "message": "Reading Target…", "source": req.From})
+	phase("read-from", "Reading Target…", map[string]any{"source": req.From})
 	from, fw, err := source.Resolve(ctx, req.From, srcOpts)
 	if err != nil {
-		if canceled() {
-			return
-		}
-		send("error", map[string]any{"message": "from: " + err.Error()})
-		return
+		return nil, fmt.Errorf("from: %w", err)
 	}
-
-	send("phase", map[string]any{"step": "read-to", "message": "Reading Source…", "source": req.To, "fromCount": objectCount(from)})
+	phase("read-to", "Reading Source…", map[string]any{"source": req.To, "fromCount": objectCount(from)})
 	to, tw, err := source.Resolve(ctx, req.To, srcOpts)
 	if err != nil {
-		if canceled() {
-			return
-		}
-		send("error", map[string]any{"message": "to: " + err.Error()})
-		return
+		return nil, fmt.Errorf("to: %w", err)
 	}
-
-	send("phase", map[string]any{"step": "diff", "message": "Diffing and generating plan…", "toCount": objectCount(to)})
+	phase("diff", "Diffing and generating plan…", map[string]any{"toCount": objectCount(to)})
 	from, prelude, rwarns, err := pendingRenames(ctx, req.From, from, dplan)
 	if err != nil {
-		send("error", map[string]any{"message": err.Error()})
-		return
+		return nil, err
 	}
 	res, err := engine.Compare(from, to, req.engineOptions(dplan))
 	if err != nil {
-		if canceled() {
+		return nil, err
+	}
+	res.Prelude = prelude
+	return &compared{from: from, to: to, res: res, dplan: dplan, prelude: prelude,
+		warnings: mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns))}, nil
+}
+
+// plan streams the comparison over Server-Sent Events so the GUI can show what
+// it is doing (reading each side, then diffing/planning) and cancel mid-flight:
+// "phase" events narrate progress, then a single "result" (the PlanDoc),
+// "canceled", or "error".
+func (d *daemon) plan(w http.ResponseWriter, r *http.Request) {
+	req, err := decode(w, r)
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	send, err := sse(w)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ctx, done := d.track(req.OpID)
+	defer done()
+
+	c, err := d.compare(ctx, req, func(step, message string, extra map[string]any) {
+		ev := map[string]any{"step": step, "message": message}
+		maps.Copy(ev, extra)
+		send("phase", ev)
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			send("canceled", map[string]any{})
 			return
 		}
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	res.Prelude = prelude
-	d.remember(req, from, to, prelude, dplan, mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns)))
-	send("result", map[string]any{"plan": res.PlanDoc(),
-		"warnings": mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns), tagWarnings("plan", res.Warnings))})
+	doc, err := c.res.PlanDoc()
+	if err != nil {
+		send("error", map[string]any{"message": err.Error()})
+		return
+	}
+	d.remember(req, c)
+	send("result", map[string]any{"plan": doc, "warnings": mergeWarnings(c.warnings, tagWarnings("plan", c.res.Warnings))})
 }
 
 // remember keeps the resolved sides of a comparison for /replan.
-func (d *daemon) remember(req compareReq, from, to *model.Database, prelude []sqlgen.Statement, dplan *deploy.Plan, warnings []sideWarning) {
-	fb, err1 := from.Marshal()
-	tb, err2 := to.Marshal()
-	if err1 != nil || err2 != nil {
-		return
+func (d *daemon) remember(req compareReq, c *compared) {
+	fb, err := c.from.Marshal()
+	if err == nil {
+		var tb []byte
+		if tb, err = c.to.Marshal(); err == nil {
+			d.lastMu.Lock()
+			d.last = &lastCompare{key: req.key(), from: fb, to: tb, prelude: c.prelude, dplan: c.dplan, warnings: c.warnings}
+			d.lastMu.Unlock()
+			return
+		}
 	}
-	d.lastMu.Lock()
-	d.last = &lastCompare{fromSpec: req.From, toSpec: req.To, schemas: req.Schemas, from: fb, to: tb, prelude: prelude, dplan: dplan, warnings: warnings}
-	d.lastMu.Unlock()
+	fmt.Fprintf(d.log, "pg-dac serve: the comparison cannot be kept for re-planning: %v\n", err)
 }
 
 // replan re-runs the engine on the sides of the latest /plan with the
@@ -395,9 +470,10 @@ func (d *daemon) remember(req compareReq, from, to *model.Database, prelude []sq
 // Sub-second, so the GUI can keep the plan in step with every include/exclude
 // toggle: an excluded object that still has to be recreated for a dependency
 // shows up as such, and the statement count is the one a publish would run.
-// 409 when the sources differ from the last comparison (or none ran yet).
+// 409 when the sources (or how they are read) differ from the last comparison,
+// or none ran yet.
 func (d *daemon) replan(w http.ResponseWriter, r *http.Request) {
-	req, err := decode(r)
+	req, err := decode(w, r)
 	if err != nil {
 		badRequest(w, err)
 		return
@@ -405,14 +481,14 @@ func (d *daemon) replan(w http.ResponseWriter, r *http.Request) {
 	d.lastMu.Lock()
 	last := d.last
 	d.lastMu.Unlock()
-	if last == nil || last.fromSpec != req.From || last.toSpec != req.To || !sameStrings(last.schemas, req.Schemas) {
-		http.Error(w, "no comparison of these sources to re-plan; run Compare first", http.StatusConflict)
+	if last == nil || last.key != req.key() {
+		fail(w, http.StatusConflict, "no comparison of these sources to re-plan; run Compare first")
 		return
 	}
 	from, err1 := model.Unmarshal(last.from)
 	to, err2 := model.Unmarshal(last.to)
 	if err1 != nil || err2 != nil {
-		http.Error(w, "stored comparison is unreadable; run Compare again", http.StatusConflict)
+		fail(w, http.StatusConflict, "stored comparison is unreadable; run Compare again")
 		return
 	}
 	res, err := engine.Compare(from, to, req.engineOptions(last.dplan))
@@ -421,45 +497,13 @@ func (d *daemon) replan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Prelude = last.prelude
-	writeJSON(w, http.StatusOK, map[string]any{"plan": res.PlanDoc(),
+	doc, err := res.PlanDoc()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plan": doc,
 		"warnings": mergeWarnings(last.warnings, tagWarnings("plan", res.Warnings))})
-}
-
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// pendingRenames applies the desired state's pending refactorlog renames to
-// the target model (reading the applied ids when the target is a database) and
-// returns the statements that would perform and record them.
-func pendingRenames(ctx context.Context, fromSpec string, from *model.Database, dplan *deploy.Plan) (*model.Database, []sqlgen.Statement, []string, error) {
-	if dplan == nil || dplan.Refactor == nil || len(dplan.Refactor.Operations) == 0 {
-		return from, nil, nil, nil
-	}
-	applied := map[string]bool{}
-	if source.IsConnString(fromSpec) {
-		conn, err := dbconn.Connect(ctx, fromSpec)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		defer conn.Close(ctx)
-		if applied, err = refactor.ReadApplied(ctx, conn); err != nil {
-			return nil, nil, nil, err
-		}
-	}
-	renames, warns := refactor.Pending(from, dplan.Refactor, applied)
-	if len(renames) == 0 {
-		return from, nil, warns, nil
-	}
-	return refactor.ApplyToModel(from, renames), refactor.Statements(renames), warns, nil
 }
 
 // objectCount is a rough size of a model, shown in the compare progress dialog.
@@ -473,49 +517,28 @@ func objectCount(m *model.Database) int {
 }
 
 func (d *daemon) script(w http.ResponseWriter, r *http.Request) {
-	req, err := decode(r)
+	req, err := decode(w, r)
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
-	srcOpts := d.sourceOptions(req)
-	dplan := deployPlan(req.To)
-	from, fw, err := source.Resolve(d.ctx, req.From, srcOpts)
-	if err != nil {
-		badRequest(w, fmt.Errorf("from: %w", err))
-		return
-	}
-	to, tw, err := source.Resolve(d.ctx, req.To, srcOpts)
-	if err != nil {
-		badRequest(w, fmt.Errorf("to: %w", err))
-		return
-	}
-	from, prelude, rwarns, err := pendingRenames(d.ctx, req.From, from, dplan)
+	ctx, done := d.track(req.OpID)
+	defer done()
+	c, err := d.compare(ctx, req, nil)
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
-	res, err := engine.Compare(from, to, req.engineOptions(dplan))
-	if err != nil {
-		badRequest(w, err)
-		return
-	}
-	res.Prelude = prelude
-	writeJSON(w, http.StatusOK, map[string]any{"sql": res.Script(req.AllowHazards),
-		"warnings": mergeWarnings(tagWarnings("target", fw), tagWarnings("source", tw), tagWarnings("plan", rwarns), tagWarnings("plan", res.Warnings))})
+	writeJSON(w, http.StatusOK, map[string]any{"sql": c.res.Script(req.AllowHazards),
+		"warnings": mergeWarnings(c.warnings, tagWarnings("plan", c.res.Warnings))})
 }
 
 // publish streams a live apply over Server-Sent Events: a "start" event, one
 // "progress" event per statement, then "done" or "error".
 func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
-	req, err := decode(r)
+	req, err := decode(w, r)
 	if err != nil {
 		badRequest(w, err)
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
 	isDB := source.IsConnString(req.From)
@@ -524,20 +547,21 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fmt.Errorf("publish target (from) must be a database connection string or a project directory"))
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	send := func(event string, v any) {
-		b, _ := json.Marshal(v)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-		flusher.Flush()
+	send, err := sse(w)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-
 	if isProject {
 		d.publishProject(req, send)
 		return
 	}
 
+	srcOpts, err := req.sourceOptions()
+	if err != nil {
+		send("error", map[string]any{"message": err.Error()})
+		return
+	}
 	conn, err := dbconn.Connect(d.ctx, req.From)
 	if err != nil {
 		send("error", map[string]any{"message": err.Error()})
@@ -545,162 +569,72 @@ func (d *daemon) publish(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close(d.ctx)
 
-	// Resolve the desired state first: nothing touches the target until the
-	// source is known to build.
 	dplan := deployPlan(req.To)
-	toModel, warns, err := source.Resolve(d.ctx, req.To, d.sourceOptions(req))
-	if err != nil {
-		send("error", map[string]any{"message": "resolve source: " + err.Error()})
-		return
+	preq := publish.Request{
+		Source:            req.To,
+		SourceOptions:     srcOpts,
+		Plan:              dplan,
+		Engine:            req.engineOptions(dplan),
+		Variables:         req.Variables,
+		SkipDeployScripts: req.SkipDeployScripts,
+		AllowDrift:        req.AllowDrift,
+		RecordBaseline:    req.recordBaseline(),
+		Exec:              req.execOptions(),
+		Generator:         "pg-dac " + d.version,
 	}
-	fromModel, _, err := introspect.IntrospectWithWarnings(d.ctx, conn, introspect.Options{IncludeSchemas: req.Schemas})
-	if err != nil {
-		send("error", map[string]any{"message": "introspect target: " + err.Error()})
-		return
+	// Warnings gather until "start", which carries them; the daemon's sides
+	// are target / source / plan.
+	var warnings []sideWarning
+	total := 0
+	progress := func(sql string) {
+		send("progress", map[string]any{"index": 0, "total": total, "sql": sql})
 	}
-	drifted, hadBaseline := false, false
-	if len(req.Schemas) == 0 {
-		rep, err := drift.Check(d.ctx, conn, fromModel)
-		if err != nil {
-			send("error", map[string]any{"message": err.Error()})
-			return
-		}
-		drifted, hadBaseline = rep.Drifted, rep.Baseline != nil
-		if rep.Drifted && !req.AllowDrift {
-			send("error", map[string]any{"drift": true, "message": fmt.Sprintf(
-				"the target has drifted from its last baseline (#%d from %s): %d change(s) were made outside pg-dac; set allowDrift to publish anyway",
-				rep.Baseline.ID, rep.Baseline.Source, len(rep.Changes.Plan.Ops))})
-			return
-		}
-	}
-	// Refactorlog renames run first, are recorded, and the target is re-read.
-	if dplan.Refactor != nil && len(dplan.Refactor.Operations) > 0 {
-		applied, err := refactor.ReadApplied(d.ctx, conn)
-		if err != nil {
-			send("error", map[string]any{"message": err.Error()})
-			return
-		}
-		renames, _ := refactor.Pending(fromModel, dplan.Refactor, applied)
-		if len(renames) > 0 {
-			for _, r := range renames {
-				send("progress", map[string]any{"index": 0, "total": 0, "sql": "-- refactorlog: " + r.Op.Describe()})
+	obs := publish.Observer{
+		Warnings: func(side string, msgs []string) {
+			if side == "refactorlog" {
+				side = "plan"
 			}
-			if err := execute.ApplyStatements(d.ctx, conn, refactor.Statements(renames)); err != nil {
-				send("error", map[string]any{"message": "refactorlog: " + err.Error()})
-				return
-			}
-			if fromModel, _, err = introspect.IntrospectWithWarnings(d.ctx, conn, introspect.Options{IncludeSchemas: req.Schemas}); err != nil {
-				send("error", map[string]any{"message": "introspect target: " + err.Error()})
-				return
-			}
-		}
-	}
-	// The raw introspection stays the drift/baseline form; the comparison runs
-	// on its canonical form, like every other source.
-	canonFrom, canonWarns := source.Canonical(d.ctx, fromModel, d.sourceOptions(req))
-	opts := req.engineOptions(dplan)
-	res, err := engine.Compare(canonFrom, toModel, opts)
-	if err != nil {
-		send("error", map[string]any{"message": err.Error()})
-		return
-	}
-	pre, post := dplan.Pre, dplan.Post
-	if req.SkipDeployScripts {
-		pre, post = nil, nil
-	}
-	vars := deploy.MergeVariables(dplan.Variables, req.Variables)
-	for _, s := range append(append([]deploy.Script{}, pre...), post...) {
-		if _, err := deploy.Substitute(s.SQL, vars); err != nil {
-			send("error", map[string]any{"message": s.Name + ": " + err.Error()})
-			return
-		}
-	}
-	send("start", map[string]any{"statementCount": len(res.Statements), "dataLoss": res.HasDataLoss(),
-		"deployScripts": len(pre) + len(post),
-		"warnings":      mergeWarnings(tagWarnings("source", warns), tagWarnings("target", canonWarns), tagWarnings("plan", res.Warnings))})
-	if res.Empty() && len(pre)+len(post) == 0 {
-		baselineRecorded := false
-		if (req.RecordBaseline == nil || *req.RecordBaseline) && len(req.Schemas) == 0 && (drifted || !hadBaseline) {
-			if _, err := drift.Record(d.ctx, conn, fromModel, req.To, "pg-dac "+d.version); err == nil {
-				baselineRecorded = true
-			}
-		}
-		send("done", map[string]any{"applied": 0, "baselineRecorded": baselineRecorded})
-		return
-	}
-	total := len(res.Statements)
-	announce := func(phase string) func(string) {
-		return func(name string) {
-			send("progress", map[string]any{"index": 0, "total": total, "sql": "-- " + phase + "-deploy script: " + name})
-		}
-	}
-	// Missing roles are the one blocker a pre-deploy script may remove: run the
-	// scripts and re-check before refusing (the schema is untouched so far).
-	if res.HasBlocking() && !opts.AllowHazards && res.OnlyMissingRoles() && len(pre) > 0 {
-		if err := deploy.Run(d.ctx, conn, pre, vars, announce("pre")); err != nil {
-			send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})
-			return
-		}
-		pre = nil
-		roles, err := introspect.ReadRoles(d.ctx, conn)
-		if err != nil {
-			send("error", map[string]any{"message": err.Error()})
-			return
-		}
-		canonFrom.Roles = roles
-		if res, err = engine.Compare(canonFrom, toModel, opts); err != nil {
-			send("error", map[string]any{"message": err.Error()})
-			return
-		}
-		total = len(res.Statements)
-	}
-	if res.HasBlocking() && !opts.AllowHazards {
-		if missing := res.MissingRoles(); len(missing) > 0 {
-			send("error", map[string]any{"message": fmt.Sprintf("refusing to publish: the source grants privileges to role(s) %v that do not exist in the target; create them (a pre-deploy script is the place) or remove the grants", missing)})
-			return
-		}
-		send("error", map[string]any{"message": "refusing to publish: data-loss or unsupported changes present; set allowHazards to proceed"})
-		return
-	}
-	if err := deploy.Run(d.ctx, conn, pre, vars, announce("pre")); err != nil {
-		send("error", map[string]any{"applied": 0, "total": total, "message": err.Error()})
-		return
-	}
-	execOpts := execute.DefaultOptions()
-	execOpts.SingleTransaction = req.SingleTransaction
-	if req.LockTimeoutMs > 0 {
-		execOpts.LockTimeout = time.Duration(req.LockTimeoutMs) * time.Millisecond
-	}
-	if req.StatementTimeoutMs > 0 {
-		execOpts.StatementTimeout = time.Duration(req.StatementTimeoutMs) * time.Millisecond
-	}
-	applied, err := execute.ApplyStream(d.ctx, conn, res.Statements, execOpts,
-		func(index, total int, s sqlgen.Statement) {
+			warnings = append(warnings, tagWarnings(side, msgs)...)
+		},
+		Drift:  func(msg string) { warnings = append(warnings, sideWarning{Side: "target", Message: msg}) },
+		Rename: func(desc string) { progress("-- refactorlog: " + desc) },
+		Planned: func(res *engine.Result, pre, post []deploy.Script) {
+			total = len(res.Statements)
+			send("start", map[string]any{"statementCount": total, "dataLoss": res.HasDataLoss(),
+				"deployScripts": len(pre) + len(post), "warnings": mergeWarnings(warnings)})
+		},
+		Script: func(phase, name string) { progress("-- " + phase + "-deploy script: " + name) },
+		Statement: func(index, total int, s sqlgen.Statement) {
 			send("progress", map[string]any{"index": index, "total": total, "sql": s.SQL})
-		})
+		},
+	}
+	res, err := publish.Run(d.ctx, conn, preq, obs)
 	if err != nil {
-		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
-		return
-	}
-	if err := deploy.Run(d.ctx, conn, post, vars, announce("post")); err != nil {
-		send("error", map[string]any{"applied": applied, "total": total, "message": err.Error()})
-		return
-	}
-	baselineRecorded := false
-	if (req.RecordBaseline == nil || *req.RecordBaseline) && len(req.Schemas) == 0 {
-		if after, err := introspect.Introspect(d.ctx, conn, introspect.Options{}); err == nil {
-			if _, err := drift.Record(d.ctx, conn, after, req.To, "pg-dac "+d.version); err == nil {
-				baselineRecorded = true
-			}
+		applied := 0
+		if res != nil {
+			applied = res.Applied
 		}
+		ev := map[string]any{"applied": applied, "total": total, "message": err.Error()}
+		var blocked *publish.BlockedError
+		switch {
+		case publish.IsDrift(err):
+			ev["drift"] = true
+			ev["message"] = err.Error() + "; set allowDrift to publish anyway"
+		case errors.As(err, &blocked) && len(blocked.MissingRoles) > 0:
+			ev["message"] = "refusing to publish: " + blocked.Error()
+		case errors.As(err, &blocked):
+			ev["message"] = "refusing to publish: " + blocked.Error() + "; set allowHazards to proceed"
+		}
+		send("error", ev)
+		return
 	}
-	send("done", map[string]any{"applied": applied, "deployScripts": len(pre) + len(post), "baselineRecorded": baselineRecorded})
+	send("done", map[string]any{"applied": res.Applied, "deployScripts": res.DeployScripts(), "baselineRecorded": res.Baseline != nil})
 }
 
 // drift reports how a database differs from the baseline its last publish
 // recorded: {drifted, currentSha256, baseline{...}, changes: PlanDoc}.
 func (d *daemon) drift(w http.ResponseWriter, r *http.Request) {
-	req, err := decode(r)
+	req, err := decode(w, r)
 	if err != nil {
 		badRequest(w, err)
 		return
@@ -730,19 +664,31 @@ func (d *daemon) drift(w http.ResponseWriter, r *http.Request) {
 		out["baseline"] = map[string]any{"id": rep.Baseline.ID, "recordedAt": rep.Baseline.RecordedAt, "source": rep.Baseline.Source, "sha256": rep.Baseline.SHA256}
 	}
 	if rep.Changes != nil {
-		out["changes"] = rep.Changes.PlanDoc()
+		doc, err := rep.Changes.PlanDoc()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out["changes"] = doc
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 // --- helpers ---
 
-func decode(r *http.Request) (compareReq, error) {
-	var req compareReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return req, fmt.Errorf("invalid request body: %w", err)
+// decodeInto reads a bounded JSON request body into v.
+func decodeInto(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
 	}
-	return req, nil
+	return nil
+}
+
+func decode(w http.ResponseWriter, r *http.Request) (compareReq, error) {
+	var req compareReq
+	err := decodeInto(w, r, &req)
+	return req, err
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -751,8 +697,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// fail answers with the one error shape every endpoint uses: {"error": msg}.
+func fail(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]any{"error": msg})
+}
+
 func badRequest(w http.ResponseWriter, err error) {
-	writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+	fail(w, http.StatusBadRequest, err.Error())
 }
 
 func toSet(ss []string) map[string]bool {
@@ -776,41 +727,27 @@ func (d *daemon) publishProject(req compareReq, send func(string, any)) {
 		send("error", map[string]any{"message": "target project: " + err.Error()})
 		return
 	}
-	srcOpts := d.sourceOptions(req)
-	toModel, toWarns, err := source.Resolve(d.ctx, req.To, srcOpts)
-	if err != nil {
-		send("error", map[string]any{"message": "resolve source: " + err.Error()})
-		return
-	}
-	fromModel, fromWarns, err := source.Resolve(d.ctx, req.From, srcOpts)
-	if err != nil {
-		send("error", map[string]any{"message": "build target project: " + err.Error()})
-		return
-	}
-	dplan := deployPlan(req.To)
-	if dplan.Compare == nil {
-		dplan.Compare = man.Compare
-	}
-	if dplan.DropPolicy == "" {
-		dplan.DropPolicy = man.DropPolicy
-	}
-	res, err := engine.Compare(fromModel, toModel, req.engineOptions(dplan))
+	srcOpts, err := req.sourceOptions()
 	if err != nil {
 		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	idx, err := projsync.Scan(dir, man, fromModel)
+	dplan := deployPlan(req.To)
+	deploy.WithProjectDefaults(dplan, man)
+	pr, err := publish.Project(d.ctx, publish.ProjectRequest{
+		Dir: dir, Manifest: man, Source: req.To, SourceOptions: srcOpts, Engine: req.engineOptions(dplan),
+	})
 	if err != nil {
-		send("error", map[string]any{"message": "index project files: " + err.Error()})
+		send("error", map[string]any{"message": err.Error()})
 		return
 	}
-	plan := projsync.Build(idx, man, fromModel, toModel, res)
+	plan := pr.Plan
 	var refused []string
 	for _, r := range plan.Refused {
 		refused = append(refused, r.Object+": "+r.Reason)
 	}
 	send("start", map[string]any{"statementCount": len(plan.Changes), "dataLoss": false, "deployScripts": 0, "files": true,
-		"warnings": mergeWarnings(tagWarnings("target", fromWarns), tagWarnings("source", toWarns), tagWarnings("plan", res.Warnings), tagWarnings("plan", refused))})
+		"warnings": mergeWarnings(tagWarnings("target", pr.FromWarnings), tagWarnings("source", pr.ToWarnings), tagWarnings("plan", pr.Migration.Warnings), tagWarnings("plan", refused))})
 	if len(plan.Refused) > 0 && !req.AllowHazards {
 		send("error", map[string]any{"message": fmt.Sprintf("refusing to update the project: %d object(s) are defined imperatively and cannot be rewritten in place (see warnings); set allowHazards to update the others", len(plan.Refused))})
 		return

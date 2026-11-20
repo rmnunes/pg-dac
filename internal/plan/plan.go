@@ -25,9 +25,6 @@ type Plan struct {
 	Cyclic []diff.Op
 }
 
-// Empty reports whether the plan has no operations.
-func (p *Plan) Empty() bool { return len(p.Ops) == 0 }
-
 // Build orders a change set into an executable plan.
 func Build(cs *diff.ChangeSet) *Plan {
 	ops := cs.Ops

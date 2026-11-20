@@ -33,7 +33,7 @@ func newDriftCmd() *cobra.Command {
 			}
 			conn, err := dbconn.Connect(ctx, from)
 			if err != nil {
-				return fmt.Errorf("connect: %w", err)
+				return err
 			}
 			defer conn.Close(ctx)
 			current, err := introspect.Introspect(ctx, conn, introspect.Options{IncludeSchemas: schemas})
@@ -94,7 +94,7 @@ func newBaselineCmd() *cobra.Command {
 			}
 			conn, err := dbconn.Connect(ctx, from)
 			if err != nil {
-				return fmt.Errorf("connect: %w", err)
+				return err
 			}
 			defer conn.Close(ctx)
 			current, err := introspect.Introspect(ctx, conn, introspect.Options{IncludeSchemas: schemas})
@@ -138,8 +138,10 @@ func driftJSONOf(rep *drift.Report) driftJSON {
 		out.Baseline = &baselineJSON{ID: rep.Baseline.ID, RecordedAt: rep.Baseline.RecordedAt.Format(time.RFC3339), Source: rep.Baseline.Source, SHA256: rep.Baseline.SHA256}
 	}
 	if rep.Changes != nil {
-		if b, err := json.Marshal(rep.Changes.PlanDoc()); err == nil {
-			out.Changes = b
+		if doc, err := rep.Changes.PlanDoc(); err == nil {
+			if b, err := json.Marshal(doc); err == nil {
+				out.Changes = b
+			}
 		}
 	}
 	return out

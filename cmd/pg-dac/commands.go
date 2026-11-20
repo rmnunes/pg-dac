@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/rmnunes/pg-dac/internal/artifact"
 	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/engine"
@@ -81,18 +81,10 @@ func (f *commonFlags) sourceOptions() (source.Options, error) {
 			return source.Options{}, fmt.Errorf("--exclude-object-type %q is not one of %v", t, project.ObjectTypes)
 		}
 	}
-	if _, err := f.variables(); err != nil {
+	if _, err := f.variableOverrides(); err != nil {
 		return source.Options{}, err
 	}
-	opts := source.Options{Schemas: f.schemas, TargetMajor: f.targetMajor, RequireKey: f.requireKey}
-	if f.requireKey == "" {
-		keys, err := artifact.LoadTrustedKeys()
-		if err != nil {
-			return opts, fmt.Errorf("read trusted keys: %w", err)
-		}
-		opts.TrustedKeys = keys
-	}
-	return opts, nil
+	return source.OptionsFor(f.schemas, f.targetMajor, f.requireKey)
 }
 
 // loadDeployPlan reads the desired-state source's deployment plan (pre/post
@@ -108,33 +100,31 @@ func (f *commonFlags) loadDeployPlan(cmd *cobra.Command) (*deploy.Plan, error) {
 	return plan, nil
 }
 
-// applyRefactorLog finds the refactorlog operations the target still needs
-// (skipping those it has recorded as applied, when the target is a live
-// database), applies them to the target model so the diff sees renames rather
-// than drop + create pairs, and returns the statements that perform and record
-// them. They are emitted ahead of the migration.
-func (f *commonFlags) applyRefactorLog(cmd *cobra.Command, from *model.Database) (*model.Database, []sqlgen.Statement, error) {
-	if f.plan == nil || f.plan.Refactor == nil || len(f.plan.Refactor.Operations) == 0 {
-		return from, nil, nil
+// pendingRenames applies the desired state's pending refactorlog renames to
+// the target model — skipping those a live target has recorded as applied — so
+// the diff sees renames rather than drop + create pairs, and returns the
+// statements that perform and record them (emitted ahead of the migration)
+// together with the refactorlog's warnings.
+func pendingRenames(ctx context.Context, fromSpec string, from *model.Database, dplan *deploy.Plan) (*model.Database, []sqlgen.Statement, []string, error) {
+	if dplan == nil || dplan.Refactor == nil || len(dplan.Refactor.Operations) == 0 {
+		return from, nil, nil, nil
 	}
 	applied := map[string]bool{}
-	if source.IsConnString(f.from) {
-		ctx := cmd.Context()
-		conn, err := dbconn.Connect(ctx, f.from)
+	if source.IsConnString(fromSpec) {
+		conn, err := dbconn.Connect(ctx, fromSpec)
 		if err != nil {
-			return nil, nil, fmt.Errorf("--from: %w", err)
+			return nil, nil, nil, err
 		}
 		defer conn.Close(ctx)
 		if applied, err = refactor.ReadApplied(ctx, conn); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	renames, warns := refactor.Pending(from, f.plan.Refactor, applied)
-	printWarnings(cmd, "refactorlog", warns)
+	renames, warns := refactor.Pending(from, dplan.Refactor, applied)
 	if len(renames) == 0 {
-		return from, nil, nil
+		return from, nil, warns, nil
 	}
-	return refactor.ApplyToModel(from, renames), refactor.Statements(renames), nil
+	return refactor.ApplyToModel(from, renames), refactor.Statements(renames), warns, nil
 }
 
 // resolveModels resolves both sources to models, printing any unsupported-object
@@ -178,10 +168,11 @@ func (f *commonFlags) compare(cmd *cobra.Command) (*engine.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	from, prelude, err := f.applyRefactorLog(cmd, from)
+	from, prelude, rwarns, err := pendingRenames(cmd.Context(), f.from, from, f.plan)
 	if err != nil {
 		return nil, err
 	}
+	printWarnings(cmd, "refactorlog", rwarns)
 	res, err := engine.Compare(from, to, f.options())
 	if err != nil {
 		return nil, err
@@ -243,9 +234,9 @@ func (f *commonFlags) options() engine.Options {
 	return opts
 }
 
-// variables parses --var name=value pairs and layers them over the desired
-// state's pgdac.yaml variables.
-func (f *commonFlags) variables() (map[string]string, error) {
+// variableOverrides parses the --var name=value pairs, which override the
+// desired state's pgdac.yaml variables.
+func (f *commonFlags) variableOverrides() (map[string]string, error) {
 	overrides := map[string]string{}
 	for _, kv := range f.vars {
 		name, value, ok := strings.Cut(kv, "=")
@@ -254,11 +245,7 @@ func (f *commonFlags) variables() (map[string]string, error) {
 		}
 		overrides[name] = value
 	}
-	var defaults map[string]string
-	if f.plan != nil {
-		defaults = f.plan.Variables
-	}
-	return deploy.MergeVariables(defaults, overrides), nil
+	return overrides, nil
 }
 
 func newScriptCmd() *cobra.Command {
@@ -323,7 +310,11 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := json.MarshalIndent(res.PlanDoc(), "", "  ")
+			doc, err := res.PlanDoc()
+			if err != nil {
+				return err
+			}
+			b, err := json.MarshalIndent(doc, "", "  ")
 			if err != nil {
 				return err
 			}

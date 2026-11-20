@@ -101,15 +101,61 @@ func (d *Database) MajorVersion() int {
 	return d.TargetVersion / 10000
 }
 
+// Schema looks up a schema by name, returning nil if absent.
+func (d *Database) Schema(name string) *Schema {
+	for _, s := range d.Schemas {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
+}
+
 // Table looks up a table by schema and name, returning nil if absent.
 func (d *Database) Table(schema, name string) *Table {
-	for _, s := range d.Schemas {
-		if s.Name != schema {
-			continue
-		}
+	if s := d.Schema(schema); s != nil {
 		for _, t := range s.Tables {
 			if t.Name == name {
 				return t
+			}
+		}
+	}
+	return nil
+}
+
+// View looks up a view by schema and name, returning nil if absent.
+func (d *Database) View(schema, name string) *View {
+	if s := d.Schema(schema); s != nil {
+		for _, v := range s.Views {
+			if v.Name == name {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+// MatView looks up a materialized view by schema and name, returning nil if
+// absent.
+func (d *Database) MatView(schema, name string) *MaterializedView {
+	if s := d.Schema(schema); s != nil {
+		for _, mv := range s.MatViews {
+			if mv.Name == name {
+				return mv
+			}
+		}
+	}
+	return nil
+}
+
+// Function looks up a routine by schema and signature ("name(identity args)",
+// as Function.Signature and an ObjRef of KindFunction carry it), returning nil
+// if absent. Overloads have distinct signatures.
+func (d *Database) Function(schema, signature string) *Function {
+	if s := d.Schema(schema); s != nil {
+		for _, f := range s.Functions {
+			if f.Signature() == signature {
+				return f
 			}
 		}
 	}

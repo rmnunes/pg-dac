@@ -32,7 +32,10 @@ func newLintCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rep := lintReport(res)
+			rep, err := lintReport(res)
+			if err != nil {
+				return err
+			}
 			w := cmd.OutOrStdout()
 			if format == "json" {
 				b, err := json.MarshalIndent(rep, "", "  ")
@@ -77,11 +80,15 @@ type lintOutput struct {
 	Hazards        []lintHazard `json:"hazards"`
 }
 
-func lintReport(res *engine.Result) lintOutput {
+func lintReport(res *engine.Result) (lintOutput, error) {
 	out := lintOutput{StatementCount: len(res.Statements) + len(res.Prelude)}
+	changes, err := res.ObjectChanges()
+	if err != nil {
+		return out, err
+	}
 	byCode := map[safety.HazardType]*lintHazard{}
 	seenObj := map[safety.HazardType]map[string]bool{}
-	for _, c := range res.ObjectChanges() {
+	for _, c := range changes {
 		for _, s := range c.Statements {
 			for _, h := range s.Hazards {
 				lh, ok := byCode[h.Type]
@@ -112,7 +119,7 @@ func lintReport(res *engine.Result) lintOutput {
 		}
 		return out.Hazards[i].Code < out.Hazards[j].Code
 	})
-	return out
+	return out, nil
 }
 
 func severityOrder(s safety.Severity) int {

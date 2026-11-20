@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/rmnunes/pg-dac/internal/model"
@@ -58,8 +60,11 @@ type HazardCount struct {
 }
 
 // PlanDoc builds the rich plan document.
-func (r *Result) PlanDoc() PlanDoc {
-	changes := r.ObjectChanges()
+func (r *Result) PlanDoc() (PlanDoc, error) {
+	changes, err := r.ObjectChanges()
+	if err != nil {
+		return PlanDoc{}, err
+	}
 	doc := PlanDoc{
 		FormatVersion:  PlanFormatVersion,
 		StatementCount: len(r.Statements) + len(r.Prelude),
@@ -88,12 +93,14 @@ func (r *Result) PlanDoc() PlanDoc {
 	for _, code := range codeOrder {
 		doc.HazardSummary = append(doc.HazardSummary, HazardCount{Code: code, Severity: m[code].sev, Count: m[code].count})
 	}
-	return doc
+	return doc, nil
 }
 
 // ObjectChanges rolls the per-op statement groups up into one record per
-// top-level object, in dependency (plan) order.
-func (r *Result) ObjectChanges() []ObjectChange {
+// top-level object, in dependency (plan) order. It fails only when an object's
+// definition cannot be rendered, which is a defect in the renderer, not in
+// the input.
+func (r *Result) ObjectChanges() ([]ObjectChange, error) {
 	fromKeys := presentKeys(r.from)
 	toKeys := presentKeys(r.to)
 
@@ -102,7 +109,7 @@ func (r *Result) ObjectChanges() []ObjectChange {
 	reasons := map[string][]string{}
 	for _, g := range r.Groups {
 		key := g.Op.Owner.Key()
-		if reason := g.Op.Reason; reason != "" && !containsString(reasons[key], reason) {
+		if reason := g.Op.Reason; reason != "" && !slices.Contains(reasons[key], reason) {
 			reasons[key] = append(reasons[key], reason)
 		}
 		oc, ok := byKey[key]
@@ -126,21 +133,30 @@ func (r *Result) ObjectChanges() []ObjectChange {
 		oc.Hazards, oc.Severity = aggregateHazards(oc.Statements)
 		oc.Reason = strings.Join(reasons[key], "; ")
 		ref := model.ObjRef{Kind: oc.ObjectType, Schema: oc.Schema, Name: oc.Name}
+		var err error
 		switch oc.ChangeKind {
 		case "add":
-			oc.NewDefinition = objectCanonical(r.to, ref)
+			if oc.NewDefinition, err = objectCanonical(r.to, ref); err != nil {
+				return nil, err
+			}
 			oc.DependsOn = dependsOnFor(r.to, ref)
 		case "drop":
-			oc.OldDefinition = objectCanonical(r.from, ref)
+			if oc.OldDefinition, err = objectCanonical(r.from, ref); err != nil {
+				return nil, err
+			}
 			oc.DependsOn = dependsOnFor(r.from, ref)
 		default:
-			oc.OldDefinition = objectCanonical(r.from, ref)
-			oc.NewDefinition = objectCanonical(r.to, ref)
+			if oc.OldDefinition, err = objectCanonical(r.from, ref); err != nil {
+				return nil, err
+			}
+			if oc.NewDefinition, err = objectCanonical(r.to, ref); err != nil {
+				return nil, err
+			}
 			oc.DependsOn = dependsOnFor(r.to, ref)
 		}
 		out = append(out, *oc)
 	}
-	return out
+	return out, nil
 }
 
 func changeKind(key string, fromKeys, toKeys map[string]model.ObjKind) string {
@@ -193,15 +209,6 @@ func maxSeverity(a, b safety.Severity) safety.Severity {
 }
 
 // presentKeys returns the set of top-level object keys present in a model.
-func containsString(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
 func presentKeys(db *model.Database) map[string]model.ObjKind {
 	m := map[string]model.ObjKind{}
 	if db == nil {
@@ -249,22 +256,20 @@ func presentKeys(db *model.Database) map[string]model.ObjKind {
 // CREATE EXTENSION with the installed version noted (a version upgrade is
 // otherwise invisible in the text), everything else the object under its
 // schema.
-func objectCanonical(db *model.Database, ref model.ObjRef) string {
+func objectCanonical(db *model.Database, ref model.ObjRef) (string, error) {
 	if db == nil {
-		return ""
+		return "", nil
 	}
 	switch ref.Kind {
 	case model.KindSchema:
-		for _, s := range db.Schemas {
-			if s.Name != ref.Name {
-				continue
-			}
-			bare := &model.Schema{Name: s.Name, Owner: s.Owner, Comment: s.Comment, Grants: s.Grants}
-			return renderFromNothing(
-				&model.Database{TargetVersion: db.TargetVersion},
-				&model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{bare}})
+		s := db.Schema(ref.Name)
+		if s == nil {
+			return "", nil
 		}
-		return ""
+		bare := &model.Schema{Name: s.Name, Owner: s.Owner, Comment: s.Comment, Grants: s.Grants}
+		return renderFromNothing(
+			&model.Database{TargetVersion: db.TargetVersion},
+			&model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{bare}})
 	case model.KindExtension:
 		for _, e := range db.Extensions {
 			if e.Name != ref.Name {
@@ -274,19 +279,19 @@ func objectCanonical(db *model.Database, ref model.ObjRef) string {
 			if e.Schema != "" {
 				schemas = []*model.Schema{{Name: e.Schema}}
 			}
-			out := renderFromNothing(
+			out, err := renderFromNothing(
 				&model.Database{TargetVersion: db.TargetVersion, Schemas: schemas},
 				&model.Database{TargetVersion: db.TargetVersion, Schemas: schemas, Extensions: []*model.Extension{e}})
-			if out != "" && e.Version != "" {
+			if err == nil && out != "" && e.Version != "" {
 				out += "\n-- version " + e.Version
 			}
-			return out
+			return out, err
 		}
-		return ""
+		return "", nil
 	}
 	mini := extractObject(db, ref)
 	if mini == nil {
-		return ""
+		return "", nil
 	}
 	baseline := &model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{{Name: ref.Schema}}}
 	return renderFromNothing(baseline, mini)
@@ -294,16 +299,16 @@ func objectCanonical(db *model.Database, ref model.ObjRef) string {
 
 // renderFromNothing renders the statements that take baseline to mini, joined
 // as one text.
-func renderFromNothing(baseline, mini *model.Database) string {
+func renderFromNothing(baseline, mini *model.Database) (string, error) {
 	res, err := Compare(baseline, mini, Options{Online: false})
-	if err != nil || res.Empty() {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("render definition: %w", err)
 	}
 	parts := make([]string, 0, len(res.Statements))
 	for _, s := range res.Statements {
 		parts = append(parts, s.SQL)
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), nil
 }
 
 // extractObject returns a one-object model (the object under its schema), or nil
@@ -312,13 +317,7 @@ func extractObject(db *model.Database, ref model.ObjRef) *model.Database {
 	if db == nil {
 		return nil
 	}
-	var src *model.Schema
-	for _, s := range db.Schemas {
-		if s.Name == ref.Schema {
-			src = s
-			break
-		}
-	}
+	src := db.Schema(ref.Schema)
 	if src == nil {
 		return nil
 	}
@@ -373,10 +372,8 @@ func extractObject(db *model.Database, ref model.ObjRef) *model.Database {
 			}
 		}
 	case model.KindFunction:
-		for _, f := range src.Functions {
-			if f.Ref().Key() == ref.Key() {
-				out.Functions = []*model.Function{f}
-			}
+		if f := db.Function(ref.Schema, ref.Name); f != nil {
+			out.Functions = []*model.Function{f}
 		}
 	}
 	return &model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{out}}
@@ -397,21 +394,18 @@ func dependsOnFor(db *model.Database, ref model.ObjRef) []string {
 	if ref.Schema != "" {
 		add(model.ObjRef{Kind: model.KindSchema, Name: ref.Schema}.Key())
 	}
-	var src *model.Schema
-	for _, s := range db.Schemas {
-		if s.Name == ref.Schema {
-			src = s
-		}
-	}
+	src := db.Schema(ref.Schema)
 	if src == nil {
 		return deps
 	}
+	addAll := func(refs []model.ObjRef) {
+		for _, d := range refs {
+			add(d.Key())
+		}
+	}
 	switch ref.Kind {
 	case model.KindTable:
-		for _, t := range src.Tables {
-			if t.Name != ref.Name {
-				continue
-			}
+		if t := db.Table(ref.Schema, ref.Name); t != nil {
 			for _, c := range t.Constraints {
 				if c.Type == model.ConstraintForeignKey && c.RefTable != "" {
 					add(model.ObjRef{Kind: model.KindTable, Schema: c.RefSchema, Name: c.RefTable}.Key())
@@ -419,28 +413,16 @@ func dependsOnFor(db *model.Database, ref model.ObjRef) []string {
 			}
 		}
 	case model.KindView:
-		for _, v := range src.Views {
-			if v.Name == ref.Name {
-				for _, d := range v.DependsOn {
-					add(d.Key())
-				}
-			}
+		if v := db.View(ref.Schema, ref.Name); v != nil {
+			addAll(v.DependsOn)
 		}
 	case model.KindMatView:
-		for _, mv := range src.MatViews {
-			if mv.Name == ref.Name {
-				for _, d := range mv.DependsOn {
-					add(d.Key())
-				}
-			}
+		if mv := db.MatView(ref.Schema, ref.Name); mv != nil {
+			addAll(mv.DependsOn)
 		}
 	case model.KindFunction:
-		for _, f := range src.Functions {
-			if f.Ref().Key() == ref.Key() {
-				for _, d := range f.DependsOn {
-					add(d.Key())
-				}
-			}
+		if f := db.Function(ref.Schema, ref.Name); f != nil {
+			addAll(f.DependsOn)
 		}
 	case model.KindSequence:
 		for _, sq := range src.Sequences {

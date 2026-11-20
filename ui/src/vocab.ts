@@ -1,8 +1,8 @@
 // The GUI's vocabulary: human copy for the engine's hazard codes, warning
-// sides and change kinds. The engine speaks in codes (safety.HazardType) and a
-// per-statement explanation; the GUI adds a title, a short badge label and a
-// standing description so a reader does not have to decode
-// ACQUIRES_ACCESS_EXCLUSIVE_LOCK.
+// sides and change kinds, and the small wording helpers every component
+// shares. The engine speaks in codes (safety.HazardType) and a per-statement
+// explanation; the GUI adds a title, a short badge label and a standing
+// description so a reader does not have to decode ACQUIRES_ACCESS_EXCLUSIVE_LOCK.
 
 import type { ChangeKind, Hazard, ObjectChange, Severity, WarningSide } from "./ipc/types";
 
@@ -126,9 +126,24 @@ export const kindGlyph = (k: ChangeKind): string => (k === "add" ? "+" : k === "
 
 export const objectName = (c: { schema?: string; name: string }): string => (c.schema ? c.schema + "." : "") + c.name;
 
+/** "table sales.regions": the object's type and qualified name, as every list and notice says it. */
+export const objectLabel = (c: { objectType: string; schema?: string; name: string }): string => `${c.objectType} ${objectName(c)}`;
+
 /**
  * A change whose definition text is identical on both sides: the object is
  * touched for another reason (recreated because something it depends on
  * changes, or an attribute the definition does not show).
  */
 export const unchangedText = (c: ObjectChange): boolean => c.changeKind === "alter" && !!c.oldDefinition && c.oldDefinition === c.newDefinition;
+
+/** "1 statement" / "2 statements"; an irregular plural can be given. */
+export const plural = (n: number, singular: string, pluralForm = singular + "s"): string => `${n} ${n === 1 ? singular : pluralForm}`;
+
+/** The first line of a statement, for lists that show one line per statement. */
+export const firstLine = (sql: string): string => {
+  const i = sql.indexOf("\n");
+  return i >= 0 ? sql.slice(0, i) + " …" : sql;
+};
+
+/** Why a row is disabled: it depends on an excluded change. */
+export const gatedTitle = (dependency: string): string => `Excluded because it depends on ${dependency}, which is excluded`;

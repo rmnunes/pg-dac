@@ -45,16 +45,6 @@ export const script = (req: CompareRequest): Promise<ScriptResponse> => (inTauri
 
 export const startPublish = (req: CompareRequest): Promise<void> => (inTauri ? invoke("pgdac_publish", { req }) : mock.startPublish(req));
 
-export const buildArtifact = (args: {
-  from: string;
-  out: string;
-  name?: string;
-  version?: string;
-  noSign?: boolean;
-}): Promise<string> => (inTauri ? invoke("pgdac_build", args) : mock.buildArtifact());
-
-export const inspectArtifact = (path: string): Promise<string> => (inTauri ? invoke("pgdac_inspect", { path }) : mock.inspectArtifact());
-
 export const onPublish = (cb: (e: PublishEvent) => void): Promise<UnlistenFn> =>
   inTauri ? listen<PublishEvent>("pgdac://publish", (event) => cb(event.payload)) : mock.onPublish(cb);
 

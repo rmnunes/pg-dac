@@ -37,8 +37,12 @@ func TestObjectChanges_RecreatedDependentCarriesReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	changes, err := res.ObjectChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
 	key := model.ObjRef{Kind: model.KindView, Schema: "public", Name: "v"}.Key()
-	for _, c := range res.ObjectChanges() {
+	for _, c := range changes {
 		if c.ID != key {
 			continue
 		}

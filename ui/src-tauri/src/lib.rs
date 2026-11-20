@@ -1,6 +1,7 @@
 //! pg-dac-ui Tauri backend: a thin supervisor + proxy over the bundled
 //! `pg-dac serve` daemon. The frontend invokes these commands; they forward to
-//! the warm daemon and (for publish) stream SSE progress back as Tauri events.
+//! the warm daemon and (for compare and publish) stream SSE progress back as
+//! Tauri events.
 
 mod daemon;
 mod profiles;
@@ -24,13 +25,43 @@ const PUBLISH_EVENT: &str = "pgdac://publish";
 /// is one of "phase" | "result" | "canceled" | "error".
 const COMPARE_EVENT: &str = "pgdac://compare";
 
-// The proxy commands below are `async` and run their blocking ureq call inside
-// `spawn_blocking`. This is deliberate: a *synchronous* Tauri command executes on
-// the main thread, which also drives the OS window event loop — so a multi-second
-// compare would freeze the window (no repaint, no minimize/move, "Not Responding").
-// Marking them async hands them to the async runtime, and spawn_blocking moves the
-// blocking HTTP I/O onto a dedicated blocking-thread pool so it never starves an
-// async worker either. The window stays fully interactive while work runs.
+// Every proxy command is `async` and runs its blocking ureq call off the main
+// thread. This is deliberate: a *synchronous* Tauri command executes on the
+// main thread, which also drives the OS window event loop — so a multi-second
+// compare would freeze the window (no repaint, no minimize/move, "Not
+// Responding"). `proxy` hands a request/response call to the blocking-thread
+// pool; `stream` hands an SSE subscription to it and forwards each event to the
+// frontend as it arrives. The window stays fully interactive while work runs.
+
+/// POST `body` to a JSON endpoint of the daemon and return its response.
+async fn proxy(
+    state: State<'_, AppState>,
+    path: &'static str,
+    body: Value,
+) -> Result<Value, String> {
+    let daemon = state.daemon.clone();
+    tauri::async_runtime::spawn_blocking(move || daemon.post(path, body))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// POST `body` to an SSE endpoint of the daemon and re-emit every server-sent
+/// event on `channel` as {event, data}. Returns as soon as the subscription is
+/// handed off; the frontend listens for the events.
+fn stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: &'static str,
+    channel: &'static str,
+    body: Value,
+) {
+    let daemon = state.daemon.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        daemon.stream(path, body, |event, data| {
+            let _ = app.emit(channel, serde_json::json!({ "event": event, "data": data }));
+        });
+    });
+}
 
 #[tauri::command]
 async fn pgdac_health(state: State<'_, AppState>) -> Result<Value, String> {
@@ -40,88 +71,36 @@ async fn pgdac_health(state: State<'_, AppState>) -> Result<Value, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Starts a compare and streams progress over COMPARE_EVENT. Returns immediately;
-/// the frontend listens for phase/result/canceled/error events. The request
+/// Starts a compare and streams progress over COMPARE_EVENT. The request
 /// carries an `opId` the frontend can pass to `pgdac_cancel` to abort it.
 #[tauri::command]
-fn pgdac_plan(app: AppHandle, state: State<AppState>, req: Value) -> Result<(), String> {
-    let daemon = state.daemon.clone();
-    std::thread::spawn(move || {
-        daemon.stream("/plan", req, |event, data| {
-            let _ = app.emit(COMPARE_EVENT, serde_json::json!({ "event": event, "data": data }));
-        });
-    });
-    Ok(())
+fn pgdac_plan(app: AppHandle, state: State<'_, AppState>, req: Value) {
+    stream(app, state, "/plan", COMPARE_EVENT, req);
 }
 
 /// Cancel an in-flight compare (or any op) by the opId the frontend assigned it.
 #[tauri::command]
 async fn pgdac_cancel(state: State<'_, AppState>, op_id: String) -> Result<Value, String> {
-    let daemon = state.daemon.clone();
-    tauri::async_runtime::spawn_blocking(move || daemon.cancel(&op_id))
-        .await
-        .map_err(|e| e.to_string())?
+    proxy(state, "/cancel", serde_json::json!({ "opId": op_id })).await
 }
 
 /// Re-plans the last comparison with a changed selection or options, without
 /// reading the sources again (see the daemon's /replan).
 #[tauri::command]
 async fn pgdac_replan(state: State<'_, AppState>, req: Value) -> Result<Value, String> {
-    let daemon = state.daemon.clone();
-    tauri::async_runtime::spawn_blocking(move || daemon.post("/replan", req))
-        .await
-        .map_err(|e| e.to_string())?
+    proxy(state, "/replan", req).await
 }
 
 #[tauri::command]
 async fn pgdac_script(state: State<'_, AppState>, req: Value) -> Result<Value, String> {
-    let daemon = state.daemon.clone();
-    tauri::async_runtime::spawn_blocking(move || daemon.post("/script", req))
-        .await
-        .map_err(|e| e.to_string())?
+    proxy(state, "/script", req).await
 }
 
-/// Starts a publish and streams progress over the PUBLISH_EVENT channel. Returns
-/// immediately; the frontend listens for start/progress/done/error events.
+/// Starts a publish and streams progress over PUBLISH_EVENT
+/// (start | progress | done | error).
 #[tauri::command]
-fn pgdac_publish(app: AppHandle, state: State<AppState>, req: Value) -> Result<(), String> {
-    let daemon = state.daemon.clone();
-    std::thread::spawn(move || {
-        daemon.stream("/publish", req, |event, data| {
-            let _ = app.emit(PUBLISH_EVENT, serde_json::json!({ "event": event, "data": data }));
-        });
-    });
-    Ok(())
-}
-
-/// Build a .pgdac (one-shot). args mirror the CLI: name/version/no-sign/schema.
-#[tauri::command]
-async fn pgdac_build(
-    state: State<'_, AppState>,
-    from: String,
-    out: String,
-    name: Option<String>,
-    version: Option<String>,
-    no_sign: bool,
-) -> Result<String, String> {
-    let daemon = state.daemon.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut args = vec!["build".into(), "--from".into(), from, "--out".into(), out];
-        if let Some(n) = name {
-            args.push("--name".into());
-            args.push(n);
-        }
-        if let Some(v) = version {
-            args.push("--version".into());
-            args.push(v);
-        }
-        if no_sign {
-            args.push("--no-sign".into());
-        }
-        daemon.run_oneshot(&args, &[])
-    })
-    .await
-    .map_err(|e| e.to_string())?
+fn pgdac_publish(app: AppHandle, state: State<'_, AppState>, req: Value) {
+    stream(app, state, "/publish", PUBLISH_EVENT, req);
 }
 
 /// Saved source profiles (connection strings / projects / artifacts). The list
@@ -140,15 +119,6 @@ async fn profile_add(app: AppHandle, profile: Profile) -> Result<Vec<Profile>, S
 #[tauri::command]
 async fn profile_remove(app: AppHandle, id: String) -> Result<Vec<Profile>, String> {
     profiles::remove(&app, &id)
-}
-
-/// Inspect/verify a .pgdac artifact (one-shot).
-#[tauri::command]
-async fn pgdac_inspect(state: State<'_, AppState>, path: String) -> Result<String, String> {
-    let daemon = state.daemon.clone();
-    tauri::async_runtime::spawn_blocking(move || daemon.run_oneshot(&["inspect".into(), path], &[]))
-        .await
-        .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -171,8 +141,6 @@ pub fn run() {
             pgdac_script,
             pgdac_replan,
             pgdac_publish,
-            pgdac_build,
-            pgdac_inspect,
             profiles_list,
             profile_add,
             profile_remove,

@@ -34,6 +34,17 @@ type Options struct {
 	TrustedKeys []string
 }
 
+// OptionsFor builds the options every comparison verb resolves its sources
+// with: the schemas in scope, the target major, and the signer-trust policy
+// (see artifact.TrustedKeysFor).
+func OptionsFor(schemas []string, targetMajor int, requireKey string) (Options, error) {
+	keys, err := artifact.TrustedKeysFor(requireKey)
+	if err != nil {
+		return Options{}, err
+	}
+	return Options{Schemas: schemas, TargetMajor: targetMajor, RequireKey: requireKey, TrustedKeys: keys}, nil
+}
+
 // Resolve turns a source spec into a model and any unsupported-object warnings.
 // A spec is a PostgreSQL connection string, a path to a declarative project
 // directory, a path to a single .sql file, or a .pgdac artifact.
@@ -116,7 +127,7 @@ func resolveArtifact(path string, opts Options) (*model.Database, []string, erro
 func resolveDB(ctx context.Context, spec string, opts Options) (*model.Database, []string, error) {
 	conn, err := dbconn.Connect(ctx, spec)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to database: %w", err)
+		return nil, nil, err
 	}
 	defer conn.Close(ctx)
 

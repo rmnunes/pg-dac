@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 
 import { health, onCompare, onPublish } from "./ipc/client";
-import { EXPECTED_FORMAT_VERSION } from "./ipc/types";
+import { EXPECTED_FORMAT_VERSION, engineRelease } from "./ipc/types";
 import pinnedVersion from "../PGDAC_VERSION?raw";
 import { TREE_WIDTH_MAX, TREE_WIDTH_MIN, useStore } from "./state/store";
 import { SourceBar } from "./components/SourceBar";
@@ -63,7 +63,7 @@ export default function App() {
         const pinned = pinnedVersion.trim();
         // A dev engine reports "<version>-dev+<commit>" (see ui/README.md); only
         // the release part has to match the pin.
-        const mismatch = h.version.replace(/ \(.*\)$/, "").replace(/-dev(\+[0-9a-f]+)?$/, "") !== pinned;
+        const mismatch = engineRelease(h.version) !== pinned;
         setEngine({ version: h.version, note: mismatch ? `Engine ${h.version} differs from the UI's pinned ${pinned}; results may differ from a release build.` : undefined });
       })
       .catch((e) => setEngine({ note: `pg-dac engine not reachable: ${String(e)}` }));

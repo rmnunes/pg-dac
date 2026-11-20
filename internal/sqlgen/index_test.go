@@ -90,7 +90,9 @@ func TestRenderReplaceIndex_Offline(t *testing.T) {
 		if len(stmts) != 3 { // drop, create, comment
 			t.Fatalf("%s: got %d statements:\n%s", name, len(stmts), dump(stmts))
 		}
-		if strip(stmts[0].SQL) != "DROP INDEX public.t_a;" || !stmts[0].Transactional || !strings.Contains(stmts[0].Note, "rebuilt") {
+		// IF EXISTS: a column drop earlier in the plan may already have taken
+		// the old index with it.
+		if strip(stmts[0].SQL) != "DROP INDEX IF EXISTS public.t_a;" || !stmts[0].Transactional || !strings.Contains(stmts[0].Note, "rebuilt") {
 			t.Errorf("%s: drop = %+v", name, stmts[0])
 		}
 		if !hasHazard(stmts[0], safety.IndexDropped) {
@@ -98,6 +100,44 @@ func TestRenderReplaceIndex_Offline(t *testing.T) {
 		}
 		if !strings.HasPrefix(stmts[1].SQL, "CREATE INDEX t_a ON ") || !stmts[1].Transactional || !strings.Contains(stmts[1].Note, "rebuilt") {
 			t.Errorf("%s: create = %+v", name, stmts[1])
+		}
+	}
+}
+
+// TestRenderIndex_Partitioned: CREATE/DROP INDEX CONCURRENTLY are not
+// supported on a partitioned table, so online mode falls back to the
+// transactional forms there and says so; a plain drop is never IF EXISTS.
+func TestRenderIndex_Partitioned(t *testing.T) {
+	op := replaceOp("RANGE (a)")
+	create := renderCreateIndex(op, Options{Online: true}, false)
+	if len(create) != 2 || strings.Contains(create[0].SQL, "CONCURRENTLY") || !create[0].Transactional || !strings.Contains(create[0].Note, "partitioned") {
+		t.Errorf("partitioned create online = %+v", create)
+	}
+	drop := op
+	drop.Index = op.PrevIndex
+	dropped := renderDropIndex(drop, Options{Online: true}, false)
+	if len(dropped) != 1 || strip(dropped[0].SQL) != "DROP INDEX public.t_a;" || !dropped[0].Transactional || !strings.Contains(dropped[0].Note, "partitioned") {
+		t.Errorf("partitioned drop online = %+v", dropped)
+	}
+	plain := renderDropIndex(drop, Options{Online: true}, false)
+	if strings.Contains(plain[0].SQL, "IF EXISTS") {
+		t.Errorf("a plain drop must not be IF EXISTS: %q", plain[0].SQL)
+	}
+	if got := strip(renderDropIndex(replaceOp(""), Options{Online: true}, false)[0].SQL); got != "DROP INDEX CONCURRENTLY public.t_a;" {
+		t.Errorf("ordinary table online drop = %q", got)
+	}
+}
+
+func TestConcurrentIndexDef(t *testing.T) {
+	cases := map[string]string{
+		"CREATE INDEX t_a ON public.t USING btree (a)":        "CREATE INDEX CONCURRENTLY t_a ON public.t USING btree (a)",
+		"CREATE UNIQUE INDEX t_u ON public.t USING btree (a)": "CREATE UNIQUE INDEX CONCURRENTLY t_u ON public.t USING btree (a)",
+		`CREATE INDEX "My Index" ON public.t USING btree (a)`: `CREATE INDEX CONCURRENTLY "My Index" ON public.t USING btree (a)`,
+		"SELECT 1": "SELECT 1",
+	}
+	for def, want := range cases {
+		if got := concurrentIndexDef(def); got != want {
+			t.Errorf("concurrentIndexDef(%q) = %q, want %q", def, got, want)
 		}
 	}
 }

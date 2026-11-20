@@ -225,18 +225,18 @@ func toName(op Op) string {
 func exists(db *model.Database, op Op, schema, name string) bool {
 	switch op.Kind {
 	case KindSchema:
-		return findSchema(db, name) != nil
+		return db.Schema(name) != nil
 	case KindTable:
 		return db.Table(schema, name) != nil
 	case KindColumn:
 		t := db.Table(schema, op.Table)
 		return t != nil && t.Column(name) != nil
 	case KindView:
-		return findView(db, schema, name) != nil
+		return db.View(schema, name) != nil
 	case KindMatView:
-		return findMatView(db, schema, name) != nil
+		return db.MatView(schema, name) != nil
 	case KindSequence:
-		s := findSchema(db, schema)
+		s := db.Schema(schema)
 		if s == nil {
 			return false
 		}
@@ -246,7 +246,7 @@ func exists(db *model.Database, op Op, schema, name string) bool {
 			}
 		}
 	case KindFunction:
-		s := findSchema(db, schema)
+		s := db.Schema(schema)
 		if s == nil {
 			return false
 		}
@@ -256,7 +256,7 @@ func exists(db *model.Database, op Op, schema, name string) bool {
 			}
 		}
 	case KindEnum:
-		s := findSchema(db, schema)
+		s := db.Schema(schema)
 		if s == nil {
 			return false
 		}
@@ -266,7 +266,7 @@ func exists(db *model.Database, op Op, schema, name string) bool {
 			}
 		}
 	case KindDomain:
-		s := findSchema(db, schema)
+		s := db.Schema(schema)
 		if s == nil {
 			return false
 		}
@@ -276,7 +276,7 @@ func exists(db *model.Database, op Op, schema, name string) bool {
 			}
 		}
 	case KindComposite:
-		s := findSchema(db, schema)
+		s := db.Schema(schema)
 		if s == nil {
 			return false
 		}
@@ -286,7 +286,7 @@ func exists(db *model.Database, op Op, schema, name string) bool {
 			}
 		}
 	case KindIndex:
-		s := findSchema(db, schema)
+		s := db.Schema(schema)
 		if s == nil {
 			return false
 		}
@@ -465,43 +465,12 @@ func ReadApplied(ctx context.Context, q Querier) (map[string]bool, error) {
 
 // --- lookups ---
 
-func findSchema(db *model.Database, name string) *model.Schema {
-	for _, s := range db.Schemas {
-		if s.Name == name {
-			return s
-		}
-	}
-	return nil
-}
-
-func findView(db *model.Database, schema, name string) *model.View {
-	if s := findSchema(db, schema); s != nil {
-		for _, v := range s.Views {
-			if v.Name == name {
-				return v
-			}
-		}
-	}
-	return nil
-}
-
-func findMatView(db *model.Database, schema, name string) *model.MaterializedView {
-	if s := findSchema(db, schema); s != nil {
-		for _, mv := range s.MatViews {
-			if mv.Name == name {
-				return mv
-			}
-		}
-	}
-	return nil
-}
-
 // triggersOf returns the triggers of a table or a view.
 func triggersOf(db *model.Database, schema, rel string) []*model.Trigger {
 	if t := db.Table(schema, rel); t != nil {
 		return t.Triggers
 	}
-	if v := findView(db, schema, rel); v != nil {
+	if v := db.View(schema, rel); v != nil {
 		return v.Triggers
 	}
 	return nil

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rmnunes/pg-dac/internal/model"
@@ -104,4 +105,43 @@ func TestExpandDependents_DropTableUnderRewrittenView(t *testing.T) {
 		t.Fatal(err)
 	}
 	ordered(t, res.Script(true), `DROP VIEW "app"."v"`, `DROP TABLE "app"."t"`, `CREATE OR REPLACE VIEW "app"."v"`)
+}
+
+// A function whose signature uses a view's row type, with a new body in the
+// desired state: the differ emits only its CREATE OR REPLACE, so this pass
+// adds the drop (before the view goes) and the differ's create lands after the
+// view is back — one create, with the reason on the object.
+func TestExpandDependents_FunctionOverViewWithNewBody(t *testing.T) {
+	mk := func(colType, body string) *model.Database {
+		tbl := &model.Table{Schema: "app", Name: "t", Columns: []*model.Column{{Name: "a", Type: colType}}}
+		v := &model.View{Schema: "app", Name: "v", Definition: "SELECT a FROM app.t",
+			DependsOn:  []model.ObjRef{tbl.Ref()},
+			ColumnDeps: []model.ColumnRef{{Schema: "app", Table: "t", Column: "a"}},
+			Columns:    []model.ViewColumn{{Name: "a", Type: colType}}}
+		f := &model.Function{Schema: "app", Name: "f", Kind: "function", ReturnType: "SETOF app.v",
+			Definition: "CREATE OR REPLACE FUNCTION app.f()\n RETURNS SETOF app.v\n LANGUAGE sql\nAS $function$" + body + "$function$",
+			DependsOn:  []model.ObjRef{v.Ref()}}
+		return &model.Database{TargetVersion: 160000, Schemas: []*model.Schema{{Name: "app", Tables: []*model.Table{tbl}, Views: []*model.View{v}, Functions: []*model.Function{f}}}}
+	}
+	res, err := Compare(mk("integer", "SELECT * FROM app.v"), mk("bigint", "SELECT * FROM app.v WHERE a > 0"), DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := res.Script(true)
+	ordered(t, script,
+		`DROP FUNCTION "app"."f"()`, `DROP VIEW "app"."v"`,
+		`ALTER COLUMN "a" TYPE bigint`,
+		`CREATE OR REPLACE VIEW "app"."v"`, `CREATE OR REPLACE FUNCTION app.f()`)
+	if n := strings.Count(script, "CREATE OR REPLACE FUNCTION app.f()"); n != 1 {
+		t.Errorf("the function must be created once, got %d:\n%s", n, script)
+	}
+	changes, err := res.ObjectChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range changes {
+		if c.ObjectType == model.KindFunction && !strings.Contains(c.Reason, "recreated because it depends on view") {
+			t.Errorf("function reason = %q", c.Reason)
+		}
+	}
 }

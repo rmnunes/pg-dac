@@ -31,12 +31,8 @@ const (
 	ColumnOrderRebuild = "rebuild"
 )
 
-// Diff computes the operations required to transform the "from" database
-// (current/target state) into the "to" database (desired state) under the
-// default options.
-func Diff(from, to *model.Database) *ChangeSet { return DiffWith(from, to, Options{}) }
-
-// DiffWith is Diff with explicit options.
+// DiffWith computes the operations required to transform the "from" database
+// (current/target state) into the "to" database (desired state).
 //
 // Drops for objects present in "from" but absent from "to" are always emitted
 // here; whether they are actually applied is governed by deploy options
@@ -557,11 +553,21 @@ func diffIndexes(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromIdx,
 	for _, i := range fromIdx {
 		prevByName[i.Name] = i
 	}
-	taken := indexNamesTaken(table, fromIdx, toIdx)
 	curByName := map[string]*model.Index{}
 	for _, i := range toIdx {
 		curByName[i.Name] = i
 	}
+	// An index the target still has under a rebuild name and the source does
+	// not know is a leftover of an interrupted rebuild: a rebuild may take its
+	// name again, and it goes whatever the drop policy says.
+	leftover := func(i *model.Index) bool { return isRebuildLeftover(i.Name) && curByName[i.Name] == nil }
+	var fromKept []*model.Index
+	for _, i := range fromIdx {
+		if !leftover(i) {
+			fromKept = append(fromKept, i)
+		}
+	}
+	taken := indexNamesTaken(table, fromKept, toIdx)
 	for _, idx := range toIdx {
 		prev, ok := prevByName[idx.Name]
 		if !ok {
@@ -576,9 +582,15 @@ func diffIndexes(cs *ChangeSet, owner model.ObjRef, table *model.Table, fromIdx,
 		comment(cs, owner, "index", idx.Name, prev.Comment, idx.Comment)
 	}
 	for _, idx := range fromIdx {
-		if _, ok := curByName[idx.Name]; !ok {
-			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx})
+		if _, ok := curByName[idx.Name]; ok {
+			continue
 		}
+		if leftover(idx) {
+			cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx, Cleanup: true,
+				Reason: "removed: an index left under its rebuild name by an interrupted earlier run"})
+			continue
+		}
+		cs.add(Op{Type: OpDropIndex, Owner: owner, Sub: idx.Name, Table: table, Index: idx})
 	}
 }
 

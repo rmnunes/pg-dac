@@ -1,4 +1,7 @@
-// Mirrors the pg-dac daemon's JSON 1:1 (engine.PlanDoc / ObjectChange / Hazard).
+// The daemon's JSON as this UI uses it: engine.PlanDoc / ObjectChange / Hazard
+// one to one (same field names, camelCase, as encoding/json emits them), the
+// compare request fields the UI sends, and the SSE payloads the Rust
+// supervisor relays as {event, data}.
 
 export type Severity = "error" | "warning" | "info" | "";
 
@@ -31,8 +34,6 @@ export interface ObjectChange {
   severity?: Severity;
   /** Why the engine touches the object beyond the plain diff (a dependent recreated, a rebuild). */
   reason?: string;
-  /** UI only: the object is in the comparison but nothing runs for it under the current selection. */
-  omitted?: boolean;
 }
 
 export interface HazardCount {
@@ -53,6 +54,13 @@ export interface PlanDoc {
 
 /** The PlanDoc / daemon API format this UI understands (engine.PlanFormatVersion). */
 export const EXPECTED_FORMAT_VERSION = 2;
+
+/**
+ * The release part of an engine version. A release build reports "<release>";
+ * a dev sidecar "<release>-dev+<commit>" (see ui/README.md), whose release
+ * part is what the UI's pin (ui/PGDAC_VERSION) is compared with.
+ */
+export const engineRelease = (version: string): string => version.replace(/-dev(\+[0-9a-z]+)?$/, "");
 
 /**
  * Which side of the comparison a warning is about: "target" is the database
@@ -106,7 +114,6 @@ export interface CompareRequest {
   online?: boolean;
   allowHazards?: boolean;
   dropObjectsNotInSource?: boolean;
-  includeIds?: string[];
   excludeIds?: string[];
   /** Fail unless a .pgdac source is signed by this key fingerprint. */
   requireKey?: string;
@@ -130,9 +137,9 @@ export interface CompareRequest {
   singleTransaction?: boolean;
 }
 
-// Compare SSE payloads, re-emitted by the Rust supervisor as {event, data}.
-// "phase" narrates progress; "result" carries the PlanDoc; then "canceled" | "error".
-export type CompareEventName = "phase" | "result" | "canceled" | "error" | "message";
+// Compare SSE payloads: "phase" narrates progress; "result" carries the
+// PlanDoc; then "canceled" | "error".
+export type CompareEventName = "phase" | "result" | "canceled" | "error";
 
 export interface CompareEvent {
   event: CompareEventName;
@@ -147,8 +154,9 @@ export interface CompareEvent {
   };
 }
 
-// Publish SSE payloads, re-emitted by the Rust supervisor as {event, data}.
-export type PublishEventName = "start" | "progress" | "done" | "error" | "message";
+// Publish SSE payloads: "start" (what will run), one "progress" per
+// statement or script, then "done" | "error".
+export type PublishEventName = "start" | "progress" | "done" | "error";
 
 export interface PublishEvent {
   event: PublishEventName;

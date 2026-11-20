@@ -132,7 +132,7 @@ func renameTable(db *model.Database, schema, from, toSchema, to string) {
 }
 
 func renameView(db *model.Database, schema, from, toSchema, to string) {
-	v := findView(db, schema, from)
+	v := db.View(schema, from)
 	if v == nil {
 		return
 	}
@@ -145,7 +145,7 @@ func renameView(db *model.Database, schema, from, toSchema, to string) {
 }
 
 func renameMatView(db *model.Database, schema, from, toSchema, to string) {
-	mv := findMatView(db, schema, from)
+	mv := db.MatView(schema, from)
 	if mv == nil {
 		return
 	}
@@ -270,7 +270,7 @@ func renameColumn(db *model.Database, schema, table, from, to string) {
 }
 
 func renameSequence(db *model.Database, schema, from, toSchema, to string) {
-	s := findSchema(db, schema)
+	s := db.Schema(schema)
 	if s == nil {
 		return
 	}
@@ -290,7 +290,7 @@ func renameSequence(db *model.Database, schema, from, toSchema, to string) {
 }
 
 func renameFunction(db *model.Database, schema, fromSig, toSchema, to string) {
-	s := findSchema(db, schema)
+	s := db.Schema(schema)
 	if s == nil {
 		return
 	}
@@ -345,7 +345,7 @@ func retargetTrigger(tr *model.Trigger, schema, fromSig, fromName, toSchema, to,
 }
 
 func renameType(db *model.Database, kind Kind, schema, from, toSchema, to string) {
-	s := findSchema(db, schema)
+	s := db.Schema(schema)
 	if s == nil {
 		return
 	}
@@ -409,7 +409,7 @@ func renameType(db *model.Database, kind Kind, schema, from, toSchema, to string
 }
 
 func renameIndex(db *model.Database, schema, from, to string) {
-	s := findSchema(db, schema)
+	s := db.Schema(schema)
 	if s == nil {
 		return
 	}

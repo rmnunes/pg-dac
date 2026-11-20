@@ -8,7 +8,6 @@ import (
 
 	"github.com/rmnunes/pg-dac/internal/diff"
 	"github.com/rmnunes/pg-dac/internal/model"
-	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // ExtractSection is the root folder an extracted project's object files live in.
@@ -167,17 +166,3 @@ func fileSafe(s string) string {
 	}
 	return out
 }
-
-// ObjectSQL renders one object of db (with its sub-objects, comments and
-// privileges) in canonical form, or "" when absent. It is the content a
-// project update writes for that object.
-func ObjectSQL(db *model.Database, ref model.ObjRef) string {
-	for _, f := range ProjectFiles(db) {
-		if f.Owner.Key() == ref.Key() {
-			return f.SQL
-		}
-	}
-	return ""
-}
-
-var _ = sqlgen.Statement{}

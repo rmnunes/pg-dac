@@ -18,7 +18,7 @@ func TestStartStop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	inst, err := Start(ctx, DefaultConfig())
+	inst, err := Start(ctx, Config{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -49,12 +49,12 @@ func TestStartWhileAnotherRuns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
-	a, err := Start(ctx, DefaultConfig())
+	a, err := Start(ctx, Config{})
 	if err != nil {
 		t.Fatalf("start first: %v", err)
 	}
 	defer a.Stop()
-	b, err := Start(ctx, DefaultConfig())
+	b, err := Start(ctx, Config{})
 	if err != nil {
 		t.Fatalf("start second while the first runs: %v", err)
 	}

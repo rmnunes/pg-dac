@@ -92,17 +92,6 @@ func MetadataOnlyAddColumn(major int) bool { return major == 0 || major >= 11 }
 // validated CHECK (col IS NOT NULL) constraint exists. True since PG12.
 func ScanFreeSetNotNull(major int) bool { return major == 0 || major >= 12 }
 
-// ReindexConcurrently reports whether REINDEX CONCURRENTLY is available (PG12+).
-func ReindexConcurrently(major int) bool { return major == 0 || major >= 12 }
-
 // AddEnumValueInTransaction reports whether ALTER TYPE ... ADD VALUE may run
 // inside a transaction block (PG12+; the value is just unusable until commit).
 func AddEnumValueInTransaction(major int) bool { return major == 0 || major >= 12 }
-
-// DetachPartitionConcurrently reports whether DETACH PARTITION CONCURRENTLY is
-// available (PG14+).
-func DetachPartitionConcurrently(major int) bool { return major == 0 || major >= 14 }
-
-// VirtualGeneratedColumns reports whether VIRTUAL generated columns (no rewrite)
-// are available (PG18+).
-func VirtualGeneratedColumns(major int) bool { return major >= 18 }

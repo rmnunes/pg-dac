@@ -112,7 +112,7 @@ func (p *Plan) Empty() bool { return len(p.Changes) == 0 && len(p.RolesAdded) ==
 // Build plans the update of the project (indexed by idx, built to from) toward
 // the desired model to, given the engine's comparison res of from → to.
 // Objects the comparison leaves alone keep their files byte for byte.
-func Build(idx *Index, man *project.Manifest, from, to *model.Database, res *engine.Result) *Plan {
+func Build(idx *Index, man *project.Manifest, from, to *model.Database, res *engine.Result) (*Plan, error) {
 	plan := &Plan{dir: idx.dir}
 	rendered := map[string]engine.ProjectFile{}
 	for _, f := range engine.ProjectFiles(to) {
@@ -134,7 +134,11 @@ func Build(idx *Index, man *project.Manifest, from, to *model.Database, res *eng
 	var units []string
 	seen := map[string]bool{}
 	unitOf := map[string][]model.ObjRef{} // unit -> object refs in it (from ∪ to)
-	for _, oc := range res.ObjectChanges() {
+	changes, err := res.ObjectChanges()
+	if err != nil {
+		return nil, err
+	}
+	for _, oc := range changes {
 		ref := model.ObjRef{Kind: oc.ObjectType, Schema: oc.Schema, Name: oc.Name}
 		u := unitKey(ref)
 		if !seen[u] {
@@ -243,7 +247,7 @@ func Build(idx *Index, man *project.Manifest, from, to *model.Database, res *eng
 			plan.RolesAdded = append(plan.RolesAdded, r)
 		}
 	}
-	return plan
+	return plan, nil
 }
 
 type replacement struct {

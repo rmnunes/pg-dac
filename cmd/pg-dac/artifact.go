@@ -44,13 +44,9 @@ func artifactWriteCmd(use, short string) *cobra.Command {
 			if out == "" && toProject == "" {
 				return fmt.Errorf("specify --out <file.pgdac> or --to-project <dir>")
 			}
-			srcOpts := source.Options{Schemas: schemas, TargetMajor: targetMajor, RequireKey: requireKey}
-			if requireKey == "" {
-				keys, kerr := artifact.LoadTrustedKeys()
-				if kerr != nil {
-					return fmt.Errorf("read trusted keys: %w", kerr)
-				}
-				srcOpts.TrustedKeys = keys
+			srcOpts, err := source.OptionsFor(schemas, targetMajor, requireKey)
+			if err != nil {
+				return err
 			}
 			m, warns, err := source.Resolve(ctx, from, srcOpts)
 			if err != nil {

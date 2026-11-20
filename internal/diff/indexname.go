@@ -3,15 +3,20 @@ package diff
 import (
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 // tempIndexSuffix marks the name an index is rebuilt under (see
-// OpReplaceIndex); a leftover with this suffix is a rebuild that was
-// interrupted, which the next rebuild clears.
+// OpReplaceIndex). The suffix is reserved: an index the target has under such
+// a name and the source does not declare is a leftover of an interrupted
+// rebuild, which the differ removes (see diffIndexes and Op.Cleanup).
 const tempIndexSuffix = "_pgdac_new"
+
+// isRebuildLeftover reports whether an index name is one a rebuild runs under.
+func isRebuildLeftover(name string) bool { return strings.HasSuffix(name, tempIndexSuffix) }
 
 // maxIdentLen is PostgreSQL's identifier limit (NAMEDATALEN - 1) in bytes.
 const maxIdentLen = 63
@@ -51,7 +56,8 @@ func truncateUTF8(s string, n int) string {
 }
 
 // indexNamesTaken collects the names a temporary index must avoid: every
-// index on either side of the comparison and the relation's constraints
+// index on either side of the comparison (leftovers of interrupted rebuilds
+// excepted — a rebuild takes such a name back) and the relation's constraints
 // (whose backing indexes share the namespace).
 func indexNamesTaken(table *model.Table, fromIdx, toIdx []*model.Index) map[string]bool {
 	taken := map[string]bool{}

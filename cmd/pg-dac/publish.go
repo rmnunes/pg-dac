@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,15 +10,11 @@ import (
 
 	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/deploy"
-	"github.com/rmnunes/pg-dac/internal/drift"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
-	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/project"
-	"github.com/rmnunes/pg-dac/internal/refactor"
+	"github.com/rmnunes/pg-dac/internal/publish"
 	"github.com/rmnunes/pg-dac/internal/source"
-	"github.com/rmnunes/pg-dac/internal/sqlgen"
-	"github.com/rmnunes/pg-dac/internal/validate"
 )
 
 func newPublishCmd() *cobra.Command {
@@ -37,6 +34,7 @@ func newPublishCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
+			errOut := cmd.ErrOrStderr()
 
 			if !source.IsConnString(f.from) {
 				// A project as the target: update its files from the desired state.
@@ -45,12 +43,6 @@ func newPublishCmd() *cobra.Command {
 				}
 				return fmt.Errorf("--from must be a database connection string or a project directory for publish (got %q)", f.from)
 			}
-			conn, err := dbconn.Connect(ctx, f.from)
-			if err != nil {
-				return fmt.Errorf("connect to target: %w", err)
-			}
-			defer conn.Close(ctx)
-
 			srcOpts, err := f.sourceOptions()
 			if err != nil {
 				return err
@@ -59,191 +51,94 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Resolve the desired state first: nothing touches the target until the
-			// source is known to build.
-			toModel, toWarns, err := source.Resolve(ctx, f.to, srcOpts)
-			if err != nil {
-				return fmt.Errorf("--to: %w", err)
-			}
-			fromModel, fromWarns, err := introspect.IntrospectWithWarnings(ctx, conn, introspect.Options{IncludeSchemas: f.schemas})
-			if err != nil {
-				return fmt.Errorf("introspect target: %w", err)
-			}
-			// Drift: a target that changed outside pg-dac since its last publish is
-			// not published to unless the operator says so (BlockWhenDriftDetected).
-			drifted, hadBaseline := false, false
-			if len(f.schemas) == 0 {
-				rep, err := drift.Check(ctx, conn, fromModel)
-				if err != nil {
-					return err
-				}
-				drifted, hadBaseline = rep.Drifted, rep.Baseline != nil
-				if rep.Drifted {
-					msg := fmt.Sprintf("the target has drifted from its last baseline (#%d from %s, %s): %d change(s) were made outside pg-dac — run `pg-dac drift --from <target>` to see them",
-						rep.Baseline.ID, rep.Baseline.Source, rep.Baseline.RecordedAt.Format(time.RFC3339), len(rep.Changes.Plan.Ops))
-					if !allowDrift && !dryRun {
-						return fmt.Errorf("refusing to publish: %s; re-run with --allow-drift to publish anyway (a fresh baseline is recorded)", msg)
-					}
-					fmt.Fprintln(cmd.ErrOrStderr(), "warning (drift): "+msg)
-				}
-			}
-			// Refactorlog: perform the renames the target still needs, record
-			// them, and read the target again so the diff starts from the renamed
-			// state (dry runs only transform the model and print the statements).
-			var prelude []sqlgen.Statement
-			if plan.Refactor != nil && len(plan.Refactor.Operations) > 0 {
-				applied, err := refactor.ReadApplied(ctx, conn)
-				if err != nil {
-					return err
-				}
-				renames, rwarns := refactor.Pending(fromModel, plan.Refactor, applied)
-				printWarnings(cmd, "refactorlog", rwarns)
-				if len(renames) > 0 {
-					prelude = refactor.Statements(renames)
-					if dryRun {
-						fromModel = refactor.ApplyToModel(fromModel, renames)
-					} else {
-						for _, r := range renames {
-							fmt.Fprintf(cmd.ErrOrStderr(), "refactorlog: %s\n", r.Op.Describe())
-						}
-						if err := execute.ApplyStatements(ctx, conn, prelude); err != nil {
-							return fmt.Errorf("refactorlog: %w", err)
-						}
-						prelude = nil
-						if fromModel, fromWarns, err = introspect.IntrospectWithWarnings(ctx, conn, introspect.Options{IncludeSchemas: f.schemas}); err != nil {
-							return fmt.Errorf("introspect target: %w", err)
-						}
-					}
-				}
-			}
-			// The raw introspection stays the drift/baseline form; the comparison
-			// runs on its canonical form, like every other source.
-			canonFrom, canonWarns := source.Canonical(ctx, fromModel, srcOpts)
-			printWarnings(cmd, "--from", append(fromWarns, canonWarns...))
-			printWarnings(cmd, "--to", toWarns)
-
-			opts := f.options()
-			res, err := engine.Compare(canonFrom, toModel, opts)
+			overrides, err := f.variableOverrides()
 			if err != nil {
 				return err
 			}
-			res.Prelude = prelude
-			printWarnings(cmd, "plan", res.Warnings)
-			pre, post := plan.Pre, plan.Post
-			if noDeployScripts {
-				pre, post = nil, nil
-			}
-			vars, err := f.variables()
+			conn, err := dbconn.Connect(ctx, f.from)
 			if err != nil {
 				return err
 			}
-			// Every placeholder must resolve before anything runs.
-			for _, s := range append(append([]deploy.Script{}, pre...), post...) {
-				if _, err := deploy.Substitute(s.SQL, vars); err != nil {
-					return fmt.Errorf("%s: %w", s.Name, err)
-				}
-			}
-			if res.Empty() && len(pre) == 0 && len(post) == 0 {
-				fmt.Fprintln(out, "Target is already up to date.")
-				if !dryRun && !noBaseline && len(f.schemas) == 0 && (drifted || !hadBaseline) {
-					// Nothing to migrate, but the target has no baseline yet (or its
-					// drift was just accepted): record the current state as the baseline.
-					bl, err := drift.Record(ctx, conn, fromModel, f.to, "pg-dac "+appVersion())
-					if err != nil {
-						return err
-					}
-					fmt.Fprintf(out, "Recorded baseline #%d.\n", bl.ID)
-				}
-				return nil
-			}
+			defer conn.Close(ctx)
 
-			// Show the plan summary on stderr so stdout stays clean for --dry-run SQL.
-			fmt.Fprint(cmd.ErrOrStderr(), res.Report().Text())
-			if len(pre)+len(post) > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Deploy scripts: %d pre-deploy, %d post-deploy\n", len(pre), len(post))
-			}
-
-			announce := func(phase string) func(string) {
-				return func(name string) { fmt.Fprintf(cmd.ErrOrStderr(), "%s-deploy: %s\n", phase, name) }
-			}
-			// Roles are the environment's: a project provisions them in a pre-deploy
-			// script. When missing roles are the only blocker, run those scripts and
-			// re-check before refusing — nothing of the schema has been touched yet.
-			if res.HasBlocking() && !f.allowHaz && !dryRun && res.OnlyMissingRoles() && len(pre) > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "roles %v are missing from the target; running the pre-deploy scripts first in case they provision them\n", res.MissingRoles())
-				if err := deploy.Run(ctx, conn, pre, vars, announce("pre")); err != nil {
-					return err
-				}
-				pre = nil
-				if canonFrom.Roles, err = introspect.ReadRoles(ctx, conn); err != nil {
-					return err
-				}
-				if res, err = engine.Compare(canonFrom, toModel, opts); err != nil {
-					return err
-				}
-				res.Prelude = prelude
-			}
-			if res.HasBlocking() && !f.allowHaz {
-				if missing := res.MissingRoles(); len(missing) > 0 {
-					return fmt.Errorf("refusing to publish: the source grants privileges to role(s) %v that do not exist in the target; create them (a pre-deploy script is the place) or remove the grants", missing)
-				}
-				return fmt.Errorf("refusing to publish: the migration contains data-loss or unsupported changes; review the hazards and re-run with --allow-hazards to proceed")
-			}
-			if dryRun {
-				for _, s := range pre {
-					sql, _ := deploy.Substitute(s.SQL, vars)
-					fmt.Fprintf(out, "-- pre-deploy script: %s\n%s\n\n", s.Name, sql)
-				}
-				fmt.Fprint(out, res.ScriptWith(engine.ScriptOptions{AllowHazards: f.allowHaz, SingleTransaction: singleTx}))
-				for _, s := range post {
-					sql, _ := deploy.Substitute(s.SQL, vars)
-					fmt.Fprintf(out, "\n-- post-deploy script: %s\n%s\n", s.Name, sql)
-				}
-				return nil
-			}
-			if f.doValidate {
-				vr, verr := validate.Plan(ctx, canonFrom, toModel, opts)
-				if verr != nil {
-					return fmt.Errorf("pre-publish validation failed to apply: %w", verr)
-				}
-				if !vr.Converged {
-					return fmt.Errorf("pre-publish validation did not converge (%d residual change(s)); aborting",
-						len(vr.Residual.Statements))
-				}
-				fmt.Fprintln(cmd.ErrOrStderr(), "validation: OK")
-			}
-
-			if err := deploy.Run(ctx, conn, pre, vars, announce("pre")); err != nil {
-				return err
-			}
 			execOpts := execute.DefaultOptions()
 			execOpts.LockTimeout = lockTimeout
 			execOpts.StatementTimeout = statementTimeout
 			execOpts.SingleTransaction = singleTx
-			applied, err := execute.Apply(ctx, conn, res.Statements, execOpts)
-			if err != nil {
-				return fmt.Errorf("applied %d of %d statement(s) before failure (re-run publish to resume from the new state): %w",
-					applied, len(res.Statements), err)
+			req := publish.Request{
+				Source:            f.to,
+				SourceOptions:     srcOpts,
+				Plan:              plan,
+				Engine:            f.options(),
+				Variables:         overrides,
+				SkipDeployScripts: noDeployScripts,
+				AllowDrift:        allowDrift,
+				RecordBaseline:    !noBaseline,
+				Validate:          f.doValidate,
+				DryRun:            dryRun,
+				Exec:              execOpts,
+				Generator:         "pg-dac " + appVersion(),
 			}
-			if err := deploy.Run(ctx, conn, post, vars, announce("post")); err != nil {
+			// Everything narrative goes to stderr so stdout stays clean for
+			// --dry-run SQL.
+			obs := publish.Observer{
+				Warnings: func(side string, msgs []string) { printWarnings(cmd, flagLabel(side), msgs) },
+				Drift: func(msg string) {
+					fmt.Fprintln(errOut, "warning (drift): "+msg+" — run `pg-dac drift --from <target>` to see them")
+				},
+				Rename: func(desc string) { fmt.Fprintf(errOut, "refactorlog: %s\n", desc) },
+				Planned: func(res *engine.Result, pre, post []deploy.Script) {
+					if res.Empty() && len(pre)+len(post) == 0 {
+						return
+					}
+					fmt.Fprint(errOut, res.Report().Text())
+					if len(pre)+len(post) > 0 {
+						fmt.Fprintf(errOut, "Deploy scripts: %d pre-deploy, %d post-deploy\n", len(pre), len(post))
+					}
+				},
+				RolesRetry: func(missing []string) {
+					fmt.Fprintf(errOut, "roles %v are missing from the target; running the pre-deploy scripts first in case they provision them\n", missing)
+				},
+				Validated: func() { fmt.Fprintln(errOut, "validation: OK") },
+				Script:    func(phase, name string) { fmt.Fprintf(errOut, "%s-deploy: %s\n", phase, name) },
+			}
+			res, err := publish.Run(ctx, conn, req, obs)
+			if err != nil {
+				var drifted *publish.DriftError
+				var blocked *publish.BlockedError
+				switch {
+				case errors.As(err, &drifted):
+					return fmt.Errorf("refusing to publish: %s; run `pg-dac drift --from <target>` to see them, or re-run with --allow-drift to publish anyway (a fresh baseline is recorded)", drifted)
+				case errors.As(err, &blocked) && len(blocked.MissingRoles) > 0:
+					return fmt.Errorf("refusing to publish: %s", blocked)
+				case errors.As(err, &blocked):
+					return fmt.Errorf("refusing to publish: %s; review the hazards and re-run with --allow-hazards to proceed", blocked)
+				}
 				return err
 			}
-			fmt.Fprintf(out, "Applied %d statement(s)", applied)
-			if len(pre)+len(post) > 0 {
-				fmt.Fprintf(out, " and %d deploy script(s)", len(pre)+len(post))
+			switch {
+			case res.UpToDate:
+				fmt.Fprintln(out, "Target is already up to date.")
+			case dryRun:
+				for _, s := range res.Pre {
+					sql, _ := deploy.Substitute(s.SQL, res.Variables)
+					fmt.Fprintf(out, "-- pre-deploy script: %s\n%s\n\n", s.Name, sql)
+				}
+				fmt.Fprint(out, res.Migration.ScriptWith(engine.ScriptOptions{AllowHazards: f.allowHaz, SingleTransaction: singleTx}))
+				for _, s := range res.Post {
+					sql, _ := deploy.Substitute(s.SQL, res.Variables)
+					fmt.Fprintf(out, "\n-- post-deploy script: %s\n%s\n", s.Name, sql)
+				}
+				return nil
+			default:
+				fmt.Fprintf(out, "Applied %d statement(s)", res.Applied)
+				if n := res.DeployScripts(); n > 0 {
+					fmt.Fprintf(out, " and %d deploy script(s)", n)
+				}
+				fmt.Fprintln(out, ".")
 			}
-			fmt.Fprintln(out, ".")
-			// Record the resulting schema as the target's baseline for drift checks.
-			if !noBaseline && len(f.schemas) == 0 {
-				after, err := introspect.Introspect(ctx, conn, introspect.Options{})
-				if err != nil {
-					return fmt.Errorf("introspect target for baseline: %w", err)
-				}
-				bl, err := drift.Record(ctx, conn, after, f.to, "pg-dac "+appVersion())
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(out, "Recorded baseline #%d.\n", bl.ID)
+			if res.Baseline != nil {
+				fmt.Fprintf(out, "Recorded baseline #%d.\n", res.Baseline.ID)
 			}
 			return nil
 		},
@@ -257,4 +152,16 @@ func newPublishCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&allowDrift, "allow-drift", false, "publish even if the target changed outside pg-dac since its last baseline")
 	cmd.Flags().BoolVar(&noBaseline, "no-baseline", false, "do not record the resulting schema as the target's drift baseline")
 	return cmd
+}
+
+// flagLabel names a warning side the way the CLI's flags do: the target is
+// --from, the desired state --to.
+func flagLabel(side string) string {
+	switch side {
+	case "target":
+		return "--from"
+	case "source":
+		return "--to"
+	}
+	return side
 }

@@ -94,7 +94,7 @@ func TestIndexReplaceIsGapFree(t *testing.T) {
 	opts := engine.DefaultOptions()
 	opts.Online = false
 	offline := replaceStatements(opts)
-	if len(offline) != 3 || !strings.HasPrefix(offline[0], "DROP INDEX public.t_a;") || !strings.HasPrefix(offline[1], "CREATE INDEX t_a ON public.t ") {
+	if len(offline) != 3 || !strings.HasPrefix(offline[0], "DROP INDEX IF EXISTS public.t_a;") || !strings.HasPrefix(offline[1], "CREATE INDEX t_a ON public.t ") {
 		t.Errorf("offline: want drop + create + comment, got:\n%s", strings.Join(offline, "\n"))
 	}
 }

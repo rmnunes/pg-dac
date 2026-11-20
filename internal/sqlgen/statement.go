@@ -24,24 +24,3 @@ type Statement struct {
 
 // HasHazards reports whether the statement carries any hazard.
 func (s Statement) HasHazards() bool { return len(s.Hazards) > 0 }
-
-// hazardousData reports whether any hazard is a data-loss hazard (the gate for
-// --allow-hazards / BlockOnPossibleDataLoss).
-func (s Statement) hazardousData() bool {
-	for _, h := range s.Hazards {
-		if h.Type == safety.DeletesData {
-			return true
-		}
-	}
-	return false
-}
-
-// MaxDataLoss reports whether a slice of statements contains any data-loss hazard.
-func MaxDataLoss(stmts []Statement) bool {
-	for _, s := range stmts {
-		if s.hazardousData() {
-			return true
-		}
-	}
-	return false
-}

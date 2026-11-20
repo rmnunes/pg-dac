@@ -101,11 +101,18 @@ func ApplyStream(ctx context.Context, conn Execer, stmts []sqlgen.Statement, opt
 			onStmt(i+1, len(stmts), s)
 		}
 		if err := runWithRetry(ctx, conn, s.SQL, opts); err != nil {
-			return applied, fmt.Errorf("statement failed: %s: %w%s", firstLine(s.SQL), err, serverDetail(err))
+			return applied, statementError("statement failed", s.SQL, err)
 		}
 		applied++
 	}
 	return applied, nil
+}
+
+// statementError wraps the failure of one statement: what was being done, the
+// statement's first line, the error, and PostgreSQL's DETAIL and HINT when it
+// sent them.
+func statementError(what, sql string, err error) error {
+	return fmt.Errorf("%s: %s: %w%s", what, firstLine(sql), err, serverDetail(err))
 }
 
 // serverDetail appends PostgreSQL's DETAIL and HINT to a statement failure.
@@ -137,7 +144,7 @@ func applyBatched(ctx context.Context, conn Execer, stmts []sqlgen.Statement, op
 				onStmt(i+1, len(stmts), stmts[i])
 			}
 			if err := runWithRetry(ctx, conn, stmts[i].SQL, opts); err != nil {
-				return applied, fmt.Errorf("statement failed: %s: %w%s", firstLine(stmts[i].SQL), err, serverDetail(err))
+				return applied, statementError("statement failed", stmts[i].SQL, err)
 			}
 			applied++
 			i++
@@ -182,7 +189,7 @@ func runBatch(ctx context.Context, conn Execer, stmts []sqlgen.Statement, from, 
 		}
 		_, _ = conn.Exec(ctx, "ROLLBACK")
 		if !isLockTimeout(failed) || attempt >= opts.MaxRetries {
-			return fmt.Errorf("statement failed (transaction rolled back, nothing from this batch applied): %s: %w%s", firstLine(stmts[failedAt].SQL), failed, serverDetail(failed))
+			return statementError("statement failed (transaction rolled back, nothing from this batch applied)", stmts[failedAt].SQL, failed)
 		}
 		select {
 		case <-ctx.Done():
@@ -247,7 +254,7 @@ func ApplyStatements(ctx context.Context, e Execer, stmts []sqlgen.Statement) er
 	}
 	for _, s := range stmts {
 		if _, err := e.Exec(ctx, s.SQL); err != nil {
-			return fmt.Errorf("statement failed: %s: %w%s", firstLine(s.SQL), err, serverDetail(err))
+			return statementError("statement failed", s.SQL, err)
 		}
 	}
 	return nil
@@ -294,7 +301,7 @@ func ApplyDeferred(ctx context.Context, e Execer, stmts []string) error {
 					fmt.Fprintf(&b, "\n  ... and %d more", len(failed)-i)
 					break
 				}
-				fmt.Fprintf(&b, "\n  %s: %v", firstLine(p.sql), p.err)
+				fmt.Fprintf(&b, "\n  %s: %v%s", firstLine(p.sql), p.err, serverDetail(p.err))
 			}
 			return errors.New(b.String())
 		}
@@ -312,7 +319,7 @@ func ApplyScript(ctx context.Context, conn *pgx.Conn, sql string) error {
 		return nil
 	}
 	if err := conn.PgConn().Exec(ctx, sql).Close(); err != nil {
-		return fmt.Errorf("apply script: %w", err)
+		return fmt.Errorf("apply script: %w%s", err, serverDetail(err))
 	}
 	return nil
 }

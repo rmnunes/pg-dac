@@ -80,7 +80,10 @@ func TestUpdateReplacesDeclarativeDefinitionInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := Build(idx, man, from, to, compare(t, from, to))
+	plan, err := Build(idx, man, from, to, compare(t, from, to))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(plan.Refused) != 0 {
 		t.Fatalf("unexpected refusals: %+v", plan.Refused)
 	}
@@ -126,7 +129,10 @@ func TestUpdateCreatesAndDeletesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := Build(idx, man, from, to, compare(t, from, to))
+	plan, err := Build(idx, man, from, to, compare(t, from, to))
+	if err != nil {
+		t.Fatal(err)
+	}
 	paths := map[string]string{}
 	for _, c := range plan.Changes {
 		paths[c.Path] = c.Action
@@ -141,7 +147,10 @@ func TestUpdateCreatesAndDeletesFiles(t *testing.T) {
 	opts := engine.DefaultOptions()
 	opts.DropObjectsNotInSource = true
 	res, _ := engine.Compare(from, to, opts)
-	plan = Build(idx, man, from, to, res)
+	plan, err = Build(idx, man, from, to, res)
+	if err != nil {
+		t.Fatal(err)
+	}
 	paths = map[string]string{}
 	for _, c := range plan.Changes {
 		paths[c.Path] = c.Action
@@ -173,7 +182,10 @@ func TestUpdateRefusesImperativeDefinitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := Build(idx, man, from, to, compare(t, from, to))
+	plan, err := Build(idx, man, from, to, compare(t, from, to))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(plan.Refused) != 1 || !strings.Contains(plan.Refused[0].Object, `"app"."t"`) || !strings.Contains(plan.Refused[0].Reason, "deploy/01_t.sql") {
 		t.Fatalf("the imperative table must be refused with its file named: %+v", plan.Refused)
 	}
@@ -199,7 +211,10 @@ func TestUpdateRoutineOverloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := Build(idx, man, from, to, compare(t, from, to))
+	plan, err := Build(idx, man, from, to, compare(t, from, to))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(plan.Changes) != 1 {
 		t.Fatalf("want one modified file, got %+v %+v", plan.Changes, plan.Refused)
 	}

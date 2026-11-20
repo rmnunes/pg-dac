@@ -191,7 +191,10 @@ func TestPlanDoc_StructureAndIncludeExclude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := res.PlanDoc()
+	doc, err := res.PlanDoc()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if doc.FormatVersion != PlanFormatVersion {
 		t.Errorf("format version: got %d", doc.FormatVersion)
 	}
@@ -231,7 +234,11 @@ func TestPlanDoc_StructureAndIncludeExclude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range exres.PlanDoc().Changes {
+	exdoc, err := exres.PlanDoc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range exdoc.Changes {
 		if c.ID == usersID {
 			t.Errorf("users should have been excluded from the plan")
 		}
@@ -365,8 +372,12 @@ func TestObjectChanges_SchemaAndExtensionDefinitions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		changes, err := res.ObjectChanges()
+		if err != nil {
+			t.Fatal(err)
+		}
 		byID := map[string]ObjectChange{}
-		for _, c := range res.ObjectChanges() {
+		for _, c := range changes {
 			byID[c.ID] = c
 		}
 		return byID
@@ -383,6 +394,16 @@ func TestObjectChanges_SchemaAndExtensionDefinitions(t *testing.T) {
 	if sch.ChangeKind != "add" || sch.OldDefinition != "" ||
 		!strings.Contains(sch.NewDefinition, `CREATE SCHEMA "app"`) || !strings.Contains(sch.NewDefinition, "COMMENT ON SCHEMA") {
 		t.Errorf("added schema: kind=%q old=%q new=%q", sch.ChangeKind, sch.OldDefinition, sch.NewDefinition)
+	}
+
+	upgraded := &model.Database{
+		TargetVersion: 160004,
+		Extensions:    []*model.Extension{{Name: "pg_trgm", Schema: "public", Version: "1.7"}},
+		Schemas:       full.Schemas,
+	}
+	ext = changes(full, upgraded)[extKey]
+	if ext.ChangeKind != "alter" || !strings.Contains(ext.OldDefinition, "version 1.6") || !strings.Contains(ext.NewDefinition, "version 1.7") {
+		t.Errorf("upgraded extension: kind=%q old=%q new=%q", ext.ChangeKind, ext.OldDefinition, ext.NewDefinition)
 	}
 
 	dropped := changes(full, empty)

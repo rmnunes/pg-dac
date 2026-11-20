@@ -11,15 +11,61 @@ import (
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
-// failingExecer accepts the session setup (SET …) and fails every other
-// statement with err.
+// failingExecer accepts the session setup (SET …) and transaction control,
+// and fails every other statement with err.
 type failingExecer struct{ err error }
 
 func (f failingExecer) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
-	if strings.HasPrefix(sql, "SET ") {
+	switch {
+	case strings.HasPrefix(sql, "SET "), sql == "BEGIN", sql == "COMMIT", sql == "ROLLBACK":
 		return pgconn.CommandTag{}, nil
 	}
 	return pgconn.CommandTag{}, f.err
+}
+
+func dependsErr() *pgconn.PgError {
+	return &pgconn.PgError{
+		Severity: "ERROR",
+		Code:     "2BP01",
+		Message:  "cannot drop view sales.v because other objects depend on it",
+		Detail:   "view pg_temp_7.scratch depends on view sales.v",
+		Hint:     "Use DROP ... CASCADE to drop the dependent objects too.",
+	}
+}
+
+func wantDetail(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: expected a failure", what)
+	}
+	for _, want := range []string{"DETAIL: view pg_temp_7.scratch depends on view sales.v", "HINT: Use DROP ... CASCADE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error %q lacks %q", what, err, want)
+		}
+	}
+}
+
+// TestEveryFailurePathCarriesServerDetail: the streaming apply, the batched
+// (single-transaction) apply and the deferred project apply all report
+// DETAIL and HINT the same way.
+func TestEveryFailurePathCarriesServerDetail(t *testing.T) {
+	ctx := context.Background()
+	stmts := []sqlgen.Statement{{SQL: "DROP VIEW sales.v;", Transactional: true}}
+	opts := DefaultOptions()
+	opts.MaxRetries = 0
+
+	_, err := ApplyStream(ctx, failingExecer{err: dependsErr()}, stmts, opts, nil)
+	wantDetail(t, err, "stream")
+
+	opts.SingleTransaction = true
+	_, err = ApplyStream(ctx, failingExecer{err: dependsErr()}, stmts, opts, nil)
+	wantDetail(t, err, "batched")
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("batched: %v", err)
+	}
+
+	err = ApplyDeferred(ctx, failingExecer{err: dependsErr()}, []string{"DROP VIEW sales.v;"})
+	wantDetail(t, err, "deferred")
 }
 
 // TestStatementFailureCarriesServerDetail: PostgreSQL's DETAIL and HINT name

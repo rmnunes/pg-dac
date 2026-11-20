@@ -127,7 +127,10 @@ CREATE TABLE app.n(id int PRIMARY KEY);`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := projsync.Build(idx, man, fromProject, after, res)
+	plan, err := projsync.Build(idx, man, fromProject, after, res)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(plan.Refused) != 0 {
 		t.Fatalf("unexpected refusals: %+v", plan.Refused)
 	}

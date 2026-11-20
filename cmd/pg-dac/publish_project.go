@@ -6,10 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rmnunes/pg-dac/internal/engine"
+	"github.com/rmnunes/pg-dac/internal/deploy"
 	"github.com/rmnunes/pg-dac/internal/project"
-	"github.com/rmnunes/pg-dac/internal/projsync"
-	"github.com/rmnunes/pg-dac/internal/source"
+	"github.com/rmnunes/pg-dac/internal/publish"
 )
 
 // publishToProject updates a declarative project (--from) so it describes the
@@ -18,7 +17,6 @@ import (
 // touched; the project's own compare settings and drop policy govern the
 // update unless flags say otherwise; --dry-run prints the file diff.
 func publishToProject(cmd *cobra.Command, f *commonFlags, dryRun bool) error {
-	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 	dir := strings.TrimPrefix(f.from, "file://")
 
@@ -32,37 +30,24 @@ func publishToProject(cmd *cobra.Command, f *commonFlags, dryRun bool) error {
 	}
 	// The desired state's deployment content is irrelevant here; the project
 	// being updated supplies the comparison defaults.
-	if _, err := f.loadDeployPlan(cmd); err != nil {
-		return err
-	}
-	if f.plan.Compare == nil {
-		f.plan.Compare = man.Compare
-	}
-	if f.dropPolicy == "" {
-		f.dropPolicy = man.DropPolicy
-	}
-
-	toModel, toWarns, err := source.Resolve(ctx, f.to, srcOpts)
-	if err != nil {
-		return fmt.Errorf("--to: %w", err)
-	}
-	fromModel, fromWarns, err := source.Resolve(ctx, f.from, srcOpts)
-	if err != nil {
-		return fmt.Errorf("--from: %w", err)
-	}
-	printWarnings(cmd, "--from", fromWarns)
-	printWarnings(cmd, "--to", toWarns)
-
-	res, err := engine.Compare(fromModel, toModel, f.options())
+	dplan, err := f.loadDeployPlan(cmd)
 	if err != nil {
 		return err
 	}
-	idx, err := projsync.Scan(dir, man, fromModel)
-	if err != nil {
-		return fmt.Errorf("index project files: %w", err)
-	}
-	plan := projsync.Build(idx, man, fromModel, toModel, res)
+	deploy.WithProjectDefaults(dplan, man)
+	f.dropPolicy = dplan.DropPolicy
 
+	pr, err := publish.Project(cmd.Context(), publish.ProjectRequest{
+		Dir: dir, Manifest: man, Source: f.to, SourceOptions: srcOpts, Engine: f.options(),
+	})
+	if err != nil {
+		return err
+	}
+	printWarnings(cmd, "--from", pr.FromWarnings)
+	printWarnings(cmd, "--to", pr.ToWarnings)
+	printWarnings(cmd, "plan", pr.Migration.Warnings)
+
+	plan := pr.Plan
 	for _, r := range plan.Refused {
 		fmt.Fprintf(cmd.ErrOrStderr(), "refused: %s — %s\n", r.Object, r.Reason)
 	}

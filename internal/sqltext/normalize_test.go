@@ -84,12 +84,6 @@ func TestNormalizeLexerEdges(t *testing.T) {
 	}
 }
 
-func TestEqual(t *testing.T) {
-	if !Equal("a\r\nb", "a\nb", false) || Equal("a", "b", false) {
-		t.Error("Equal mismatch")
-	}
-}
-
 // pg_get_functiondef wraps the body in $function$ quotes: for SQL and PL/pgSQL
 // the body is normalized as SQL one level deep; nested dollar strings inside it
 // and bodies in other languages stay verbatim.

@@ -43,6 +43,21 @@ type Plan struct {
 	Variables map[string]string
 }
 
+// WithProjectDefaults fills the comparison settings and drop policy a plan
+// does not set from a project's manifest — the project being updated supplies
+// the defaults when it is the target of a publish.
+func WithProjectDefaults(p *Plan, man *project.Manifest) {
+	if man == nil {
+		return
+	}
+	if p.Compare == nil {
+		p.Compare = man.Compare
+	}
+	if p.DropPolicy == "" {
+		p.DropPolicy = man.DropPolicy
+	}
+}
+
 // Empty reports whether the plan carries nothing.
 func (p *Plan) Empty() bool {
 	return p == nil || (len(p.Pre) == 0 && len(p.Post) == 0 && p.DropPolicy == "" && len(p.ManifestYAML) == 0 &&

@@ -31,17 +31,13 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	}
 
 	for i, op := range ops {
-		switch op.Type {
-		case diff.OpCreateTable, diff.OpCreateView, diff.OpCreateMatView, diff.OpCreateEnum,
-			diff.OpCreateDomain, diff.OpCreateCompositeType,
-			diff.OpCreateCollation, diff.OpCreateSequence, diff.OpCreateFunction,
-			diff.OpCreateSchema, diff.OpCreateExtension:
+		switch {
+		case op.Type.IsObjectCreate():
 			createByObj[op.Owner.Key()] = i
-		case diff.OpDropTable, diff.OpDropView, diff.OpDropMatView, diff.OpDropEnum,
-			diff.OpDropDomain, diff.OpDropCompositeType,
-			diff.OpDropCollation, diff.OpDropSequence, diff.OpDropFunction,
-			diff.OpDropSchema, diff.OpDropExtension:
+		case op.Type.IsObjectDrop():
 			dropByObj[op.Owner.Key()] = i
+		}
+		switch op.Type {
 		case diff.OpCreateTrigger:
 			trigCreateByKey[colKey(op.Owner, op.Sub)] = i
 		case diff.OpAddColumn:

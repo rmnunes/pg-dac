@@ -30,7 +30,9 @@ fn profiles_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn load(app: &AppHandle) -> Result<Vec<Profile>, String> {
     let path = profiles_path(app)?;
     match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("parse profiles.json: {e}")),
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|e| format!("parse profiles.json: {e}"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("read profiles.json: {e}")),
     }

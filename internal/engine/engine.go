@@ -239,7 +239,12 @@ func filterDrops(cs *diff.ChangeSet, opts Options) *diff.ChangeSet {
 	return out
 }
 
+// dropAllowed applies the drop policy to one drop op. What pg-dac itself left
+// behind (Op.Cleanup) is never kept.
 func dropAllowed(op diff.Op, opts Options) bool {
+	if op.Cleanup {
+		return true
+	}
 	switch op.Type {
 	case diff.OpDropConstraint:
 		return opts.DropConstraintsNotInSource

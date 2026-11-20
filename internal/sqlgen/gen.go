@@ -42,20 +42,6 @@ func GenerateGrouped(p *plan.Plan, opts Options) ([]OpStatements, error) {
 	return out, nil
 }
 
-// Generate renders a plan into a flat, ordered statement list (the form the
-// script writer and executor consume).
-func Generate(p *plan.Plan, opts Options) ([]Statement, error) {
-	groups, err := GenerateGrouped(p, opts)
-	if err != nil {
-		return nil, err
-	}
-	var out []Statement
-	for _, g := range groups {
-		out = append(out, g.Statements...)
-	}
-	return out, nil
-}
-
 // renderOp renders one op; an op-level Reason (why the op exists beyond the
 // plain diff) becomes the note of its first statement.
 func renderOp(op diff.Op, opts Options) ([]Statement, error) {
@@ -76,7 +62,7 @@ func renderOp(op diff.Op, opts Options) ([]Statement, error) {
 func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 	switch op.Type {
 	case diff.OpCreateSchema:
-		return one("CREATE SCHEMA "+model.QuoteIdent(op.Schema.Name)+";", op.Schema.Comment, commentOn("SCHEMA", model.QuoteIdent(op.Schema.Name), op.Schema.Comment)), nil
+		return one("CREATE SCHEMA "+model.QuoteIdent(op.Schema.Name)+";", commentOn("SCHEMA", model.QuoteIdent(op.Schema.Name), op.Schema.Comment)), nil
 	case diff.OpDropSchema:
 		return haz("DROP SCHEMA "+model.QuoteIdent(op.Schema.Name)+";", "drops a schema and everything still in it",
 			safety.New(safety.DeletesData, "dropping schema "+op.Schema.Name+" removes all objects it contains")), nil
@@ -86,9 +72,9 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		if op.Extension.Schema != "" {
 			sql += " SCHEMA " + model.QuoteIdent(op.Extension.Schema)
 		}
-		return one(sql+";", "", nil), nil
+		return one(sql+";", nil), nil
 	case diff.OpDropExtension:
-		return one("DROP EXTENSION "+model.QuoteIdent(op.Extension.Name)+";", "", nil), nil
+		return one("DROP EXTENSION "+model.QuoteIdent(op.Extension.Name)+";", nil), nil
 	case diff.OpAlterExtension:
 		s := Statement{SQL: "ALTER EXTENSION " + model.QuoteIdent(op.Extension.Name) + " UPDATE TO " + model.QuoteLiteral(op.Extension.Version) + ";", Transactional: true}
 		s.Hazards = append(s.Hazards, safety.New(safety.UpgradingExtension, "runs the extension's own upgrade scripts"))
@@ -100,9 +86,9 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 			vals[i] = model.QuoteLiteral(v)
 		}
 		sql := "CREATE TYPE " + op.Enum.QualifiedName() + " AS ENUM (" + strings.Join(vals, ", ") + ");"
-		return one(sql, op.Enum.Comment, commentOn("TYPE", op.Enum.QualifiedName(), op.Enum.Comment)), nil
+		return one(sql, commentOn("TYPE", op.Enum.QualifiedName(), op.Enum.Comment)), nil
 	case diff.OpDropEnum:
-		return one("DROP TYPE "+op.Enum.QualifiedName()+";", "", nil), nil
+		return one("DROP TYPE "+op.Enum.QualifiedName()+";", nil), nil
 	case diff.OpAddEnumValue:
 		var stmts []Statement
 		note := ""
@@ -128,30 +114,30 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		return stmts, nil
 
 	case diff.OpCreateDomain:
-		return one(terminate(op.Domain.Definition), op.Domain.Comment,
+		return one(terminate(op.Domain.Definition),
 			commentOn("DOMAIN", op.Domain.QualifiedName(), op.Domain.Comment)), nil
 	case diff.OpDropDomain:
-		return one("DROP DOMAIN "+op.Domain.QualifiedName()+";", "", nil), nil
+		return one("DROP DOMAIN "+op.Domain.QualifiedName()+";", nil), nil
 	case diff.OpCreateCompositeType:
-		return one(terminate(op.Composite.Definition), op.Composite.Comment,
+		return one(terminate(op.Composite.Definition),
 			commentOn("TYPE", op.Composite.QualifiedName(), op.Composite.Comment)), nil
 	case diff.OpDropCompositeType:
-		return one("DROP TYPE "+op.Composite.QualifiedName()+";", "", nil), nil
+		return one("DROP TYPE "+op.Composite.QualifiedName()+";", nil), nil
 
 	case diff.OpCreateCollation:
-		return one(terminate(op.Collation.Definition), op.Collation.Comment,
+		return one(terminate(op.Collation.Definition),
 			commentOn("COLLATION", op.Collation.QualifiedName(), op.Collation.Comment)), nil
 	case diff.OpDropCollation:
-		return one("DROP COLLATION "+op.Collation.QualifiedName()+";", "", nil), nil
+		return one("DROP COLLATION "+op.Collation.QualifiedName()+";", nil), nil
 
 	case diff.OpCreateSequence:
-		return one(renderCreateSequence(op.Sequence), op.Sequence.Comment, commentOn("SEQUENCE", op.Sequence.QualifiedName(), op.Sequence.Comment)), nil
+		return one(renderCreateSequence(op.Sequence), commentOn("SEQUENCE", op.Sequence.QualifiedName(), op.Sequence.Comment)), nil
 	case diff.OpDropSequence:
-		return one("DROP SEQUENCE "+op.Sequence.QualifiedName()+";", "", nil), nil
+		return one("DROP SEQUENCE "+op.Sequence.QualifiedName()+";", nil), nil
 	case diff.OpAlterSequence:
-		return one(renderAlterSequence(op.Sequence), "", nil), nil
+		return one(renderAlterSequence(op.Sequence), nil), nil
 	case diff.OpSetSequenceOwner:
-		return one(renderSequenceOwner(op.Sequence), "", nil), nil
+		return one(renderSequenceOwner(op.Sequence), nil), nil
 
 	case diff.OpCreateTable:
 		if op.Rebuild {
@@ -190,17 +176,17 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 	case diff.OpAlterColumnType:
 		return renderAlterColumnType(op), nil
 	case diff.OpSetColumnDefault:
-		stmts := one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" SET DEFAULT "+op.Column.Default+";", "", nil)
+		stmts := one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" SET DEFAULT "+op.Column.Default+";", nil)
 		if op.SeedSequence {
 			stmts = append(stmts, seedDefaultSequence(op)...)
 		}
 		return stmts, nil
 	case diff.OpDropColumnDefault:
-		return one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" DROP DEFAULT;", "", nil), nil
+		return one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" DROP DEFAULT;", nil), nil
 	case diff.OpSetColumnNotNull:
 		return renderSetNotNull(op, opts), nil
 	case diff.OpDropColumnNotNull:
-		return one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" DROP NOT NULL;", "", nil), nil
+		return one("ALTER TABLE "+op.Table.QualifiedName()+" ALTER COLUMN "+model.QuoteIdent(op.Column.Name)+" DROP NOT NULL;", nil), nil
 	case diff.OpAlterColumnIdentity:
 		return renderAlterColumnIdentity(op), nil
 
@@ -240,9 +226,9 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		if v.CheckOption != "" {
 			sql += " WITH " + strings.ToUpper(v.CheckOption) + " CHECK OPTION"
 		}
-		return one(sql+";", v.Comment, commentOn("VIEW", v.QualifiedName(), v.Comment)), nil
+		return one(sql+";", commentOn("VIEW", v.QualifiedName(), v.Comment)), nil
 	case diff.OpDropView:
-		return one("DROP VIEW "+op.View.QualifiedName()+";", "", nil), nil
+		return one("DROP VIEW "+op.View.QualifiedName()+";", nil), nil
 
 	case diff.OpCreateMatView:
 		data := " WITH DATA"
@@ -250,14 +236,14 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 			data = " WITH NO DATA"
 		}
 		sql := "CREATE MATERIALIZED VIEW " + op.MatView.QualifiedName() + " AS " + op.MatView.Definition + data + ";"
-		stmts := one(sql, op.MatView.Comment, commentOn("MATERIALIZED VIEW", op.MatView.QualifiedName(), op.MatView.Comment))
+		stmts := one(sql, commentOn("MATERIALIZED VIEW", op.MatView.QualifiedName(), op.MatView.Comment))
 		if op.Reason != "" && op.MatView.WithData {
 			stmts[0].Hazards = append(stmts[0].Hazards, safety.New(safety.ImpactsPerformance,
 				"the materialized view is rebuilt (its data is recomputed) as part of being recreated"))
 		}
 		return stmts, nil
 	case diff.OpDropMatView:
-		return one("DROP MATERIALIZED VIEW "+op.MatView.QualifiedName()+";", "", nil), nil
+		return one("DROP MATERIALIZED VIEW "+op.MatView.QualifiedName()+";", nil), nil
 
 	case diff.OpCreateFunction:
 		f := op.Function
@@ -265,33 +251,33 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		if f.Kind == "procedure" {
 			objType = "PROCEDURE"
 		}
-		return one(terminate(f.Definition), f.Comment, commentOn(objType, f.QualifiedSignature(), f.Comment)), nil
+		return one(terminate(f.Definition), commentOn(objType, f.QualifiedSignature(), f.Comment)), nil
 	case diff.OpDropFunction:
 		f := op.Function
 		objType := "FUNCTION"
 		if f.Kind == "procedure" {
 			objType = "PROCEDURE"
 		}
-		return one("DROP "+objType+" "+f.QualifiedSignature()+";", "", nil), nil
+		return one("DROP "+objType+" "+f.QualifiedSignature()+";", nil), nil
 
 	case diff.OpCreateTrigger:
 		tr := op.Trigger
-		return one(terminate(tr.Definition), tr.Comment,
+		return one(terminate(tr.Definition),
 			commentOn("TRIGGER", model.QuoteIdent(tr.Name)+" ON "+relName(op), tr.Comment)), nil
 	case diff.OpDropTrigger:
-		return one("DROP TRIGGER "+model.QuoteIdent(op.Trigger.Name)+" ON "+relName(op)+";", "", nil), nil
+		return one("DROP TRIGGER "+model.QuoteIdent(op.Trigger.Name)+" ON "+relName(op)+";", nil), nil
 	case diff.OpSetTriggerEnabled:
 		return renderTriggerEnabled(op), nil
 
 	case diff.OpCreatePolicy:
 		return renderCreatePolicy(op), nil
 	case diff.OpDropPolicy:
-		return one("DROP POLICY "+model.QuoteIdent(op.Policy.Name)+" ON "+op.Table.QualifiedName()+";", "", nil), nil
+		return one("DROP POLICY "+model.QuoteIdent(op.Policy.Name)+" ON "+op.Table.QualifiedName()+";", nil), nil
 
 	case diff.OpEnableRLS:
 		return renderEnableRLS(op), nil
 	case diff.OpDisableRLS:
-		return one("ALTER TABLE "+op.Table.QualifiedName()+" DISABLE ROW LEVEL SECURITY;", "", nil), nil
+		return one("ALTER TABLE "+op.Table.QualifiedName()+" DISABLE ROW LEVEL SECURITY;", nil), nil
 
 	case diff.OpGrant:
 		return renderGrant(op), nil
@@ -307,7 +293,9 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 // table or a view — trigger ops exist for both).
 func relName(op diff.Op) string { return model.QualifiedName(op.Owner.Schema, op.Owner.Name) }
 
-func one(sql, _ string, extra []Statement) []Statement {
+// one returns a transactional statement followed by extra (a COMMENT ON, if
+// any).
+func one(sql string, extra []Statement) []Statement {
 	stmts := []Statement{{SQL: sql, Transactional: true}}
 	return append(stmts, extra...)
 }
