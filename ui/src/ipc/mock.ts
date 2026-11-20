@@ -11,6 +11,7 @@
 
 import type { CompareEvent, CompareRequest, Health, HazardCount, PlanDoc, PlanResponse, Profile, PublishEvent, ScriptResponse, Severity, UpdateInfo, UpdateProgress, Warning } from "./types";
 import fixture from "../dev/fixture-plan.json";
+import pinnedVersion from "../../PGDAC_VERSION?raw";
 
 type Listener<T> = (e: T) => void;
 // Each subscription is its own entry (not the callback itself): React StrictMode
@@ -24,7 +25,8 @@ const emitPublish = (e: PublishEvent) => publishListeners.forEach((l) => l.cb(e)
 const updateListeners = new Set<{ cb: Listener<UpdateProgress> }>();
 const emitUpdate = (p: UpdateProgress) => updateListeners.forEach((l) => l.cb(p));
 
-const MOCK_VERSION = "0.9.0";
+// The mock engine is a dev build of the pinned release, like a local sidecar.
+const MOCK_VERSION = pinnedVersion.trim();
 let offeredUpdate: string | null = typeof location !== "undefined" ? new URLSearchParams(location.search).get("update") : null;
 let downloaded = false;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -93,7 +95,7 @@ let compared: { from: string; to: string } | undefined;
 let cancelled = false;
 
 export const mock = {
-  health: async (): Promise<Health> => ({ status: "ok", version: "0.9.0-dev+mock", formatVersion: fixturePlan.formatVersion }),
+  health: async (): Promise<Health> => ({ status: "ok", version: `${MOCK_VERSION}-dev+mock`, formatVersion: fixturePlan.formatVersion }),
 
   listProfiles: async (): Promise<Profile[]> => loadProfiles(),
   addProfile: async (profile: Profile): Promise<Profile[]> => {
