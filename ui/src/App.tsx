@@ -15,6 +15,8 @@ import { PublishDialog } from "./components/PublishDialog";
 import { ScriptDialog } from "./components/ScriptDialog";
 import { OptionsDialog, type OptionsTab } from "./components/OptionsDialog";
 import { CompareProgress } from "./components/CompareProgress";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { startUpdateChecks } from "./state/update";
 
 export default function App() {
   const basePlan = useStore((s) => s.basePlan);
@@ -82,6 +84,9 @@ export default function App() {
     if (basePlan && hasWarnings) setNotesOpen(true);
   }, [basePlan, hasWarnings]);
 
+  // Look for a newer release shortly after launch and every few hours.
+  useEffect(() => startUpdateChecks(), []);
+
   // Ctrl+Enter compares (the toolbar button's shortcut).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -100,9 +105,8 @@ export default function App() {
   return (
     <div className="app">
       <header className="appbar">
-        <h1>
-          pg-dac <span className="sub">PostgreSQL schema compare</span>
-        </h1>
+        {/* The window title already names the app; the heading stays for screen readers. */}
+        <h1 className="sr-only">pg-dac</h1>
         <Toolbar
           onOptions={() => setOptionsTab("compare")}
           onScript={async () => {
@@ -115,6 +119,8 @@ export default function App() {
           }}
         />
       </header>
+
+      <UpdateBanner />
 
       <SourceBar />
 

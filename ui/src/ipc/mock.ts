@@ -5,10 +5,11 @@
 // the same event choreography the Rust supervisor relays and the same refusals
 // the daemon makes (a re-plan of sources that were not compared, a publish
 // with data loss that was not approved), and keeps saved sources in
-// localStorage. Never bundled into the desktop app's behavior: the client only
+// localStorage. An update is offered when the page URL carries ?update=<version>
+// (or a test calls mock.offerUpdate). Never bundled into the desktop app's behavior: the client only
 // routes here when Tauri's runtime is absent.
 
-import type { CompareEvent, CompareRequest, Health, HazardCount, PlanDoc, PlanResponse, Profile, PublishEvent, ScriptResponse, Severity, Warning } from "./types";
+import type { CompareEvent, CompareRequest, Health, HazardCount, PlanDoc, PlanResponse, Profile, PublishEvent, ScriptResponse, Severity, UpdateInfo, UpdateProgress, Warning } from "./types";
 import fixture from "../dev/fixture-plan.json";
 
 type Listener<T> = (e: T) => void;
@@ -20,6 +21,12 @@ const compareListeners = new Set<{ cb: Listener<CompareEvent> }>();
 const publishListeners = new Set<{ cb: Listener<PublishEvent> }>();
 const emitCompare = (e: CompareEvent) => compareListeners.forEach((l) => l.cb(e));
 const emitPublish = (e: PublishEvent) => publishListeners.forEach((l) => l.cb(e));
+const updateListeners = new Set<{ cb: Listener<UpdateProgress> }>();
+const emitUpdate = (p: UpdateProgress) => updateListeners.forEach((l) => l.cb(p));
+
+const MOCK_VERSION = "0.9.0";
+let offeredUpdate: string | null = typeof location !== "undefined" ? new URLSearchParams(location.search).get("update") : null;
+let downloaded = false;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const PROFILES_KEY = "pgdac-mock-profiles";
@@ -164,6 +171,40 @@ export const mock = {
     const entry = { cb };
     publishListeners.add(entry);
     return () => publishListeners.delete(entry);
+  },
+
+  /** Test hook: the version the mock offers (null for none). */
+  offerUpdate: (version: string | null) => {
+    offeredUpdate = version;
+    downloaded = false;
+  },
+  checkForUpdate: async (): Promise<UpdateInfo | null> => {
+    await sleep(300);
+    downloaded = false;
+    return offeredUpdate ? { version: offeredUpdate, currentVersion: MOCK_VERSION, notes: null } : null;
+  },
+  downloadUpdate: async (): Promise<void> => {
+    if (!offeredUpdate) return Promise.reject("there is no update to download; check for updates first");
+    const total = 18 * 1024 * 1024;
+    for (let received = 0; received < total; ) {
+      await sleep(150);
+      received = Math.min(total, received + 2 * 1024 * 1024);
+      emitUpdate({ received, total });
+    }
+    downloaded = true;
+  },
+  installUpdate: async (): Promise<void> => {
+    if (!downloaded) return Promise.reject("the update has not been downloaded yet");
+    await sleep(800);
+    // The desktop app restarts into the new version; the mock reloads without the offer.
+    const url = new URL(location.href);
+    url.searchParams.delete("update");
+    location.replace(url.toString());
+  },
+  onUpdateProgress: async (cb: Listener<UpdateProgress>) => {
+    const entry = { cb };
+    updateListeners.add(entry);
+    return () => void updateListeners.delete(entry);
   },
 
   pickFile: async (): Promise<string | null> => window.prompt("Path of a .pgdac artifact (browser mock)", "C:\\artifacts\\app.pgdac"),

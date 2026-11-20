@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   version:
-    name: Tag matches the pinned version
+    name: Tag matches the pinned version; updates are configured
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pin.outputs.version }}
@@ -22,7 +22,23 @@ jobs:
           if [ "$PIN" != "$TAG" ]; then
             echo "tag v$TAG does not match ui/PGDAC_VERSION ($PIN)"; exit 1
           fi
+          # The updater compares the app version (tauri.conf.json) with the
+          # release manifest, so every version field must be the pinned one.
+          # `pnpm release <version>` in ui/ sets them all.
+          for f in ui/package.json ui/src-tauri/tauri.conf.json; do
+            V=$(jq -r .version "$f")
+            if [ "$V" != "$PIN" ]; then echo "$f has version $V, expected $PIN"; exit 1; fi
+          done
+          V=$(sed -n 's/^version = "\(.*\)"/\1/p' ui/src-tauri/Cargo.toml | head -1)
+          if [ "$V" != "$PIN" ]; then echo "ui/src-tauri/Cargo.toml has version $V, expected $PIN"; exit 1; fi
           echo "version=$PIN" >> "$GITHUB_OUTPUT"
+      - name: Updater public key is set
+        run: |
+          # An app shipped without the key could never update itself; see docs/UPDATES.md.
+          KEY=$(jq -r '.plugins.updater.pubkey // ""' ui/src-tauri/tauri.conf.json)
+          if [ -z "$KEY" ]; then
+            echo "plugins.updater.pubkey in ui/src-tauri/tauri.conf.json is empty (docs/UPDATES.md, one-time setup)"; exit 1
+          fi
 
   cli:
     name: CLI / sidecar (${{ matrix.triple }})
@@ -124,15 +140,24 @@ jobs:
         run: chmod +x ui/src-tauri/binaries/pg-dac-${{ matrix.triple }}
       - run: pnpm install --frozen-lockfile
         working-directory: ui
+      # Builds the installers, signs each with the updater key and uploads them
+      # with `latest.json`, the manifest running apps check (docs/UPDATES.md).
+      # The release stays a draft: running apps see it only once it is
+      # published, so publishing the draft is what ships the update.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: ui
+          args: --config src-tauri/tauri.release.conf.json
           tagName: ${{ github.ref_name }}
           releaseName: "pg-dac ${{ github.ref_name }}"
-          releaseBody: "pg-dac ${{ needs.version.outputs.version }} — CLI binaries and desktop installers. See STATUS.md for what is covered."
+          releaseBody: "pg-dac ${{ needs.version.outputs.version }} — CLI binaries and desktop installers. See CHANGELOG.md for what changed."
           releaseDraft: true
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
 
   cli-assets:
     name: Attach CLI binaries to the release

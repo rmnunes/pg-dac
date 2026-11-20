@@ -40,6 +40,7 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Lint | ✅ `pg-dac lint` — hazards by code/severity/object, exit 2 at or above `--fail-on` (WP4) |
 | GUI dependency-gated include/exclude | ✅ Excluding an object excludes what depends on it; including brings dependencies back; new options (signer key, deploy scripts, drift); engine format/version handshake (WP4) |
 | CLI + GUI coexistence (embedded PostgreSQL) | ✅ Complete binaries cache is reused, not re-extracted (the library's `pg_ctl` check missed `.exe` on Windows) (WP4) |
+| Desktop updates | ✅ Tauri updater driven from the Rust layer so the sidecar is stopped before the installer replaces it; signed `latest.json` from GitHub Releases; update strip, manual check, restart gated on running operations; release refuses to run without the updater key (`docs/UPDATES.md`). Needs the one-time key setup before the first release |
 | Version control / CI / release | ✅ Git; GitHub Actions CI (Go matrix, embedded-PG integration, GUI type-check/build, cargo check) and tag-driven release (CLI per triple + Tauri installers); versions pinned and test-enforced (WP4) |
 
 ---

@@ -4,6 +4,24 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## Unreleased
+
+### Added
+- **The desktop app updates itself** (docs/UPDATES.md): it checks the signed release manifest
+  after launch and every six hours, a strip under the toolbar offers a newer version, the user
+  downloads it (signature verified against the key built into the app) and restarts when ready.
+  Restarting stops the engine first and waits while a compare, script or publish runs. A manual
+  check sits in the status bar. The release workflow signs the installers, uploads `latest.json`,
+  and refuses to run until the updater key is configured; `pnpm release <version>` in `ui/` sets
+  every version field.
+
+### Changed
+- New app icon: a stack of schema layers with the top one sliding into place. A simplified
+  drawing is used at 16-32 px so the taskbar icon stays legible; `pnpm icons` in `ui/` rebuilds
+  the set from `ui/src-tauri/icons/source/`.
+- The toolbar no longer repeats the app name the window title already shows, and starts at the
+  left edge like SSDT's.
+
 ## 0.9.0 — 2026-10-07 — release candidate
 
 ### Added

@@ -13,6 +13,8 @@ import type {
   Profile,
   PublishEvent,
   ScriptResponse,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
 import { mock } from "./mock";
 
@@ -47,6 +49,14 @@ export const startPublish = (req: CompareRequest): Promise<void> => (inTauri ? i
 
 export const onPublish = (cb: (e: PublishEvent) => void): Promise<UnlistenFn> =>
   inTauri ? listen<PublishEvent>("pgdac://publish", (event) => cb(event.payload)) : mock.onPublish(cb);
+
+// In-app updates. The Tauri layer checks the signed release manifest, downloads
+// and verifies the installer, and on install stops the engine and restarts.
+export const checkForUpdate = (): Promise<UpdateInfo | null> => (inTauri ? invoke("update_check") : mock.checkForUpdate());
+export const downloadUpdate = (): Promise<void> => (inTauri ? invoke("update_download") : mock.downloadUpdate());
+export const installUpdate = (): Promise<void> => (inTauri ? invoke("update_install") : mock.installUpdate());
+export const onUpdateProgress = (cb: (p: UpdateProgress) => void): Promise<UnlistenFn> =>
+  inTauri ? listen<UpdateProgress>("pgdac://update", (event) => cb(event.payload)) : mock.onUpdateProgress(cb);
 
 export const pickFile = (filters?: { name: string; extensions: string[] }[]): Promise<string | null> =>
   inTauri ? open({ multiple: false, directory: false, filters }).then((r) => (typeof r === "string" ? r : null)) : mock.pickFile();

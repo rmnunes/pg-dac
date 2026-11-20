@@ -10,7 +10,9 @@
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release": "node scripts/bump-version.mjs",
+    "icons": "tauri icon src-tauri/icons/source/pg-dac.png && python scripts/small-icons.py"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

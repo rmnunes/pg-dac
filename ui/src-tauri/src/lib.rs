@@ -5,8 +5,9 @@
 
 mod daemon;
 mod profiles;
+mod update;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
@@ -14,8 +15,28 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use daemon::Daemon;
 use profiles::Profile;
 
-struct AppState {
-    daemon: Arc<Daemon>,
+pub(crate) struct AppState {
+    daemon: RwLock<Arc<Daemon>>,
+}
+
+impl AppState {
+    /// The running daemon. Callers clone the Arc and release the lock at once,
+    /// so a long request never blocks a restart of the daemon.
+    pub(crate) fn daemon(&self) -> Arc<Daemon> {
+        self.daemon
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Starts a new daemon if the current one has been stopped.
+    pub(crate) fn ensure_daemon(&self) -> Result<(), String> {
+        let mut guard = self.daemon.write().unwrap_or_else(|e| e.into_inner());
+        if !guard.is_running() {
+            *guard = Arc::new(Daemon::start()?);
+        }
+        Ok(())
+    }
 }
 
 /// The event channel publish progress is emitted on (data: {event, data}).
@@ -39,7 +60,7 @@ async fn proxy(
     path: &'static str,
     body: Value,
 ) -> Result<Value, String> {
-    let daemon = state.daemon.clone();
+    let daemon = state.daemon();
     tauri::async_runtime::spawn_blocking(move || daemon.post(path, body))
         .await
         .map_err(|e| e.to_string())?
@@ -55,7 +76,7 @@ fn stream(
     channel: &'static str,
     body: Value,
 ) {
-    let daemon = state.daemon.clone();
+    let daemon = state.daemon();
     tauri::async_runtime::spawn_blocking(move || {
         daemon.stream(path, body, |event, data| {
             let _ = app.emit(channel, serde_json::json!({ "event": event, "data": data }));
@@ -65,7 +86,7 @@ fn stream(
 
 #[tauri::command]
 async fn pgdac_health(state: State<'_, AppState>) -> Result<Value, String> {
-    let daemon = state.daemon.clone();
+    let daemon = state.daemon();
     tauri::async_runtime::spawn_blocking(move || daemon.get("/health"))
         .await
         .map_err(|e| e.to_string())?
@@ -125,13 +146,15 @@ async fn profile_remove(app: AppHandle, id: String) -> Result<Vec<Profile>, Stri
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let daemon = Daemon::start().map_err(|e| -> Box<dyn std::error::Error> {
                 Box::<dyn std::error::Error>::from(format!("failed to start pg-dac daemon: {e}"))
             })?;
             app.manage(AppState {
-                daemon: Arc::new(daemon),
+                daemon: RwLock::new(Arc::new(daemon)),
             });
+            app.manage(update::Pending::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -144,13 +167,16 @@ pub fn run() {
             profiles_list,
             profile_add,
             profile_remove,
+            update::update_check,
+            update::update_download,
+            update::update_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building pg-dac-ui")
         .run(|app_handle, event| {
             if let RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    state.daemon.stop();
+                    state.daemon().stop();
                 }
             }
         });

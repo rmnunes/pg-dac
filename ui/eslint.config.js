@@ -1,6 +1,6 @@
 // ESLint flat config: the recommended JavaScript and TypeScript rules plus the
 // React Hooks rules (dependency arrays and the rules of hooks), for the
-// frontend sources and the Vite config.
+// frontend sources and the Vite config; the Node rules for the release script.
 import js from "@eslint/js";
 import globals from "globals";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -20,5 +20,10 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       "react-hooks/exhaustive-deps": "error",
     },
+  },
+  {
+    files: ["scripts/**/*.mjs"],
+    extends: [js.configs.recommended],
+    languageOptions: { ecmaVersion: 2022, sourceType: "module", globals: globals.node },
   },
 );

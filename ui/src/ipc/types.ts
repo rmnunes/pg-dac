@@ -154,6 +154,19 @@ export interface CompareEvent {
   };
 }
 
+/** A newer release the updater found (see src-tauri/src/update.rs). */
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes?: string | null;
+}
+
+/** Download progress of an update, in bytes; total is null when the server does not say. */
+export interface UpdateProgress {
+  received: number;
+  total?: number | null;
+}
+
 // Publish SSE payloads: "start" (what will run), one "progress" per
 // statement or script, then "done" | "error".
 export type PublishEventName = "start" | "progress" | "done" | "error";

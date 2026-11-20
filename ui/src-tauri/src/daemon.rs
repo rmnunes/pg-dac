@@ -71,6 +71,14 @@ impl Daemon {
         })
     }
 
+    /// Whether the child process is still owned (not yet stopped).
+    pub fn is_running(&self) -> bool {
+        self.child
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
     fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }
@@ -131,8 +139,12 @@ impl Daemon {
     }
 
     /// Best-effort graceful stop: ask the daemon to shut down (so it stops its
-    /// embedded Postgres cleanly), then kill the child if it lingers.
+    /// embedded Postgres cleanly), then kill the child if it lingers. Stopping a
+    /// stopped daemon does nothing.
     pub fn stop(&self) {
+        if !self.is_running() {
+            return;
+        }
         let _ = self.auth(ureq::post(&self.url("/shutdown"))).call();
         if let Ok(mut guard) = self.child.lock() {
             if let Some(mut child) = guard.take() {

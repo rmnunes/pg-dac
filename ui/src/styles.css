@@ -86,9 +86,7 @@ kbd { font-family: var(--mono); font-size: var(--fs-sm); border: 1px solid var(-
   display: flex; align-items: center; gap: 16px; padding: 6px 14px;
   background: var(--panel); border-bottom: 1px solid var(--border);
 }
-.appbar h1 { margin: 0; font-size: var(--fs-lg); font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
-.appbar h1 .sub { color: var(--muted); font-weight: 400; font-size: var(--fs-sm); }
-.toolbar { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.toolbar { display: flex; align-items: center; gap: 8px; }
 .toolbar .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 .count-pill { background: var(--accent-text); color: var(--on-pill); border-radius: 9px; padding: 0 6px; font-size: var(--fs-sm); font-weight: 600; line-height: 16px; }
 
@@ -142,6 +140,22 @@ kbd { font-family: var(--mono); font-size: var(--fs-sm); border: 1px solid var(-
   padding: 8px 14px; border-bottom: 1px solid var(--err-border); white-space: pre-wrap;
 }
 .error-banner .msg { flex: 1; }
+
+/* ---------- update strip ---------- */
+.update-banner {
+  display: flex; align-items: center; gap: 10px; padding: 6px 14px;
+  background: var(--selected); border-bottom: 1px solid var(--border); color: var(--text);
+}
+.update-banner > svg { flex: none; color: var(--accent-text); }
+.update-banner.ok { background: var(--ok-bg); border-bottom-color: var(--ok-border); }
+.update-banner.ok > svg { color: var(--ok-fg); }
+.update-banner.warn { background: var(--warn-bg); border-bottom-color: var(--warn-border); }
+.update-banner.warn > svg { color: var(--warn-fg); }
+.update-banner .update-text { min-width: 0; }
+.update-banner .update-detail { color: var(--muted); font-variant-numeric: tabular-nums; }
+.update-banner .update-error { color: var(--warn-fg); }
+.update-banner .update-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.update-banner progress { width: 160px; height: 6px; accent-color: var(--accent); }
 
 /* ---------- workspace ---------- */
 .workspace { display: flex; flex: 1; min-height: 0; }
@@ -319,6 +333,8 @@ dialog.dialog::backdrop { background: var(--backdrop); }
   animation: spin 0.7s linear infinite; flex: none;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .spinner, .spin { animation: none; } }
 
 .error-boundary { padding: 24px; color: var(--err-fg); }
 .error-boundary pre { background: var(--sunken); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; overflow: auto; white-space: pre-wrap; font-size: var(--fs-sm); }

@@ -111,6 +111,11 @@ led to this layout and the re-audit after it.
 cd ui && pnpm tauri build
 ```
 
+Releases are cut with `pnpm release <patch|minor|major|x.y.z>` and a pushed tag; the release
+workflow builds, signs and uploads the installers with the manifest the in-app updater reads.
+`docs/UPDATES.md` covers the update flow, the one-time signing-key setup and how to try the update
+strip in the browser harness (`?update=0.9.1`).
+
 Bundles the `pg-dac` sidecar (`bundle.externalBin`) alongside the app. Neither the sidecar nor
 the installers are code-signed: `release.yml` does not sign them yet, which is an open release
 prerequisite. (`.pgdac` artifacts and `.pgbac` archives are signed by pg-dac itself; that is a

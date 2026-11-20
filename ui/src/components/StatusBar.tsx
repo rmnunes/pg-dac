@@ -1,6 +1,7 @@
-import { AlertTriangle, Info, OctagonAlert } from "lucide-react";
+import { AlertTriangle, Info, OctagonAlert, RefreshCw } from "lucide-react";
 
 import { optionsStale, useStore } from "../state/store";
+import { useUpdates } from "../state/update";
 import { plural } from "../vocab";
 
 export interface EngineInfo {
@@ -16,6 +17,8 @@ export function StatusBar({ notesOpen, onToggleNotes, engine }: { notesOpen: boo
   const replanning = useStore((s) => s.replanning);
   const warningCount = useStore((s) => s.warnings.length);
   const stale = useStore(optionsStale);
+  const checkUpdates = useUpdates((s) => s.check);
+  const checking = useUpdates((s) => s.phase.kind === "checking");
 
   const counts = (plan?.changes ?? []).reduce<Record<string, number>>((a, c) => {
     a[c.changeKind] = (a[c.changeKind] ?? 0) + 1;
@@ -60,6 +63,10 @@ export function StatusBar({ notesOpen, onToggleNotes, engine }: { notesOpen: boo
             {engine.note && <span className="sr-only">: {engine.note}</span>}
           </span>
         )}
+        <button type="button" className="ghost" disabled={checking} onClick={() => void checkUpdates(true)}>
+          <RefreshCw size={13} aria-hidden="true" />
+          Check for updates
+        </button>
       </div>
     </footer>
   );
