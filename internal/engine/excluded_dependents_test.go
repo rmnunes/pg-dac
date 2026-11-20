@@ -76,3 +76,74 @@ CREATE MATERIALIZED VIEW m1 AS SELECT a FROM v1;`, build.Options{})
 		t.Fatalf("did not converge; residual:\n%s", vr.Residual.Script(true))
 	}
 }
+
+// TestExcludedFunctionOverViewIsRecreated reproduces the DEV failure: the
+// target has a view over a column whose type changes and a function whose
+// signature returns that view's row type; the source has neither and the user
+// excludes both drops. PostgreSQL refuses to drop the view while the function
+// exists, so the function must be dropped first and recreated after the view
+// comes back — both kept with their current definitions.
+func TestExcludedFunctionOverViewIsRecreated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs embedded postgres")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ctx, cleanup := devdb.WithShared(ctx)
+	defer cleanup()
+
+	from, _, err := build.FromSQL(ctx, `
+CREATE TABLE t(a int, b text);
+CREATE VIEW v AS SELECT a, b FROM t;
+CREATE FUNCTION f(ids text[]) RETURNS SETOF v LANGUAGE sql AS 'SELECT * FROM v';`, build.Options{})
+	if err != nil {
+		t.Fatalf("build from: %v", err)
+	}
+	to, _, err := build.FromSQL(ctx, `CREATE TABLE t(a bigint, b text);`, build.Options{})
+	if err != nil {
+		t.Fatalf("build to: %v", err)
+	}
+	opts := engine.DefaultOptions()
+	opts.DropObjectsNotInSource = true
+	// The function's identity carries its parameter names ("f(ids text[])"),
+	// so take the key from the model rather than spelling it.
+	fnKey := from.Schemas[0].Functions[0].Ref().Key()
+	opts.ExcludeIDs = map[string]bool{
+		model.ObjRef{Kind: model.KindView, Schema: "public", Name: "v"}.Key(): true,
+		fnKey: true,
+	}
+	res, err := engine.Compare(from, to, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := res.Script(true)
+	idx := func(s string) int { return strings.Index(script, s) }
+	dropF, dropV, alter, createV, createF := idx("DROP FUNCTION"), idx(`DROP VIEW "public"."v"`), idx(`ALTER COLUMN "a" TYPE bigint`), idx(`CREATE OR REPLACE VIEW "public"."v"`), idx("CREATE OR REPLACE FUNCTION")
+	for name, i := range map[string]int{"drop f": dropF, "drop v": dropV, "alter": alter, "create v": createV, "create f": createF} {
+		if i < 0 {
+			t.Errorf("missing %s in script:\n%s", name, script)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if !(dropF < dropV && dropV < alter && alter < createV && createV < createF) {
+		t.Errorf("wrong order (function before view on the way down, after it on the way up):\n%s", script)
+	}
+	var fnReason string
+	for _, c := range res.ObjectChanges() {
+		if c.ObjectType == model.KindFunction {
+			fnReason = c.Reason
+		}
+	}
+	if !strings.Contains(fnReason, "recreated because it depends on view") {
+		t.Errorf("function reason = %q", fnReason)
+	}
+	vr, err := validate.Plan(ctx, from, to, opts)
+	if err != nil {
+		t.Fatalf("migration failed to apply: %v\n%s", err, script)
+	}
+	if !vr.Converged {
+		t.Fatalf("did not converge; residual:\n%s", vr.Residual.Script(true))
+	}
+}

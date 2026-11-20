@@ -65,6 +65,10 @@ production pilot completes without a correctness change.
 - identity → serial conversions order `CREATE SEQUENCE` after `DROP IDENTITY`.
 - A `CREATE OR REPLACE` of a view or function no longer re-grants its privileges.
 - Column-order warnings name only the misplaced columns.
+- Functions whose signature uses a relation's row type (or whose SQL-standard body references it)
+  are now recreated around a drop of that relation, like dependent views and triggers: dropped
+  before it, recreated after it, kept with their current definition when the source does not
+  define them. Before, PostgreSQL refused the drop ("other objects depend on it") at publish time.
 - Connections to live databases retry transient failures (a name lookup that fails once, a
   refused or reset dial) three times with a short backoff before giving up, so a split-DNS
   resolver that answers the first query for a private host with "no such host" no longer fails

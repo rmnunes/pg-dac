@@ -12,6 +12,8 @@ import (
 //
 //   - change the type of, or drop, a column a view reads;
 //   - drop a table, view or function another view still references;
+//   - drop a relation whose row type a function's signature uses (or that a
+//     SQL-standard function body references);
 //   - drop a function a trigger executes;
 //
 // and the differ deliberately emits those changes as plain ops. This pass walks
@@ -113,6 +115,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 			return // already dropped by the differ or an earlier step
 		}
 		dropped[key] = true
+		objRef[key] = d.ref
 		push(key)
 		reason := fmt.Sprintf("recreated because it depends on %s", cause)
 
@@ -178,6 +181,40 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		}
 	}
 
+	// recreateFn drops a function whose signature uses (or whose SQL-standard
+	// body references) an object dropped here, and recreates it in its desired
+	// form — or its current one when the desired state does not mention it and
+	// it can still exist. PostgreSQL refuses to drop a view or table while such
+	// a function exists ("other objects depend on it").
+	recreateFn := func(d dependentFn, cause string) {
+		key := d.ref.Key()
+		if dropped[key] {
+			return // the differ already drops (and maybe recreates) it
+		}
+		dropped[key] = true
+		objRef[key] = d.ref
+		push(key)
+		reason := fmt.Sprintf("recreated because it depends on %s", cause)
+		added = append(added, diff.Op{Type: diff.OpDropFunction, Owner: d.ref, Function: d.fn, Reason: reason})
+		invalid := false
+		for _, dep := range d.fn.DependsOn {
+			if gone(dep.Key()) {
+				invalid = true
+			}
+		}
+		switch desired := findFunction(to, d.ref); {
+		case created[key]:
+			// the differ already creates its desired form
+		case desired != nil:
+			added = append(added, diff.Op{Type: diff.OpCreateFunction, Owner: d.ref, Function: desired, Reason: reason})
+			created[key] = true
+		case !invalid:
+			added = append(added, diff.Op{Type: diff.OpCreateFunction, Owner: d.ref, Function: d.fn,
+				Reason: reason + " (kept with its current definition; it is not part of the desired state)"})
+			created[key] = true
+		}
+	}
+
 	// objectCause words the object behind a key and what happens to it, for a
 	// dependent's reason.
 	objectCause := func(k string) string {
@@ -203,6 +240,11 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		frontier = frontier[1:]
 		for _, d := range idx.byObject[k] {
 			recreate(d, objectCause(k))
+		}
+		// Functions whose signature uses the dropped object's row type, or that
+		// reference it from a SQL-standard body.
+		for _, f := range idx.fnByObject[k] {
+			recreateFn(f, objectCause(k))
 		}
 		// Triggers executing a dropped function.
 		for _, t := range idx.triggersByFn[k] {
@@ -276,9 +318,18 @@ type dependentTrigger struct {
 	tr    *model.Trigger
 }
 
+// dependentFn is a function of the "from" model that depends on another object
+// (a relation whose row type its signature uses, an enum, a SQL-standard body's
+// references).
+type dependentFn struct {
+	ref model.ObjRef
+	fn  *model.Function
+}
+
 type dependentIndex struct {
 	byObject     map[string][]dependentRel // relation/function/view key -> relations depending on it
 	byColumn     map[string][]dependentRel // table key + "#" + column -> relations reading it
+	fnByObject   map[string][]dependentFn  // object key -> functions depending on it
 	triggersByFn map[string][]dependentTrigger
 }
 
@@ -286,6 +337,7 @@ func indexDependents(db *model.Database) dependentIndex {
 	idx := dependentIndex{
 		byObject:     map[string][]dependentRel{},
 		byColumn:     map[string][]dependentRel{},
+		fnByObject:   map[string][]dependentFn{},
 		triggersByFn: map[string][]dependentTrigger{},
 	}
 	for _, s := range db.Schemas {
@@ -319,8 +371,28 @@ func indexDependents(db *model.Database) dependentIndex {
 				}
 			}
 		}
+		for _, f := range s.Functions {
+			d := dependentFn{ref: f.Ref(), fn: f}
+			for _, dep := range f.DependsOn {
+				idx.fnByObject[dep.Key()] = append(idx.fnByObject[dep.Key()], d)
+			}
+		}
 	}
 	return idx
+}
+
+func findFunction(db *model.Database, ref model.ObjRef) *model.Function {
+	for _, s := range db.Schemas {
+		if s.Name != ref.Schema {
+			continue
+		}
+		for _, f := range s.Functions {
+			if f.Signature() == ref.Name {
+				return f
+			}
+		}
+	}
+	return nil
 }
 
 // colKey identifies a column (or any relation sub-object) by its relation and
