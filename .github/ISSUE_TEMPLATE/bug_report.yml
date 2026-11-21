@@ -1,0 +1,55 @@
+name: Bug report
+description: Something pg-dac does wrong — a false difference, a migration that fails, a crash.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please leave out real connection strings, passwords and data.
+        Security issues go through [SECURITY.md](https://github.com/rmnunes/pg-dac/blob/main/SECURITY.md), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what pg-dac did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest schema (source and target DDL) and the command or app steps that show the problem.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The error, the generated script, or the relevant part of it.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: pg-dac version
+      description: "`pg-dac version`, or the version in the desktop app's status bar."
+    validations:
+      required: true
+  - type: input
+    id: postgres
+    attributes:
+      label: PostgreSQL version(s)
+      description: Of the source and the target, and where they run (local, Docker, Azure, RDS, ...).
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options: [CLI, Desktop app, Both]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system

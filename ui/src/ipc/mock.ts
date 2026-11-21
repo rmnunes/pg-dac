@@ -145,10 +145,19 @@ export const mock = {
   },
 
   script: async (req: CompareRequest): Promise<ScriptResponse> => {
-    const body = effectivePlan(req.excludeIds)
-      .changes.flatMap((c) => c.statements.map((s) => (s.note ? `-- ${s.note}\n` : "") + s.sql))
-      .join("\n\n");
-    return { sql: `-- pg-dac migration script (browser mock)\nSET check_function_bodies = false;\n\n${body}\n`, warnings: fixtureWarnings };
+    const statements = effectivePlan(req.excludeIds).changes.flatMap((c) => c.statements);
+    const body = statements.map((s) => (s.note ? `-- ${s.note}\n` : "") + s.sql).join("\n\n");
+    // The header the engine writes (internal/engine/format.go, ScriptWith).
+    const header = [
+      "-- pg-dac migration script",
+      `-- ${statements.length} statement(s)`,
+      "-- NOTE: statements are emitted in dependency order; run with autocommit",
+      "--       (CONCURRENTLY statements must not run inside a transaction).",
+      "-- Function bodies are not validated at CREATE time (as in pg_dump output), so a",
+      "-- SQL-language function may reference objects created later in this script.",
+      "SET check_function_bodies = false;",
+    ].join("\n");
+    return { sql: `${header}\n\n${body}\n`, warnings: fixtureWarnings };
   },
 
   startPublish: async (req: CompareRequest): Promise<void> => {

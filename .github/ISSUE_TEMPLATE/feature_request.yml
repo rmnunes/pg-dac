@@ -1,0 +1,20 @@
+name: Feature request
+description: Something pg-dac should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it could work. If SSDT / SqlPackage has an equivalent, name it.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds

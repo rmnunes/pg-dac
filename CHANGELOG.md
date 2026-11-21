@@ -4,6 +4,15 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## Unreleased
+
+### Changed
+- The README is now a short introduction with screenshots of the desktop app, install steps and a
+  quick start; the full command reference moved to `docs/cli.md` and the internals to
+  `docs/how-it-works.md`.
+- Contributor guide, security policy, code of conduct, and issue and pull request templates.
+- `pnpm screenshots` in `ui/` regenerates the README screenshots from the browser harness.
+
 ## 0.9.2 — 2026-11-21
 
 ### Added

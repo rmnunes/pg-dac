@@ -1,251 +1,125 @@
 # pg-dac
 
-A **DACPAC / SqlPackage-equivalent for PostgreSQL**. It compares schemas, produces
-dependency-ordered, lock-safe migration scripts, and packages a schema into a portable, signed
-`.pgdac` artifact you can compare against — and publish into — any target database, including an
-empty one.
+[![CI](https://github.com/rmnunes/pg-dac/actions/workflows/ci.yml/badge.svg)](https://github.com/rmnunes/pg-dac/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/rmnunes/pg-dac)](https://github.com/rmnunes/pg-dac/releases/latest)
+[![License](https://img.shields.io/github/license/rmnunes/pg-dac)](LICENSE)
 
-If you've used SQL Server's SqlPackage / SQL Database Projects and wished for the same
-declarative, compare-and-script workflow on PostgreSQL, that's what pg-dac is.
+**Schema compare and deployment for PostgreSQL, the way SQL Server's DACPAC and SqlPackage work.**
 
-It ships as a **CLI** (`pg-dac`), a local **daemon** (`pg-dac serve`, a warm-Postgres HTTP/SSE
-API), a **project model** (`pgdac.yaml` + `pg-dac init` / `extract --to-project`), and a
-**Tauri desktop GUI** for visual Schema Compare (see [`ui/`](ui/README.md)).
+Point pg-dac at the schema you want (a folder of `.sql` files, a packaged `.pgdac` artifact or
+another database) and at the database to update. It shows every difference object by object,
+explains the risk of each change, and writes a migration that runs in the right order without
+locking your tables longer than it has to. You review it, then publish.
 
-## Why it exists
+![Schema Compare: the change list on the left, the definition diff of the selected table on the right](docs/images/compare.png)
 
-PostgreSQL already has good schema-diff engines (Atlas, Stripe's pg-schema-diff, pgschema),
-but none ship the part of DACPAC that makes it portable and CI-friendly: a sealed,
-version-targeted, **signed artifact**, a machine-readable change manifest, a refactorlog for
-data-preserving renames, and artifact↔database / artifact↔artifact comparison. pg-dac fills
-that gap, with first-class online/lock-safe DDL built in.
+## Highlights
 
-## How it works
+- **Compare anything with anything.** A live database, a project folder, a `.sql` file or a
+  `.pgdac` artifact, on either side, including an empty database.
+- **Migrations you can trust.** Statements are ordered by real dependencies; views and triggers
+  in the way are dropped and recreated automatically; indexes are built `CONCURRENTLY` and
+  constraints added `NOT VALID` first.
+- **Safe by default.** Every statement is checked for risks (data loss, exclusive locks, table
+  rewrites). Data loss is refused unless you acknowledge it, and drift on the target since the
+  last publish is detected.
+- **Portable, signed artifacts.** `pg-dac build` packages a schema into a `.pgdac` file, signed
+  so a pipeline can check where it came from, the PostgreSQL counterpart of a `.dacpac`.
+- **A desktop app and a CLI.** Visual Schema Compare for people; one binary for pipelines.
 
-Every comparison reduces both sides to one canonical model, then diffs the models — never
-raw SQL text:
+## Install
 
+**Desktop app:** download the installer for your system from the
+[latest release](https://github.com/rmnunes/pg-dac/releases/latest): `pg-dac_<version>_x64-setup.exe`
+(Windows), `pg-dac_<version>_aarch64.dmg` (macOS, Apple silicon), or the `.deb`, `.rpm` or `.AppImage`
+(Linux). The app updates itself when a new version is released.
+
+> The installers are not code-signed yet. Windows SmartScreen asks for confirmation (*More info →
+> Run anyway*), and macOS may refuse to open the app until you clear the download flag:
+> `xattr -dr com.apple.quarantine /Applications/pg-dac.app`.
+
+**CLI:** download `pg-dac-<platform>` from the same release, rename it to `pg-dac` (`pg-dac.exe` on
+Windows), put it on your `PATH` and check it against `SHA256SUMS.txt`. Or build it with Go 1.25+:
+
+```bash
+go install github.com/rmnunes/pg-dac/cmd/pg-dac@latest
 ```
-source ─┐
-        ├─► model ─► diff ─► dependency-ordered plan ─► lock-safe SQL ─► script / report / apply
-target ─┘
+
+PostgreSQL 11 to 18 is supported as a target. Nothing else is needed: pg-dac normalizes both sides
+of a comparison in a private, throwaway PostgreSQL, which the first compare downloads once and
+caches.
+
+## Quick start
+
+```bash
+# Turn an existing database into a project: one file per object.
+pg-dac extract --from "postgres://app@localhost/app" --to-project ./schema
+
+# Edit the files, then see what would change in a target database.
+# --to is the state you want, --from is the database that gets updated.
+pg-dac diff    --from "postgres://app@staging/app" --to ./schema
+
+# Review the migration script, then apply it.
+pg-dac script  --from "postgres://app@staging/app" --to ./schema > migrate.sql
+pg-dac publish --from "postgres://app@staging/app" --to ./schema
 ```
 
-- **Model** — built from live `pg_catalog` introspection (the authoritative source), with the
-  session `search_path` pinned empty so every definition is fully schema-qualified and the model
-  does not depend on who is reading it. A declarative project or a `.pgdac` artifact is reduced to
-  the same model by materializing it in a throwaway PostgreSQL and re-introspecting — then
-  re-materialized once more from its own canonical SQL, because PostgreSQL's deparsed text is not
-  always a parse fixed point — so cosmetic noise (`varchar` vs `character varying`, reparenthesized
-  checks, whitespace, `IN (...)` lists) never shows up as a false diff and a published target
-  converges.
-- **Diff** — purely name-keyed, deterministic; emits typed operations (no SQL).
-- **Plan** — orders operations with a topological sort over dependency edges (foreign keys, view
-  and function references, row types used in function signatures, trigger functions, sequence
-  ownership, the columns a view reads) plus a pg_dump-style object-type priority as the tie-breaker.
-  Changes PostgreSQL refuses while dependents exist — retyping or dropping a column a view reads,
-  dropping a table or function a view or trigger uses, replacing a view whose columns changed or a
-  function whose result type changed — automatically drop the dependents first and recreate them
-  afterwards, each statement annotated with why.
-- **SQL generation + safety** — renders lock-safe DDL: `CREATE INDEX CONCURRENTLY`, gap-free index rebuilds (a changed index is built concurrently under a temporary name, then swapped in), constraints
-  added `NOT VALID` then `VALIDATE`d, scan-free `SET NOT NULL` on PG12+, etc. Each statement is
-  tagged with typed hazards; data-loss operations are blocked unless `--allow-hazards` is given.
-  Scripts and the executor run with `check_function_bodies = false` (as pg_dump does), so a
-  SQL-language function may reference objects created later in the same migration.
+Keep passwords out of connection strings: pg-dac reads `PGPASSWORD` and `~/.pgpass` like `psql`
+does. Try it on a copy or a non-production database first. [docs/cli.md](docs/cli.md) has every
+command and option.
+
+## The desktop app
+
+Pick a Source and a Target, press **Compare**, and review the result like SSDT's Schema Compare.
+Each change shows its definition diff, the SQL that will run, its risks and its dependencies;
+untick what you don't want to deploy.
+
+| Risks, explained per change | Publishing asks before anything destructive |
+|---|---|
+| ![The Risks tab: dropping a column deletes its data and takes an exclusive lock](docs/images/risks.png) | ![The Publish dialog: data loss needs an explicit acknowledgement](docs/images/publish.png) |
+
+**Generate Script** gives you the whole migration to review or hand to your deployment pipeline:
+
+![The migration script dialog](docs/images/script.png)
+
+## Coming from SQL Server?
+
+| SSDT / SqlPackage | pg-dac |
+|---|---|
+| SQL Database Project | A project folder with `pgdac.yaml` (`pg-dac init`, `pg-dac extract --to-project`) |
+| `.dacpac` | `.pgdac` (`pg-dac build`, `pg-dac extract --out`) |
+| `.bacpac` (schema and data) | `.pgbac` (`pg-dac export`, `pg-dac import`) |
+| `/Action:Publish` | `pg-dac publish` |
+| `/Action:Script`, `/Action:DeployReport` | `pg-dac script`, `pg-dac report` |
+| Schema Compare | `pg-dac diff`, or the desktop app |
+| Update project from database | `pg-dac publish --from ./schema --to <database>` |
+| Refactor log, pre/post-deploy scripts, SQLCMD variables | `refactorlog.json`, `preDeploy`/`postDeploy`, `--var name=value` |
+| `/p:BlockOnPossibleDataLoss`, `/p:DropObjectsNotInSource`, `/p:ExcludeObjectTypes` | On by default, `--drop-objects-not-in-source`, `--exclude-object-type` |
+
+## Documentation
+
+- [docs/cli.md](docs/cli.md): every command, the comparison options, projects and artifacts.
+- [ROLLOUT.md](ROLLOUT.md): running pg-dac in a delivery pipeline, per environment.
+- [docs/how-it-works.md](docs/how-it-works.md): the model, the planner, what is managed and how it is tested.
+- [docs/UPDATES.md](docs/UPDATES.md): how the desktop app updates itself.
+- [ui/README.md](ui/README.md): the desktop app's architecture and how to develop it.
+- [STATUS.md](STATUS.md) and [CHANGELOG.md](CHANGELOG.md): what is done, what is not, and what changed.
 
 ## Status
 
-The engine, daemon, project model, artifacts, and GUI are built and exercised against real
-PostgreSQL (embedded 16/18, Docker 16/18, a ~900-object production schema and its Azure DEV
-database). An independent audit on 2026-10-06 (the audit notes) drove eight work
-packages; the roadmap in [STATUS.md](STATUS.md) is complete — refactorlog, drift detection, lint,
-privileges, column-order policy, project update from a database, single-transaction publish,
-export/import of schema and data — and 0.9.0 is the release candidate ([ROLLOUT.md](ROLLOUT.md),
-[CHANGELOG.md](CHANGELOG.md)). The current gates, all in `go test ./...`:
+pg-dac is a release candidate on the way to 1.0. It has been exercised against PostgreSQL 16 and
+18 and a production schema of about 900 objects. Ownership, default privileges and roles are not
+managed (roles must exist), and a few changes PostgreSQL cannot make in place, such as removing an
+enum value, are reported instead of applied. See [STATUS.md](STATUS.md) for the details.
 
-- **From-empty bootstrap** (`internal/validate/bootstrap_test.go`): a comprehensive schema is
-  built, published into an empty scratch database, re-introspected, and must show no residual;
-  the script must be byte-identical across repeated compares; the model must survive a trip
-  through a signed `.pgdac`.
-- **Scenario matrix** (`internal/engine/scenarios_test.go`): the migrations from the audit, each
-  tagged `ok`, `fail` (known gap, with the work package that fixes it) or `miss` (attribute not yet
-  modeled). A gap that starts passing makes the test tell you to flip its tag.
-- **Introspection invariants** (`internal/introspect`): the model is independent of the session
-  `search_path`; `NOT VALID` is a flag, not definition text; function, trigger and view dependency
-  edges are recorded; partitioning, view options, trigger state, storage attributes, domains and
-  composite types are read.
-- **Artifact trust** (`internal/artifact`, `internal/source`): the signature covers the whole
-  manifest, and a required or trusted signer is enforced on every artifact source.
+## Contributing
 
-**Managed objects:** schemas, extensions, enums, domains, composite types, collations, sequences
-(standalone, serial, and identity), functions and procedures, tables (columns incl.
-identity/generated/defaults/not-null/storage/compression/statistics, `UNLOGGED`, storage parameters,
-partitioning), primary/foreign/unique/check/exclude constraints (incl. `NOT VALID` state), indexes on
-tables and materialized views, triggers on tables and views (incl. enabled state), row-level-security
-policies and table RLS enable/force, views (incl. check option and security options), materialized
-views, comments on all of them, and privileges (GRANT/REVOKE incl. grant options and column
-privileges) on schemas, tables, views, sequences, routines and types.
-
-**Out of scope** (details in [STATUS.md](STATUS.md)): ownership and default privileges are warned
-about, not modeled; policies, defaults and constraints that call a function being recreated are not
-recreated around it; changes PostgreSQL cannot make in place (removing enum values, altering a
-domain or composite type, re-partitioning) are reported as an `UNSUPPORTED_CHANGE` hazard rather
-than applied; roles are required to exist, never created.
-
-## Usage
-
-```bash
-go build -o bin/pg-dac ./cmd/pg-dac
-
-# A source is a connection string, a project directory, a .sql file, or a .pgdac artifact.
-# For compare verbs, --to is the DESIRED state and --from is the schema to be changed.
-
-# Compare and script (any source on either side)
-pg-dac diff    --from "postgres://...target" --to ./schema
-pg-dac script  --from "postgres://...target" --to ./schema --validate > migrate.sql
-pg-dac report  --from app.pgdac              --to "postgres://...target" --format json
-pg-dac plan    --from "postgres://...target" --to ./schema              # per-object JSON (GUI/tooling)
-
-# Apply (publish) the desired state to a live database — including an empty one
-pg-dac publish --from "postgres://...target" --to ./schema            # data loss is refused
-pg-dac publish --from "postgres://...target" --to app.pgdac --dry-run # preview only
-
-# Package a schema into a portable, signed artifact, and inspect it
-pg-dac extract --from "postgres://...prod" --out prod.pgdac
-pg-dac build   --from ./schema --out app.pgdac --version 2.1.0 --target-major 18
-pg-dac inspect app.pgdac
-
-# Schema AND data (the BACPAC analog): one consistent snapshot, verified and signed
-pg-dac export --from "postgres://...prod" --out prod.pgbac --exclude-table 'audit.*'
-pg-dac import --file prod.pgbac --target "postgres://...empty-db"   # empty target; keys/indexes/triggers after the rows
-
-# Production publish controls
-pg-dac publish --from "postgres://...prod" --to app.pgdac --single-transaction --statement-timeout 10m \
-               --var deploy_environment=prod --exclude-object-type privilege
-
-# Scaffold / reverse-engineer a declarative project
-pg-dac init    --dir ./schema --name app                               # section folders for hand authoring
-pg-dac extract --from "postgres://...prod" --to-project ./schema       # one file per object: schema/<schema>/<kind>/<name>.sql
-
-# Update an existing project from a database (SSDT's "Update project from database"):
-# the project is the target, only the files of changed objects are rewritten
-pg-dac publish --from ./schema --to "postgres://...dev" --dry-run       # file-level diff
-pg-dac publish --from ./schema --to "postgres://...dev"
-```
-
-Project files need no particular order: the build applies statements with deferred retry, so a
-view may be defined before its table and a table's foreign keys live in the table's own file.
-Updating a project rewrites an object's declarative statements in place (keeping the comments
-above them), adds a file at the stable path for a new object, removes a dropped object's
-statements under drop policy `all`, and adds new grantees to `roles:`. An object defined by
-migration-style statements (`ALTER TABLE … ADD COLUMN`, `DO` blocks) cannot be rewritten by any
-tool and is refused with directions.
-
-Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
-the PostgreSQL major used to normalize a project source; a project's `pgdac.yaml` `targetMajor`
-is the default), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source` (overrides the
-project's `dropPolicy`), `--exclude-object-type <kind>` (repeatable; SSDT's ExcludeObjectTypes),
-`--validate`, `--dry-run`, `--lock-timeout`, `--statement-timeout`, `--single-transaction`
-(consecutive transactional statements run in one transaction; CONCURRENTLY statements split it,
-`--no-online` makes the whole migration one transaction), `--var name=value` (repeatable; `$(name)`
-placeholders in pre/post-deploy scripts, SQLCMD-style, defaults from `pgdac.yaml` `variables:`)
-and `--no-deploy-scripts` (publish), `--no-sign` (build/extract/export), `--require-key
-<fingerprint>` (every verb that reads a `.pgdac`/`.pgbac`; a `trusted_keys` file under the pg-dac
-config directory does the same for all runs).
-
-**What counts as a difference** (SSDT's comparison options, with the same defaults): routine
-bodies are compared ignoring whitespace and line endings (`--compare-whitespace` makes them
-exact; `--ignore-comments` also ignores comments); privileges (`GRANT`/`REVOKE` on schemas,
-tables, views, sequences, routines, types and columns) are part of the model and compared
-(`--ignore-privileges`; revokes of privileges the source does not hold follow the drop policy,
-like SSDT's `DropPermissionsNotInSource`), and an object pg-dac drops and recreates always gets
-its privileges back; a table whose declared column order differs from the target's is reported
-(`--column-order warn`), ignored (`ignore`), or rebuilt in the declared order with its rows
-copied (`rebuild`, the SSDT table rebuild — heavy and explicit). A project sets its defaults in
-`pgdac.yaml`:
-
-```yaml
-compare:
-  privileges: true        # false = ignore GRANT/REVOKE
-  columnOrder: warn       # ignore | warn | rebuild
-  ignoreWhitespace: true
-  ignoreComments: false
-roles: [app_readers]      # roles the project's GRANTs name but does not create
-```
-
-Roles are cluster objects pg-dac never creates. A GRANT to a role the target lacks is a blocking
-`MISSING_ROLE` hazard; when that is the only blocker and the project has pre-deploy scripts,
-`publish` runs them first (that is where a project provisions its roles) and re-checks before
-refusing.
-
-Every side of a comparison — a live database included — is first brought to the same canonical
-form through a scratch PostgreSQL, so an expression never compares as different only because of
-how PostgreSQL deparsed it when the object was created.
-
-A project's `pgdac.yaml` `preDeploy`/`postDeploy` scripts, `dropPolicy` and `refactorlog.json`
-travel inside the artifact and are honored by `publish`: pending renames run first as
-`ALTER … RENAME` (recorded per target so they run once), pre-deploy scripts before the migration,
-post-deploy scripts after it, and the drop policy is the default drop behavior. Every publish
-records the resulting schema as the target's baseline; a target that later changed outside pg-dac
-is refused until `--allow-drift` (or `pg-dac baseline`) accepts the change — `pg-dac drift` shows
-what changed.
-
-```bash
-pg-dac refactor rename --dir ./schema --kind column --schema app --table users --from name --to full_name
-pg-dac drift --from "postgres://...target"            # exit 2 when drift is detected
-pg-dac lint  --from "postgres://...target" --to ./schema --fail-on error
-```
-
-> The first run downloads the embedded PostgreSQL binaries (cached per major version), so any
-> command that uses a project/`.sql` source or `--validate` takes longer the first time.
-
-## Trying it on a real project or database
-
-You need a PostgreSQL connection string for at least one side. **Always test against a copy or a
-non-production database first.** The recommended order:
-
-```bash
-go build -o bin/pg-dac ./cmd/pg-dac
-DB="postgres://user:pass@host:5432/dbname?sslmode=disable"
-
-# 1. Sanity: comparing a database to itself must be empty (and surfaces any
-#    unsupported-object warnings for your schema).
-bin/pg-dac diff --from "$DB" --to "$DB"
-
-# 2. Snapshot the current schema into a signed, portable artifact.
-bin/pg-dac extract --from "$DB" --out current.pgdac
-bin/pg-dac inspect current.pgdac
-
-# 3. See what it would take to converge a target toward a desired source.
-#    Desired (--to) can be another database, a .pgdac, or a .sql project directory.
-bin/pg-dac diff   --from "$TARGET_DB" --to current.pgdac           # summary + hazards
-bin/pg-dac script --from "$TARGET_DB" --to current.pgdac --validate > migrate.sql
-
-# 4. Apply (only after reviewing). Data loss is refused unless --allow-hazards.
-bin/pg-dac publish --from "$TARGET_DB" --to current.pgdac --dry-run   # preview
-bin/pg-dac publish --from "$TARGET_DB" --to current.pgdac             # apply
-```
-
-Tips: restrict scope with `--schema app` (repeatable); `--validate` replays the migration in a
-throwaway database first; read every `warning (...)` line — those object types are not yet managed.
-Point a project source at the directory that holds only schema DDL (psql meta-commands such as
-`\i` cannot run server-side), or add a `pgdac.yaml` whose `include` globs select it.
-
-## Testing
-
-```bash
-go test -short ./...       # fast unit tests, no database required
-go test -p 1 ./...         # + embedded-PostgreSQL integration tests (downloads binaries once)
-```
-
-CI runs the same on every push (`.github/workflows/ci.yml`); a `v*` tag matching
-`ui/PGDAC_VERSION` builds the CLI for every platform and the desktop installers
-(`.github/workflows/release.yml`).
-
-Set `PG_DAC_TEST_DSN` to also run the self-idempotence check against a real database.
+Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how
+to build, test and propose a change. Please report security issues privately as described in
+[SECURITY.md](SECURITY.md), and follow the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-Apache-2.0. The dependency-ordering algorithm is reimplemented from PostgreSQL's
-`pg_dump_sort.c` (BSD) and the hazard rules from the PostgreSQL docs and Squawk (concepts only);
-no GPL code is copied.
+Apache-2.0. The dependency-ordering algorithm is reimplemented from PostgreSQL's `pg_dump_sort.c`
+(BSD) and the hazard rules from the PostgreSQL docs and Squawk (concepts only); no GPL code is
+copied.
