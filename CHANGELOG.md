@@ -4,6 +4,16 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## 0.9.2 — 2026-11-21
+
+### Added
+- First release published from GitHub. Installers are signed with the pg-dac updater key, so
+  from this version on the desktop app finds and verifies new releases on its own.
+
+### Fixed
+- The mock engine used by the browser harness reported a hard-coded version; it now follows
+  `ui/PGDAC_VERSION` like a local sidecar build.
+
 ## 0.9.1 — 2026-11-20
 
 ### Added
