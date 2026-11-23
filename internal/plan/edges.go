@@ -10,8 +10,10 @@ import (
 // or where a real dependency must be respected across bands: view-on-view,
 // foreign keys to tables created in the same migration, sub-objects of a newly
 // created table, a function whose signature uses a row type created later, a
-// trigger or view that calls such a function, and a serial sequence's OWNED BY
-// that needs its table. edges[a] = nodes that must come after a.
+// trigger or view that calls such a function, a default, CHECK constraint,
+// index or policy that calls a function dropped or created here, and a serial
+// sequence's OWNED BY that needs its table. edges[a] = nodes that must come
+// after a.
 func deriveEdges(ops []diff.Op) map[int][]int {
 	edges := map[int][]int{}
 
@@ -64,6 +66,16 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 			edges[a] = append(edges[a], b)
 		}
 	}
+	// An object dropped and created again (a function whose result type
+	// changes, a view recreated around a column change) is dropped first. The
+	// priority bands usually give that order, but an edge that holds the drop
+	// back — a default or index that has to go before it — must not let the
+	// create overtake it.
+	for k, d := range dropByObj {
+		if c, ok := createByObj[k]; ok {
+			add(d, c)
+		}
+	}
 	// afterCreates adds "create dep -> i" for every dependency being created here.
 	afterCreates := func(i int, deps []model.ObjRef) {
 		for _, dep := range deps {
@@ -82,6 +94,12 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 	}
 
 	for i, op := range ops {
+		// A default, CHECK constraint, index or policy calling a function goes
+		// before that function is dropped and comes after it is created.
+		removed, created := exprFunctionDeps(op)
+		beforeDrops(i, removed)
+		afterCreates(i, created)
+
 		switch op.Type {
 		case diff.OpAddColumn, diff.OpAlterColumnType, diff.OpSetColumnDefault,
 			diff.OpDropColumnDefault, diff.OpSetColumnNotNull, diff.OpDropColumnNotNull,
@@ -269,4 +287,81 @@ func dependsOn(op diff.Op) []model.ObjRef {
 		return op.Trigger.DependsOn
 	}
 	return nil
+}
+
+// exprFunctionDeps returns the functions an op's expressions call: those of
+// what it removes (it must run before they are dropped) and those of what it
+// creates (it must run after they are created). Dropping or creating a table
+// covers its columns' defaults, its CHECK constraints, indexes and policies,
+// and dropping a materialized view its indexes.
+func exprFunctionDeps(op diff.Op) (removed, created []model.ObjRef) {
+	switch op.Type {
+	case diff.OpDropColumnDefault:
+		if op.PrevColumn != nil {
+			removed = op.PrevColumn.DefaultDependsOn
+		}
+	case diff.OpSetColumnDefault, diff.OpAddColumn:
+		if op.Column != nil {
+			created = op.Column.DefaultDependsOn
+		}
+	case diff.OpDropColumn:
+		if op.Column != nil {
+			removed = op.Column.DefaultDependsOn
+		}
+	case diff.OpDropConstraint:
+		if op.Constraint != nil {
+			removed = op.Constraint.DependsOn
+		}
+	case diff.OpAddConstraint:
+		if op.Constraint != nil {
+			created = op.Constraint.DependsOn
+		}
+	case diff.OpDropIndex:
+		if op.Index != nil {
+			removed = op.Index.DependsOn
+		}
+	case diff.OpCreateIndex, diff.OpReplaceIndex:
+		if op.Index != nil {
+			created = op.Index.DependsOn
+		}
+	case diff.OpDropPolicy:
+		if op.Policy != nil {
+			removed = op.Policy.DependsOn
+		}
+	case diff.OpCreatePolicy:
+		if op.Policy != nil {
+			created = op.Policy.DependsOn
+		}
+	case diff.OpDropTable:
+		removed = tableExprDeps(op.Table)
+	case diff.OpCreateTable:
+		created = tableExprDeps(op.Table)
+	case diff.OpDropMatView:
+		if op.MatView != nil {
+			for _, ix := range op.MatView.Indexes {
+				removed = append(removed, ix.DependsOn...)
+			}
+		}
+	}
+	return removed, created
+}
+
+func tableExprDeps(t *model.Table) []model.ObjRef {
+	if t == nil {
+		return nil
+	}
+	var deps []model.ObjRef
+	for _, c := range t.Columns {
+		deps = append(deps, c.DefaultDependsOn...)
+	}
+	for _, c := range t.Constraints {
+		deps = append(deps, c.DependsOn...)
+	}
+	for _, ix := range t.Indexes {
+		deps = append(deps, ix.DependsOn...)
+	}
+	for _, p := range t.Policies {
+		deps = append(deps, p.DependsOn...)
+	}
+	return deps
 }

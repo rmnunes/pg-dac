@@ -171,6 +171,9 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 	if err := readTriggers(ctx, q, names, major, tables, views); err != nil {
 		return nil, err
 	}
+	if err := readFunctionUsers(ctx, q, names, tables, mviews); err != nil {
+		return nil, err
+	}
 	if err := readPrivileges(ctx, q, names, byName, tables, views, mviews); err != nil {
 		return nil, err
 	}

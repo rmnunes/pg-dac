@@ -4,6 +4,25 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## 0.9.6 — 2026-11-23
+
+### Fixed
+- **Defaults, CHECK constraints, indexes and policies that call a recreated function.** When a
+  function had to be dropped (removed, or recreated because its result type changed), PostgreSQL
+  refused while a column default, CHECK constraint, index expression or predicate, or policy still
+  called it. pg-dac now reads those references from `pg_depend`, removes the dependent before the
+  drop and puts it back after the function exists again, in its desired form or, when the desired
+  state does not describe it, its current one. An index that is also being rebuilt is dropped and
+  created rather than swapped in. A dropped table or column that calls the function is ordered
+  before the drop the same way.
+- **An object dropped and created again is always dropped first.** The order used to come from
+  the planner's priority bands alone, which another ordering constraint could override.
+
+### Changed
+- **The release workflow no longer waits on macOS runners for the CLI.** All five CLI binaries
+  cross-compile on Linux, every job has a time limit, and *Run workflow* on the Release workflow is
+  a dry run: it builds and signs everything as workflow artifacts without creating a release.
+
 ## 0.9.5 — 2026-11-23
 
 ### Fixed

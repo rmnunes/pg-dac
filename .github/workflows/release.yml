@@ -188,6 +188,7 @@ jobs:
           name: desktop-${{ matrix.triple }}
           path: ui/src-tauri/target/release/bundle/
           if-no-files-found: error
+          retention-days: 7
 
   cli-assets:
     name: Attach CLI binaries to the release

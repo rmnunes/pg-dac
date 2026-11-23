@@ -34,7 +34,8 @@ target ─┘
   Changes PostgreSQL refuses while dependents exist — retyping or dropping a column a view reads,
   dropping a table or function a view or trigger uses, replacing a view whose columns changed or a
   function whose result type changed — automatically drop the dependents first and recreate them
-  afterwards, each statement annotated with why.
+  afterwards, each statement annotated with why. That includes the parts of a table that call such
+  a function: column defaults, CHECK constraints, index expressions and predicates, and policies.
 - **SQL generation + safety** — renders lock-safe DDL: `CREATE INDEX CONCURRENTLY`, gap-free index rebuilds (a changed index is built concurrently under a temporary name, then swapped in), constraints
   added `NOT VALID` then `VALIDATE`d, scan-free `SET NOT NULL` on PG12+, etc. Each statement is
   tagged with typed hazards; data-loss operations are blocked unless `--allow-hazards` is given.
@@ -53,7 +54,7 @@ views, comments on all of them, and privileges (GRANT/REVOKE incl. grant options
 privileges) on schemas, tables, views, sequences, routines and types.
 
 **Out of scope** (details in [STATUS.md](../STATUS.md)): ownership and default privileges are warned
-about, not modeled; policies, defaults and constraints that call a function being recreated are not
+about, not modeled; a generated column whose expression calls a function being recreated is not
 recreated around it; changes PostgreSQL cannot make in place (removing enum values, altering a
 domain or composite type, re-partitioning) are reported as an `UNSUPPORTED_CHANGE` hazard rather
 than applied; roles are required to exist, never created.

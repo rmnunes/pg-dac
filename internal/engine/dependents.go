@@ -16,6 +16,8 @@ import (
 //     signature uses, an enum in its signature, a relation or function a
 //     SQL-standard body references;
 //   - drop a function a trigger executes;
+//   - drop a function a column default, a CHECK constraint, an index
+//     expression or predicate, or a policy calls;
 //
 // and the differ deliberately emits those changes as plain ops. This pass walks
 // the "from" model's dependency data (View.ColumnDeps / DependsOn,
@@ -23,7 +25,9 @@ import (
 // — and adds a DROP of its current form plus a CREATE of its desired form (or
 // of its current form, when the desired state does not mention it and it can
 // still exist). A recreated view gets its triggers back and a recreated
-// materialized view its indexes. The planner then brackets the blocking op
+// materialized view its indexes. A default, CHECK constraint, index or policy
+// that calls a function dropped here is removed before the drop and put back
+// after the function is created (exprusers.go). The planner then brackets the blocking op
 // with those drops and creates via the usual bands and edges. Dependents that
 // reference an object that disappears for good are dropped only. It runs
 // after the drop/include filters so it only reacts to changes that will really
@@ -44,6 +48,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		idxCreated:  map[string]bool{},
 		queued:      map[string]bool{},
 		droppedHere: map[string]bool{},
+		exprOps:     newExprOps(),
 	}
 
 	// What the change set already does.
@@ -67,6 +72,7 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		case op.Type == diff.OpCreateIndex || op.Type == diff.OpReplaceIndex:
 			x.idxCreated[colKey(op.Owner, op.Sub)] = true
 		}
+		x.exprOps.record(op)
 	}
 	// Every drop seeds the frontier; it grows as dependents are themselves dropped.
 	for key, st := range x.objects {
@@ -95,9 +101,12 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 		for _, t := range x.idx.triggersByFn[k] {
 			x.recreateTrigger(t, k)
 		}
+		for _, u := range x.idx.exprByFn[k] {
+			x.recreateExprUser(u, k)
+		}
 	}
 
-	if len(x.added) == 0 {
+	if len(x.added) == 0 && len(x.exprOps.splitReplace) == 0 {
 		return cs
 	}
 	// Sub-object drops on a relation this pass drops would fail: PostgreSQL
@@ -116,6 +125,13 @@ func expandDependents(cs *diff.ChangeSet, from, to *model.Database) *diff.Change
 			if x.droppedHere[op.Owner.Key()] {
 				op = diff.Op{Type: diff.OpCreateIndex, Owner: op.Owner, Sub: op.Sub, Table: op.Table, Index: op.Index,
 					Reason: "created with its new definition because its relation is recreated"}
+			}
+			// The old definition calls a function dropped here: it has to go
+			// before that drop and the new one can only be built after the
+			// function is back, so there is no swap.
+			if reason, ok := x.exprOps.splitReplace[colKey(op.Owner, op.Sub)]; ok {
+				out.Ops = append(out.Ops, diff.Op{Type: diff.OpDropIndex, Owner: op.Owner, Sub: op.Sub, Table: op.Table, Index: op.PrevIndex, Reason: reason})
+				op = diff.Op{Type: diff.OpCreateIndex, Owner: op.Owner, Sub: op.Sub, Table: op.Table, Index: op.Index, Reason: reason}
 			}
 		}
 		out.Ops = append(out.Ops, op)
@@ -151,6 +167,10 @@ type expansion struct {
 	droppedHere map[string]bool
 
 	added []diff.Op
+
+	// exprOps tracks defaults, CHECK constraints, indexes and policies the
+	// change set already drops or creates (exprusers.go).
+	exprOps *exprOps
 }
 
 func (x *expansion) object(ref model.ObjRef) *objectState {
@@ -363,6 +383,7 @@ type dependentIndex struct {
 	byColumn     map[string][]dependentRel // table key + "#" + column -> relations reading it
 	fnByObject   map[string][]dependentFn  // object key -> functions depending on it
 	triggersByFn map[string][]dependentTrigger
+	exprByFn     map[string][]exprUser // function key -> defaults, CHECKs, indexes, policies calling it
 }
 
 func indexDependents(db *model.Database) dependentIndex {
@@ -371,6 +392,7 @@ func indexDependents(db *model.Database) dependentIndex {
 		byColumn:     map[string][]dependentRel{},
 		fnByObject:   map[string][]dependentFn{},
 		triggersByFn: map[string][]dependentTrigger{},
+		exprByFn:     map[string][]exprUser{},
 	}
 	for _, s := range db.Schemas {
 		for _, v := range s.Views {
@@ -396,7 +418,13 @@ func indexDependents(db *model.Database) dependentIndex {
 				idx.byColumn[colRefKey(c)] = append(idx.byColumn[colRefKey(c)], d)
 			}
 		}
+		for _, mv := range s.MatViews {
+			for _, ix := range mv.Indexes {
+				idx.addExprUser(exprUser{owner: mv.Ref(), ix: ix}, ix.DependsOn)
+			}
+		}
 		for _, t := range s.Tables {
+			idx.indexExprUsers(t)
 			for _, tr := range t.Triggers {
 				for _, dep := range tr.DependsOn {
 					idx.triggersByFn[dep.Key()] = append(idx.triggersByFn[dep.Key()], dependentTrigger{rel: t.Ref(), table: t, tr: tr})

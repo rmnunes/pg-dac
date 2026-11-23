@@ -164,6 +164,38 @@ var scenarios = []scenario{
 	{"drop-table-under-altered-view", `CREATE TABLE t(a int); CREATE TABLE u(b int); CREATE VIEW v AS SELECT a FROM t;`, `CREATE TABLE u(b int); CREATE VIEW v AS SELECT b AS a FROM u;`, ok, ""},
 	{"drop-view-with-dependent-view-rewritten", `CREATE TABLE t(a int); CREATE VIEW v1 AS SELECT a FROM t; CREATE VIEW v2 AS SELECT a FROM v1;`, `CREATE TABLE t(a int); CREATE VIEW v2 AS SELECT a FROM t;`, ok, ""},
 	{"alter-type-text-to-int", `CREATE TABLE t(a text);`, `CREATE TABLE t(a int);`, ok, "an explicit USING cast is emitted"},
+	// --- parts of a table that call a function the migration drops ---
+	// A changed return type means DROP + CREATE: whatever calls the function is
+	// removed first and put back after it.
+	{"function-recreated-under-column-default",
+		`CREATE FUNCTION next_code() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE t(a bigint DEFAULT next_code());`,
+		`CREATE FUNCTION next_code() RETURNS bigint LANGUAGE sql AS 'SELECT 1::bigint'; CREATE TABLE t(a bigint DEFAULT next_code());`, ok, ""},
+	{"function-recreated-under-check-constraint",
+		`CREATE FUNCTION weight(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x'; CREATE TABLE t(a int, CONSTRAINT t_w CHECK (weight(a) >= 0));`,
+		`CREATE FUNCTION weight(x int) RETURNS bigint LANGUAGE sql IMMUTABLE AS 'SELECT x::bigint'; CREATE TABLE t(a int, CONSTRAINT t_w CHECK (weight(a) >= 0));`, ok, ""},
+	{"function-recreated-under-index-expression",
+		`CREATE FUNCTION norm(x text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a));`,
+		`CREATE FUNCTION norm(x text) RETURNS varchar LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)::varchar'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a));`, ok, ""},
+	{"function-recreated-under-index-predicate",
+		`CREATE FUNCTION keep(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x'; CREATE TABLE t(a int); CREATE INDEX t_keep ON t (a) WHERE keep(a) > 0;`,
+		`CREATE FUNCTION keep(x int) RETURNS bigint LANGUAGE sql IMMUTABLE AS 'SELECT x::bigint'; CREATE TABLE t(a int); CREATE INDEX t_keep ON t (a) WHERE keep(a) > 0;`, ok, ""},
+	{"function-recreated-under-policy",
+		`CREATE FUNCTION lvl() RETURNS int LANGUAGE sql STABLE AS 'SELECT 1'; CREATE TABLE t(a int); ALTER TABLE t ENABLE ROW LEVEL SECURITY; CREATE POLICY p ON t USING (lvl() > 0);`,
+		`CREATE FUNCTION lvl() RETURNS bigint LANGUAGE sql STABLE AS 'SELECT 1::bigint'; CREATE TABLE t(a int); ALTER TABLE t ENABLE ROW LEVEL SECURITY; CREATE POLICY p ON t USING (lvl() > 0);`, ok, ""},
+	{"function-recreated-under-index-being-rebuilt",
+		`CREATE FUNCTION norm(x text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a));`,
+		`CREATE FUNCTION norm(x text) RETURNS varchar LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)::varchar'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a)) WHERE a IS NOT NULL;`, ok,
+		"the old index must go before the function and the new one is built after it, so the rebuild is a drop and a create"},
+	// The function goes for good, together with what calls it.
+	{"function-removed-with-its-column-default",
+		`CREATE FUNCTION next_code() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE t(a int DEFAULT next_code());`,
+		`CREATE TABLE t(a int);`, ok, ""},
+	{"function-removed-with-its-index",
+		`CREATE FUNCTION norm(x text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a));`,
+		`CREATE TABLE t(a text);`, ok, ""},
+	{"function-removed-with-its-table",
+		`CREATE FUNCTION next_code() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE t(a int DEFAULT next_code()); CREATE TABLE u(b int);`,
+		`CREATE TABLE u(b int);`, ok, ""},
 }
 
 // TestScenarios runs the migration scenario matrix (the audit notes, Appendix A)
@@ -252,6 +284,8 @@ func TestScenarios(t *testing.T) {
 // rebuilds (drop + create inside the transaction instead of the concurrent
 // swap) and what they interact with. They run again with Online off.
 var scenariosOffline = []string{
+	"function-recreated-under-index-expression",
+	"function-recreated-under-index-being-rebuilt",
 	"index-definition-changed",
 	"unique-index-definition-changed",
 	"index-rebuild-leftover-cleared",
