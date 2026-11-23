@@ -1,6 +1,6 @@
 # pg-dac — Project Status & Roadmap
 
-_Last updated: 2026-10-07 — **roadmap complete** (WP0–WP4; see the audit notes for the audit and per-WP addenda)_
+_Last updated: 2026-11-23 — **v0.9.3**, the release candidate on the way to 1.0. Work packages WP0–WP8 are complete; see [Roadmap](#roadmap) for what comes next._
 
 A **DACPAC / SqlPackage-equivalent for PostgreSQL**: compare schemas, generate dependency-ordered
 lock-safe migration scripts, package a schema into a portable **signed `.pgdac` artifact**, and
@@ -40,8 +40,10 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Lint | ✅ `pg-dac lint` — hazards by code/severity/object, exit 2 at or above `--fail-on` (WP4) |
 | GUI dependency-gated include/exclude | ✅ Excluding an object excludes what depends on it; including brings dependencies back; new options (signer key, deploy scripts, drift); engine format/version handshake (WP4) |
 | CLI + GUI coexistence (embedded PostgreSQL) | ✅ Complete binaries cache is reused, not re-extracted (the library's `pg_ctl` check missed `.exe` on Windows) (WP4) |
-| Desktop updates | ✅ Tauri updater driven from the Rust layer so the sidecar is stopped before the installer replaces it; signed `latest.json` from GitHub Releases; update strip, manual check, restart gated on running operations; release refuses to run without the updater key (`docs/UPDATES.md`). Needs the one-time key setup before the first release |
-| Version control / CI / release | ✅ Git; GitHub Actions CI (Go matrix, embedded-PG integration, GUI type-check/build, cargo check) and tag-driven release (CLI per triple + Tauri installers); versions pinned and test-enforced (WP4) |
+| Desktop updates | ✅ Tauri updater driven from the Rust layer so the sidecar is stopped before the installer replaces it; signed `latest.json` from GitHub Releases; update strip, manual check, restart gated on running operations; release refuses to run without the updater key (`docs/UPDATES.md`). Signed releases since v0.9.2 |
+| Version control / CI / release | ✅ Public at github.com/rmnunes/pg-dac; GitHub Actions CI (Go on Linux/Windows/macOS, embedded-PG integration, GUI type-check/lint/tests/build, cargo fmt + clippy) and tag-driven release (CLI for five targets + signed Tauri installers, published as a draft); versions pinned and test-enforced, Tauri JS packages checked against their Rust crates (WP4, 0.9.2) |
+| Text encoding | ✅ The scratch cluster is UTF-8 with the C locale on every platform and every session is UTF-8, so non-ASCII definitions compare the same on Windows and Linux; `PGCLIENTENCODING` is ignored (0.9.3) |
+| Target platform check | ✅ A desired state normalized for a newer PostgreSQL major than the target runs is refused, like SqlPackage's platform check (`--target-major`, `--allow-incompatible-platform`); version-gated statements follow the target's version (0.9.3) |
 
 ---
 
@@ -307,8 +309,9 @@ Roles are cluster objects: never created or dropped, only required to exist.
 4. **`USING` casts are plain conversions.** `ALTER COLUMN TYPE` emits `USING "col"::type`; when
    values need a real transformation (parsing, defaults for unconvertible rows) the script must be
    edited by hand. The hazard note says so.
-5. **Embedded PostgreSQL** re-extracts its binaries on start, so running the CLI while the GUI
-   daemon is up on the same major can collide on the binaries directory. Run `go test -p 1 ./...`.
+5. **Embedded PostgreSQL** is downloaded once per major version on first use, so the first
+   compare on a machine (or a CI runner without a cache) is slow. The full test suite starts many
+   scratch servers; run it with `go test -p 1 -timeout 40m ./...`.
 6. `.pgdac` is compressed, not encrypted.
 7. A true dependency cycle (possible only for objects that were themselves created via ALTERs)
    is reported as a `plan` warning and the cyclic operations are appended in priority order; the
@@ -323,21 +326,47 @@ Roles are cluster objects: never created or dropped, only required to exist.
 
 ## Roadmap
 
-**All work packages (WP0–WP8) and the audit's N1–N9 items are complete; 0.9.0 is the release
-candidate for production rollout** (see ROLLOUT.md). What remains is explicitly out of scope or
-deferred:
+**Done:** all work packages (WP0–WP8) and the audit's N1–N9 items.
 
-- **Not managed (warned):** ownership, default privileges, database-level grants, column
-  privileges on views, attaching/detaching *existing* partitions, `INHERITS` inheritance,
-  aggregate/window functions, range/multirange types, foreign tables and servers, rules, event
-  triggers, publications/subscriptions. Roles are required to exist, never created.
+| Release | What it added |
+|---|---|
+| 0.9.0 (2026-10-07) | Release candidate: the complete engine, CLI, daemon, project model, artifacts and GUI |
+| 0.9.1 (2026-11-20) | Desktop auto-update, new app icon |
+| 0.9.2 (2026-11-21) | First public release from GitHub, signed with the updater key |
+| 0.9.3 (2026-11-23) | UTF-8 scratch server and sessions; target platform check (both found by the first project using pg-dac) |
+
+**1.0** is cut when the first production pilot completes without a correctness change
+(CHANGELOG.md). Problems the pilot finds are fixed with a regression test and a patch release.
+
+**Next, in order:**
+
+1. **Saved connections in the OS credential store.** The desktop app keeps saved sources in
+   `profiles.json` under the app's config directory as plain text, so a password inside a
+   connection string sits on disk unencrypted. Passwords move to Windows Credential Manager,
+   macOS Keychain or the Secret Service on Linux; the file keeps only what is not secret.
+2. **PostgreSQL version matrix in CI.** 11 to 18 are supported targets, but the integration tests
+   run almost entirely on 16, with a few on 18. Run the publish and convergence gates on every supported major.
+3. **Dependents of a recreated function.** Policies, column defaults, CHECK constraints and index
+   expressions that call a function being dropped and recreated are not recreated around it
+   today; PostgreSQL's error surfaces at publish time.
+4. **Ownership and default privileges** (`ALTER DEFAULT PRIVILEGES`), modeled and compared
+   instead of warned about; they matter most on Azure.
+5. **Code signing** for the Windows and macOS installers (needs a signing certificate and an Apple
+   developer account), and **tauri-action v1** in the release workflow (it renames the macOS
+   update bundle and changes the URLs in `latest.json`, so it is tested on its own).
+
+**Still out of scope or deferred:**
+
+- **Not managed (warned):** database-level grants, column privileges on views, attaching/detaching
+  *existing* partitions, `INHERITS` inheritance, aggregate/window functions, range/multirange
+  types, foreign tables and servers, rules, event triggers, publications/subscriptions. Roles are
+  required to exist, never created.
 - **Reported as `UNSUPPORTED_CHANGE` rather than applied:** removing/reordering enum values,
   altering a domain or composite type definition, re-partitioning a table, rebuilding a
   partitioned table or a partition for column order.
 - **Deferred:** a GUI for authoring the refactorlog (today: `pg-dac refactor rename`) and for
-  export/import (today: the CLI); dependents other than views, materialized views and triggers
-  when a function is recreated (policies, defaults, CHECKs, index expressions — PostgreSQL's own
-  error surfaces); in-place update of imperative project files (refused with directions).
+  export/import (today: the CLI); in-place update of imperative project files (refused with
+  directions).
 
 ---
 
@@ -387,7 +416,7 @@ pg-dac diff    --from "postgres://…/db" --to ./project
 pg-dac script  --from "postgres://…/db" --to ./project --validate > migrate.sql
 pg-dac publish --from "postgres://…/db" --to ./project            # runs pre-deploy, migration, post-deploy; blocking hazards refused w/o --allow-hazards
 pg-dac publish --from "postgres://…/db" --to app.pgdac --require-key <fingerprint>
-pg-dac extract --from "postgres://…/db" --out app.pgdac           # or --to-project ./dir (schema/NNNN_*.sql in dependency order)
+pg-dac extract --from "postgres://…/db" --out app.pgdac           # or --to-project ./dir (schema/<schema>/<kind>/<name>.sql)
 pg-dac build   --from ./project --out app.pgdac --target-major 18
 pg-dac init    --dir ./project --name myapp
 pg-dac inspect app.pgdac
