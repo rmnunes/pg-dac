@@ -1,8 +1,14 @@
 name: Release
 
+# A pushed v* tag builds everything and creates a draft release; publishing
+# the draft ships it. "Run workflow" (workflow_dispatch) is a dry run of the
+# same build from any branch: installers, update signatures and CLI binaries
+# come out as workflow artifacts and no release is created, so a change to the
+# build can be tried before a tag depends on it.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +17,7 @@ jobs:
   version:
     name: Tag matches the pinned version; updates are configured
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.pin.outputs.version }}
     steps:
@@ -18,9 +25,12 @@ jobs:
       - id: pin
         run: |
           PIN=$(tr -d ' \n\r' < ui/PGDAC_VERSION)
-          TAG=${GITHUB_REF_NAME#v}
-          if [ "$PIN" != "$TAG" ]; then
-            echo "tag v$TAG does not match ui/PGDAC_VERSION ($PIN)"; exit 1
+          # A dry run has no tag; everything else is checked the same way.
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            TAG=${GITHUB_REF_NAME#v}
+            if [ "$PIN" != "$TAG" ]; then
+              echo "tag v$TAG does not match ui/PGDAC_VERSION ($PIN)"; exit 1
+            fi
           fi
           # The updater compares the app version (tauri.conf.json) with the
           # release manifest, so every version field must be the pinned one.
@@ -40,39 +50,37 @@ jobs:
             echo "plugins.updater.pubkey in ui/src-tauri/tauri.conf.json is empty (docs/UPDATES.md, one-time setup)"; exit 1
           fi
 
+  # The CLI is pure Go (CGO off), so every target cross-compiles on Linux:
+  # no job waits for a scarce macOS or Windows runner just to run go build.
   cli:
     name: CLI / sidecar (${{ matrix.triple }})
     needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            goos: linux
+          - goos: linux
             goarch: amd64
             triple: x86_64-unknown-linux-gnu
             ext: ""
-          - os: ubuntu-latest
-            goos: linux
+          - goos: linux
             goarch: arm64
             triple: aarch64-unknown-linux-gnu
             ext: ""
-          - os: windows-latest
-            goos: windows
+          - goos: windows
             goarch: amd64
             triple: x86_64-pc-windows-msvc
             ext: ".exe"
-          - os: macos-latest
-            goos: darwin
+          - goos: darwin
             goarch: arm64
             triple: aarch64-apple-darwin
             ext: ""
-          - os: macos-latest
-            goos: darwin
+          - goos: darwin
             goarch: amd64
             triple: x86_64-apple-darwin
             ext: ""
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -97,6 +105,9 @@ jobs:
   desktop:
     name: Desktop app (${{ matrix.os }})
     needs: [version, cli]
+    # A build takes 5-9 minutes; a job stuck waiting for a runner fails here
+    # instead of after GitHub's own limit, and only it needs re-running.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -144,7 +155,9 @@ jobs:
       # with `latest.json`, the manifest running apps check (docs/UPDATES.md).
       # The release stays a draft: running apps see it only once it is
       # published, so publishing the draft is what ships the update.
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build, sign and upload to the draft release
+        if: github.event_name == 'push'
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -158,11 +171,30 @@ jobs:
           releaseDraft: true
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
+      # The dry run: the same build and signatures, kept as workflow artifacts.
+      - name: Build and sign (dry run, no release)
+        if: github.event_name != 'push'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ui
+          args: --config src-tauri/tauri.release.conf.json
+      - name: Keep the dry-run installers
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.triple }}
+          path: ui/src-tauri/target/release/bundle/
+          if-no-files-found: error
 
   cli-assets:
     name: Attach CLI binaries to the release
     needs: [version, cli, desktop]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@v8
         with:

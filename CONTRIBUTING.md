@@ -106,7 +106,12 @@ Some ground rules the codebase follows:
    that carries it; `TestVersionsAgree` and the release workflow check they agree.
 2. Move the **Unreleased** notes in CHANGELOG.md under the new version and commit as
    `Release vX.Y.Z`.
-3. `git tag vX.Y.Z && git push origin main vX.Y.Z`.
-4. The release workflow builds the CLI for five platforms and the desktop installers, signs the
+3. If the change touches the build (`ui/src-tauri`, its dependencies, `.github/workflows/release.yml`),
+   do a dry run first: Actions → Release → *Run workflow* on the branch. It builds and signs every
+   installer and CLI binary and keeps them as workflow artifacts without creating a release.
+4. `git tag vX.Y.Z && git push origin main vX.Y.Z`.
+5. The release workflow builds the CLI for five platforms and the desktop installers, signs the
    update files and creates a **draft** release. Check it, then publish it: running apps update
-   only from published releases ([docs/UPDATES.md](docs/UPDATES.md)).
+   only from published releases ([docs/UPDATES.md](docs/UPDATES.md)). If a job fails because GitHub
+   could not give it a runner (a macOS queue, usually), re-run only the failed jobs; the others
+   are kept.
