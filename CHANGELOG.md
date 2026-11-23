@@ -4,6 +4,22 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## 0.9.7 — 2026-11-23
+
+### Added
+- **Default privileges are managed.** `ALTER DEFAULT PRIVILEGES` entries are read from
+  `pg_default_acl`, compared grantee by grantee, scripted and published, and appear in the app as
+  their own changes ("default privileges app_owner on tables in app"). In scope are the entries
+  scoped to the source's schemas and the database-wide ones of the roles the source has
+  database-wide entries for, so another application sharing the database keeps its own. An entry
+  the source declares is applied in full, including a `REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`;
+  privileges the target adds without the source declaring the entry are revoked under the drop
+  policy, like object privileges. A project declares them with ordinary `ALTER DEFAULT PRIVILEGES
+  FOR ROLE …` statements (the role in `roles:`); extracting or updating a project writes them to
+  `schema/<schema>/default_privileges/<role>.<type>.sql`, or `schema/default_privileges.<role>.<type>.sql`
+  for database-wide ones. `--exclude-object-type defaultPrivilege` leaves them out. They are no
+  longer reported as an unmanaged object.
+
 ## 0.9.6 — 2026-11-23
 
 ### Fixed

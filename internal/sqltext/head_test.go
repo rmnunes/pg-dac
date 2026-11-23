@@ -2,6 +2,7 @@ package sqltext
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,33 @@ INSERT INTO t VALUES (1)`, Head{Verb: "INSERT"}},
 		got := ParseHead(c.stmt)
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s\n got  %+v\n want %+v", c.stmt, got, c.want)
+		}
+	}
+}
+
+// ALTER DEFAULT PRIVILEGES names one entry when it has exactly one role and at
+// most one schema; anything else is imperative.
+func TestParseHeadDefaultPrivileges(t *testing.T) {
+	cases := []struct {
+		stmt        string
+		name        []string
+		declarative bool
+	}{
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA app GRANT SELECT ON TABLES TO readers`, []string{"app", "app_owner", "tables"}, true},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE "App Owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, []string{"", "App Owner", "functions"}, true},
+		{`alter default privileges for user o in schema "S" grant usage on sequences to r`, []string{"S", "o", "sequences"}, true},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE o GRANT EXECUTE ON ROUTINES TO r`, []string{"", "o", "functions"}, true},
+		{`ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO readers`, []string{"app", "", "tables"}, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE a, b GRANT SELECT ON TABLES TO r`, nil, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE a IN SCHEMA s1, s2 GRANT SELECT ON TABLES TO r`, nil, false},
+	}
+	for _, c := range cases {
+		h := ParseHead(c.stmt)
+		if h.Verb != "ALTER" || h.Kind != "DEFAULT PRIVILEGES" || h.Declarative != c.declarative {
+			t.Errorf("%s: verb=%q kind=%q declarative=%v", c.stmt, h.Verb, h.Kind, h.Declarative)
+		}
+		if c.name != nil && strings.Join(h.Name, "|") != strings.Join(c.name, "|") {
+			t.Errorf("%s: name=%q, want %q", c.stmt, h.Name, c.name)
 		}
 	}
 }

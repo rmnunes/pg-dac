@@ -184,6 +184,12 @@ func (r *resolver) unit(h sqltext.Head) (string, bool) {
 			return "", false
 		}
 		return model.ObjRef{Kind: model.KindExtension, Name: h.Name[0]}.Key(), true
+	case "DEFAULT PRIVILEGES":
+		if !h.Declarative || len(h.Name) != 3 {
+			return "", false
+		}
+		dp := model.DefaultPrivilege{Schema: h.Name[0], Role: h.Name[1], ObjectType: h.Name[2]}
+		return dp.Ref().Key(), true
 	}
 	return "", false
 }

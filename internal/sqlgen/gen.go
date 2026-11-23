@@ -283,6 +283,10 @@ func renderOpInner(op diff.Op, opts Options) ([]Statement, error) {
 		return renderGrant(op), nil
 	case diff.OpRevoke:
 		return renderRevoke(op), nil
+	case diff.OpGrantDefault:
+		return renderGrantDefault(op), nil
+	case diff.OpRevokeDefault:
+		return renderRevokeDefault(op), nil
 	}
 	return nil, fmt.Errorf("sqlgen: unhandled op type %q", op.Type)
 }

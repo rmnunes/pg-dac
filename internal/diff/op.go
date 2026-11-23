@@ -98,6 +98,12 @@ const (
 	OpGrant  OpType = "grant"
 	OpRevoke OpType = "revoke"
 
+	// OpGrantDefault / OpRevokeDefault change a default-privilege entry
+	// (ALTER DEFAULT PRIVILEGES): Op.DefaultPriv names the role, schema and
+	// object type, Op.Grant the grantee and privileges, as for OpGrant/OpRevoke.
+	OpGrantDefault  OpType = "grantDefault"
+	OpRevokeDefault OpType = "revokeDefault"
+
 	// OpUnsupported records a desired change PostgreSQL cannot apply in place
 	// (dropping/reordering enum values, altering a type in use, re-partitioning).
 	// It renders as a RAISE WARNING carrying an error-severity hazard so the
@@ -196,6 +202,11 @@ type Op struct {
 	Grant *model.Grant
 	// MissingRole (OpGrant) marks a grantee the target cluster does not have.
 	MissingRole bool
+	// DefaultPriv (OpGrantDefault / OpRevokeDefault) is the entry changed.
+	DefaultPriv *model.DefaultPrivilege
+	// MissingForRole (OpGrantDefault) marks an entry for a role the target
+	// cluster does not have.
+	MissingForRole bool
 
 	// Rebuild (OpCreateTable) marks a table rebuilt in place of PrevTable to
 	// reach a declared column order PostgreSQL cannot produce with ALTERs: the

@@ -43,6 +43,12 @@ type scenario struct {
 // on the shared scratch server, so creation is guarded.
 const role = `DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$;`
 
+// owner adds the role default privileges are for (ALTER DEFAULT PRIVILEGES FOR
+// ROLE scn_owner), and other a role whose database-wide entries the scenarios
+// must leave alone.
+const owner = role + ` DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_owner') THEN CREATE ROLE scn_owner NOLOGIN; END IF; END$$;` +
+	` DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_other') THEN CREATE ROLE scn_other NOLOGIN; END IF; END$$;`
+
 // scenarioMinMajor holds the scenarios that need a newer PostgreSQL than the
 // oldest supported one; on an older scratch major (CI runs every supported
 // major) they are skipped, not passed.
@@ -186,6 +192,19 @@ var scenarios = []scenario{
 		`CREATE FUNCTION norm(x text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a));`,
 		`CREATE FUNCTION norm(x text) RETURNS varchar LANGUAGE sql IMMUTABLE AS 'SELECT lower(x)::varchar'; CREATE TABLE t(a text); CREATE INDEX t_norm ON t (norm(a)) WHERE a IS NOT NULL;`, ok,
 		"the old index must go before the function and the new one is built after it, so the rebuild is a drop and a create"},
+	// --- default privileges (ALTER DEFAULT PRIVILEGES) ---
+	{"default-privileges-added", owner + `CREATE SCHEMA app;`,
+		owner + `CREATE SCHEMA app; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner IN SCHEMA app GRANT SELECT ON TABLES TO scn_reader;`, ok, ""},
+	{"default-privileges-removed", owner + `CREATE SCHEMA app; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner IN SCHEMA app GRANT SELECT ON TABLES TO scn_reader;`,
+		owner + `CREATE SCHEMA app;`, ok, "revoked under the drop policy, like object privileges"},
+	{"default-privileges-changed", owner + `CREATE SCHEMA app; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner IN SCHEMA app GRANT SELECT ON TABLES TO scn_reader;`,
+		owner + `CREATE SCHEMA app; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner IN SCHEMA app GRANT SELECT, INSERT ON TABLES TO scn_reader WITH GRANT OPTION; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner IN SCHEMA app GRANT USAGE ON SEQUENCES TO scn_reader;`, ok, ""},
+	{"default-privileges-with-new-schema", owner,
+		owner + `CREATE SCHEMA app; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner IN SCHEMA app GRANT EXECUTE ON FUNCTIONS TO scn_reader;`, ok, "the entry follows the schema it is scoped to"},
+	{"database-wide-revoke-execute-from-public", owner,
+		owner + `ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;`, ok, "a database-wide entry replaces the built-in default"},
+	{"database-wide-restore-execute-to-public", owner + `ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC; ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner GRANT SELECT ON TABLES TO scn_reader;`,
+		owner + `ALTER DEFAULT PRIVILEGES FOR ROLE scn_owner GRANT SELECT ON TABLES TO scn_reader;`, ok, "the role is still in the project, so its other entry goes back to the built-in default"},
 	// The function goes for good, together with what calls it.
 	{"function-removed-with-its-column-default",
 		`CREATE FUNCTION next_code() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE t(a int DEFAULT next_code());`,

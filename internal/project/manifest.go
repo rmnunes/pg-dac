@@ -183,7 +183,7 @@ func Parse(data []byte) (*Manifest, error) {
 
 // ObjectTypes are the kinds compare.excludeObjectTypes / --exclude-object-type accept.
 var ObjectTypes = []string{"table", "view", "matview", "sequence", "function", "enum", "domain", "compositeType",
-	"collation", "schema", "extension", "index", "constraint", "trigger", "policy", "privilege", "comment"}
+	"collation", "schema", "extension", "index", "constraint", "trigger", "policy", "privilege", "defaultPrivilege", "comment"}
 
 // ValidObjectType reports whether t names an excludable object type.
 func ValidObjectType(t string) bool {

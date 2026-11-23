@@ -12,7 +12,10 @@ type Head struct {
 	Verb string
 	// Kind is the object kind the statement names: TABLE, VIEW, MATERIALIZED
 	// VIEW, FUNCTION, PROCEDURE, SEQUENCE, TYPE, DOMAIN, SCHEMA, EXTENSION,
-	// COLLATION, INDEX, TRIGGER, POLICY, CONSTRAINT, COLUMN; "" when unknown.
+	// COLLATION, INDEX, TRIGGER, POLICY, CONSTRAINT, COLUMN, DEFAULT
+	// PRIVILEGES; "" when unknown. For DEFAULT PRIVILEGES, Name is the schema
+	// ("" for database-wide), the role and the object type (tables, sequences,
+	// functions, types, schemas).
 	Kind string
 	// Name is the object's qualified name parts, unquoted. For a sub-object
 	// (INDEX, TRIGGER, POLICY, CONSTRAINT, COLUMN) it is the sub-object's own
@@ -211,6 +214,8 @@ func parseCreate(h *Head, toks []token, i int) {
 
 func parseAlter(h *Head, toks []token, i int) {
 	switch {
+	case is(toks, i, "DEFAULT", "PRIVILEGES"):
+		parseDefaultPrivileges(h, toks, i+2)
 	case is(toks, i, "TABLE"):
 		h.Kind = "TABLE"
 		i++
@@ -339,4 +344,54 @@ func parseGrant(h *Head, toks []token, i int) {
 	case "TABLE", "SEQUENCE", "FUNCTION", "PROCEDURE", "SCHEMA", "TYPE", "DOMAIN", "MATERIALIZED VIEW":
 		h.Declarative = len(h.Name) > 0
 	}
+}
+
+// defaultPrivilegeTypes maps the object-type word of ALTER DEFAULT PRIVILEGES
+// to the name pg-dac models it under (ROUTINES is FUNCTIONS).
+var defaultPrivilegeTypes = map[string]string{
+	"TABLES": "tables", "SEQUENCES": "sequences", "FUNCTIONS": "functions", "ROUTINES": "functions",
+	"TYPES": "types", "SCHEMAS": "schemas",
+}
+
+// parseDefaultPrivileges reads ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN
+// SCHEMA s] GRANT|REVOKE ... ON <type> .... It is declarative — one entry pg-dac
+// renders itself — when it names exactly one role and at most one schema;
+// without FOR ROLE the entry belongs to whoever runs it, and a list of roles
+// or schemas sets several entries at once.
+func parseDefaultPrivileges(h *Head, toks []token, i int) {
+	h.Kind = "DEFAULT PRIVILEGES"
+	single := true
+	role, schema := "", ""
+	if is(toks, i, "FOR", "ROLE") || is(toks, i, "FOR", "USER") {
+		i += 2
+		if i < len(toks) {
+			role = toks[i].text
+			i++
+		}
+		if i < len(toks) && toks[i].punct && toks[i].text == "," {
+			single = false
+		}
+	}
+	for i < len(toks) && !is(toks, i, "IN", "SCHEMA") && !is(toks, i, "GRANT") && !is(toks, i, "REVOKE") {
+		i++
+	}
+	if is(toks, i, "IN", "SCHEMA") {
+		i += 2
+		if i < len(toks) {
+			schema = toks[i].text
+			i++
+		}
+		if i < len(toks) && toks[i].punct && toks[i].text == "," {
+			single = false
+		}
+	}
+	objtype := ""
+	for ; i < len(toks); i++ {
+		if is(toks, i, "ON") && i+1 < len(toks) {
+			objtype = defaultPrivilegeTypes[upper(toks[i+1])]
+			break
+		}
+	}
+	h.Name = []string{schema, role, objtype}
+	h.Declarative = single && role != "" && objtype != ""
 }

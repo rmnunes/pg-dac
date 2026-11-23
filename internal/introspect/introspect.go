@@ -87,9 +87,6 @@ WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p') AND NOT c.relispartition`},
 SELECT count(*) FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = ANY($1) AND c.relkind IN ('v', 'm') AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL`},
-		{"default privileges (ALTER DEFAULT PRIVILEGES) scoped to these schemas", `
-SELECT count(*) FROM pg_catalog.pg_default_acl d JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace
-WHERE n.nspname = ANY($1)`},
 	}
 
 	var warns []string
@@ -172,6 +169,9 @@ func Introspect(ctx context.Context, q Querier, opts Options) (*model.Database, 
 		return nil, err
 	}
 	if err := readFunctionUsers(ctx, q, names, tables, mviews); err != nil {
+		return nil, err
+	}
+	if db.DefaultPrivileges, err = readDefaultPrivileges(ctx, q, names); err != nil {
 		return nil, err
 	}
 	if err := readPrivileges(ctx, q, names, byName, tables, views, mviews); err != nil {

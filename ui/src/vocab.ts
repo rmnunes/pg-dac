@@ -124,10 +124,20 @@ export function kindLabel(k: ChangeKind): string {
 
 export const kindGlyph = (k: ChangeKind): string => (k === "add" ? "+" : k === "drop" ? "−" : "~");
 
-export const objectName = (c: { schema?: string; name: string }): string => (c.schema ? c.schema + "." : "") + c.name;
+export const objectName = (c: { objectType?: string; schema?: string; name: string }): string => {
+  if (c.objectType === "defaultPrivilege") {
+    // The engine names an ALTER DEFAULT PRIVILEGES entry "<role>/<object type>".
+    const [role, type] = c.name.split("/");
+    return `${role} on ${type}` + (c.schema ? ` in ${c.schema}` : "");
+  }
+  return (c.schema ? c.schema + "." : "") + c.name;
+};
+
+/** How an object type reads in lists: the engine's own word, except a default-privilege entry. */
+export const typeLabel = (t: string): string => (t === "defaultPrivilege" ? "default privileges" : t);
 
 /** "table sales.regions": the object's type and qualified name, as every list and notice says it. */
-export const objectLabel = (c: { objectType: string; schema?: string; name: string }): string => `${c.objectType} ${objectName(c)}`;
+export const objectLabel = (c: { objectType: string; schema?: string; name: string }): string => `${typeLabel(c.objectType)} ${objectName(c)}`;
 
 /**
  * A change whose definition text is identical on both sides: the object is

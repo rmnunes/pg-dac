@@ -77,7 +77,7 @@ pg-dac publish --from "$DSN" --to "app-$GIT_SHA.pgdac" --require-key "$KEY" --va
 
 ## 6. Known limits to plan around
 
-See STATUS.md "Known limitations": ownership and default privileges are not modeled; partitions
+See STATUS.md "Known limitations": ownership is not modeled; partitions
 are created and dropped but not attached/detached; renames in a database → project update appear
 as drop + add (record them in the refactorlog); imperative project files cannot be updated in
 place; `.pgdac`/`.pgbac` are compressed, not encrypted.

@@ -72,7 +72,11 @@ exact; `--ignore-comments` also ignores comments); privileges (`GRANT`/`REVOKE` 
 tables, views, sequences, routines, types and columns) are part of the model and compared
 (`--ignore-privileges`; revokes of privileges the source does not hold follow the drop policy,
 like SSDT's `DropPermissionsNotInSource`), and an object pg-dac drops and recreates always gets
-its privileges back; a table whose declared column order differs from the target's is reported
+its privileges back; default privileges (`ALTER DEFAULT PRIVILEGES FOR ROLE … [IN SCHEMA …]`) are
+compared the same way: those scoped to the source's schemas, and the database-wide ones of roles
+the source has database-wide entries for, so another application's entries in a shared database
+are left alone (an entry the source declares is applied in full, including a `REVOKE … FROM
+PUBLIC`; the role an entry is for must be in `roles:`); a table whose declared column order differs from the target's is reported
 (`--column-order warn`), ignored (`ignore`), or rebuilt in the declared order with its rows
 copied (`rebuild`, the SSDT table rebuild — heavy and explicit). A project sets its defaults in
 `pgdac.yaml`:

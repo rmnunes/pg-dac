@@ -247,6 +247,9 @@ func presentKeys(db *model.Database) map[string]model.ObjKind {
 			m[f.Ref().Key()] = model.KindFunction
 		}
 	}
+	for _, dp := range db.DefaultPrivileges {
+		m[dp.Ref().Key()] = model.KindDefaultPrivilege
+	}
 	return m
 }
 
@@ -270,6 +273,21 @@ func objectCanonical(db *model.Database, ref model.ObjRef) (string, error) {
 		return renderFromNothing(
 			&model.Database{TargetVersion: db.TargetVersion},
 			&model.Database{TargetVersion: db.TargetVersion, Schemas: []*model.Schema{bare}})
+	case model.KindDefaultPrivilege:
+		// The entry as the statements that set it up from nothing.
+		for _, dp := range db.DefaultPrivileges {
+			if dp.Ref().Key() != ref.Key() {
+				continue
+			}
+			var schemas []*model.Schema
+			if dp.Schema != "" {
+				schemas = []*model.Schema{{Name: dp.Schema}}
+			}
+			return renderFromNothing(
+				&model.Database{TargetVersion: db.TargetVersion, Schemas: schemas},
+				&model.Database{TargetVersion: db.TargetVersion, Schemas: schemas, DefaultPrivileges: []*model.DefaultPrivilege{dp}})
+		}
+		return "", nil
 	case model.KindExtension:
 		for _, e := range db.Extensions {
 			if e.Name != ref.Name {

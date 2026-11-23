@@ -55,6 +55,12 @@ type Options struct {
 	// back. Revokes of privileges the source does not hold follow
 	// DropObjectsNotInSource (DropPermissionsNotInSource).
 	IgnorePrivileges bool
+	// DefaultPrivilegeRoles are roles whose database-wide default privileges
+	// (ALTER DEFAULT PRIVILEGES without IN SCHEMA) the comparison manages even
+	// where the desired state has no entry for them — the project's owner and
+	// roles. Database-wide entries of roles neither named here nor present in
+	// the desired state are left alone.
+	DefaultPrivilegeRoles []string
 	// ColumnOrder is the policy for a declared column order the target does not
 	// have: "" / "warn" reports it, "ignore" is silent, "rebuild" rebuilds the
 	// table in the declared order (see diff.Options).
@@ -63,7 +69,7 @@ type Options struct {
 	// ExcludeObjectTypes leaves whole kinds of object out of the comparison
 	// (SSDT's ExcludeObjectTypes): table, view, matview, sequence, function,
 	// enum, domain, compositeType, collation, schema, extension, index,
-	// constraint, trigger, policy, privilege, comment. An excluded kind is
+	// constraint, trigger, policy, privilege, defaultPrivilege, comment. An excluded kind is
 	// neither created, altered nor dropped; everything else proceeds.
 	ExcludeObjectTypes []string
 
@@ -123,6 +129,7 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	cs = filterByObject(cs, opts)
 	cs = expandDependents(cs, from, to)
 	cs = expandPrivileges(cs, from, to, opts)
+	cs = expandDefaultPrivileges(cs, from, to, opts)
 	cs = filterByType(cs, opts) // privileges and dependents added above obey the exclusion too
 
 	p := plan.Build(cs)

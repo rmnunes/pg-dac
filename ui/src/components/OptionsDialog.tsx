@@ -117,7 +117,7 @@ export function OptionsDialog({ initialTab, onClose }: { initialTab: OptionsTab;
           <Field
             id={id("exclude")}
             label="Exclude object types"
-            desc="Left out of the comparison, comma-separated: table, view, matview, sequence, function, enum, domain, compositeType, collation, schema, extension, index, constraint, trigger, policy, privilege, comment."
+            desc="Left out of the comparison, comma-separated: table, view, matview, sequence, function, enum, domain, compositeType, collation, schema, extension, index, constraint, trigger, policy, privilege, defaultPrivilege, comment."
           >
             <input id={id("exclude")} value={s.excludeTypes} onChange={(e) => setOptions({ excludeTypes: e.target.value })} placeholder="trigger, comment" aria-describedby={id("exclude-desc")} />
           </Field>

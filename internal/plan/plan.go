@@ -97,6 +97,11 @@ func opPriority(op diff.Op) int {
 		return 101
 	case diff.OpCreateSchema:
 		return 110
+	case diff.OpRevokeDefault, diff.OpGrantDefault:
+		// Right after the schemas they may be scoped to and before every object
+		// is created, so what the migration creates gets them, as on the target
+		// afterwards.
+		return 112
 	case diff.OpCreateCollation:
 		// Before tables/indexes, which may reference the collation.
 		return 118

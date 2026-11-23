@@ -6,7 +6,7 @@ import type { ObjectChange } from "../ipc/types";
 
 import { READ_ONLY_OPTIONS, THEME } from "../monaco-setup";
 import { useStore } from "../state/store";
-import { firstLine, hazardInfo, kindGlyph, kindLabel, objectLabel, objectName, plural, sortedHazards, unchangedText } from "../vocab";
+import { firstLine, hazardInfo, kindGlyph, kindLabel, objectLabel, objectName, plural, sortedHazards, typeLabel, unchangedText } from "../vocab";
 import { TabList, panelId, tabId, type TabSpec } from "./TabList";
 
 type Tab = "diff" | "sql" | "risks" | "deps";
@@ -96,7 +96,7 @@ export function DetailPane() {
       ) : (
         <TabList base={uid} tabs={tabs} active={tab} onSelect={setTab} label="Detail views" className="tabs">
           <span className="detail-title">
-            <b className={"kind-" + change.changeKind}>{kindLabel(change.changeKind)}</b> {change.objectType} <b>{objectName(change)}</b>
+            <b className={"kind-" + change.changeKind}>{kindLabel(change.changeKind)}</b> {typeLabel(change.objectType)} <b>{objectName(change)}</b>
           </span>
         </TabList>
       )}

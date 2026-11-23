@@ -121,6 +121,14 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 				}
 			}
 
+		case diff.OpGrantDefault, diff.OpRevokeDefault:
+			// An entry IN SCHEMA needs its schema.
+			if op.DefaultPriv != nil && op.DefaultPriv.Schema != "" {
+				if c, ok := createByObj[model.ObjRef{Kind: model.KindSchema, Name: op.DefaultPriv.Schema}.Key()]; ok {
+					add(c, i)
+				}
+			}
+
 		case diff.OpSetTriggerEnabled:
 			if c, ok := createByObj[op.Owner.Key()]; ok {
 				add(c, i)

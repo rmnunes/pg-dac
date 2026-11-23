@@ -23,6 +23,8 @@ const ExtensionsSection = "extensions"
 //	extensions/<name>.sql
 //	schema/<schema>/schema.sql
 //	schema/<schema>/<tables|views|materialized_views|sequences|types|collations|functions|procedures>/<name>.sql
+//	schema/<schema>/default_privileges/<role>.<type>.sql
+//	schema/default_privileges.<role>.<type>.sql   (database-wide default privileges)
 //
 // Paths are slash-separated and relative to the project root. The build
 // applies statements with deferred retry, so no file order is needed and a
@@ -92,6 +94,15 @@ func projectPath(o model.ObjRef, routine string) string {
 		return ExtensionsSection + "/" + fileSafe(o.Name) + ".sql"
 	case model.KindSchema:
 		return ExtractSection + "/" + fileSafe(o.Name) + "/schema.sql"
+	case model.KindDefaultPrivilege:
+		// Name is "<role>/<type>". A database-wide entry lives at the root of the
+		// schema folder, where no schema's own folder can collide with it.
+		role, typ, _ := strings.Cut(o.Name, "/")
+		file := fileSafe(role) + "." + fileSafe(typ) + ".sql"
+		if o.Schema == "" {
+			return ExtractSection + "/default_privileges." + file
+		}
+		return ExtractSection + "/" + fileSafe(o.Schema) + "/default_privileges/" + file
 	}
 	folder := map[model.ObjKind]string{
 		model.KindTable:     "tables",

@@ -22,8 +22,9 @@ import (
 // and view row types, a view that calls a function that depends on another
 // view, views on views, a trigger, RLS, a materialized view, an expression
 // index, a custom collation, an extension type, a cross-schema sequence
-// default, and a constraint kept NOT VALID. Each of these broke the from-empty
-// bootstrap at some point; this fixture is the regression gate for all of them.
+// default, a constraint kept NOT VALID, and default privileges (schema-scoped and
+// database-wide). Each of these broke the from-empty bootstrap at some point;
+// this fixture is the regression gate for all of them.
 const bootstrapSQL = `
 CREATE SCHEMA app;
 CREATE SCHEMA ref;
@@ -93,6 +94,12 @@ CREATE TRIGGER open_orders_ins INSTEAD OF INSERT ON app.open_orders FOR EACH ROW
 COMMENT ON COLUMN app.users.email IS 'login';
 COMMENT ON INDEX app.orders_user_idx IS 'fk lookup';
 COMMENT ON CONSTRAINT users_email_uniq ON app.users IS 'unique email';
+-- default privileges, scoped to a schema and database-wide
+DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='bs_owner') THEN CREATE ROLE bs_owner NOLOGIN; END IF; END$$;
+DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='bs_reader') THEN CREATE ROLE bs_reader NOLOGIN; END IF; END$$;
+ALTER DEFAULT PRIVILEGES FOR ROLE bs_owner IN SCHEMA app GRANT SELECT ON TABLES TO bs_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE bs_owner IN SCHEMA app GRANT USAGE, SELECT ON SEQUENCES TO bs_reader WITH GRANT OPTION;
+ALTER DEFAULT PRIVILEGES FOR ROLE bs_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 `
 
 // bootstrapFixture is bootstrapSQL for the PostgreSQL major the scratch
@@ -164,6 +171,23 @@ func TestExtractProjectRoundTrip(t *testing.T) {
 	files := engine.ProjectFiles(to)
 	if len(files) < 10 {
 		t.Fatalf("expected many extracted files, got %d", len(files))
+	}
+	// Default privileges get their own files: per schema, and at the root of
+	// the schema folder for database-wide ones.
+	want := map[string]bool{
+		"schema/app/default_privileges/bs_owner.tables.sql":    false,
+		"schema/app/default_privileges/bs_owner.sequences.sql": false,
+		"schema/default_privileges.bs_owner.functions.sql":     false,
+	}
+	for _, f := range files {
+		if _, ok := want[f.Path]; ok {
+			want[f.Path] = true
+		}
+	}
+	for path, found := range want {
+		if !found {
+			t.Errorf("extracted project lacks %s", path)
+		}
 	}
 	dir := t.TempDir()
 	for _, f := range files {

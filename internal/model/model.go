@@ -39,11 +39,16 @@ type Database struct {
 	// cluster); the engine uses them to refuse a GRANT to a role the target does
 	// not have before PostgreSQL fails half-way through a publish.
 	Roles []string `json:"roles,omitempty"`
+
+	// DefaultPrivileges are the ALTER DEFAULT PRIVILEGES entries in scope:
+	// those IN SCHEMA of a modeled schema, and the database-wide ones.
+	DefaultPrivileges []*DefaultPrivilege `json:"defaultPrivileges,omitempty"`
 }
 
 // Grantees returns the sorted, distinct role names that hold a privilege on any
-// object of the model (PUBLIC excluded). A scratch database must have them
-// before the model's SQL can be applied to it.
+// object of the model, or that a default-privilege entry is for or grants to
+// (PUBLIC excluded). A scratch database must have them before the model's SQL
+// can be applied to it.
 func (d *Database) Grantees() []string {
 	seen := map[string]bool{}
 	collect := func(gs []Grant) {
@@ -82,6 +87,10 @@ func (d *Database) Grantees() []string {
 		for _, c := range s.Composites {
 			collect(c.Grants)
 		}
+	}
+	for _, dp := range d.DefaultPrivileges {
+		seen[dp.Role] = true
+		collect(dp.Grants)
 	}
 	out := make([]string, 0, len(seen))
 	for r := range seen {
@@ -279,6 +288,7 @@ func (d *Database) Sort() {
 	for _, s := range d.Schemas {
 		s.sort()
 	}
+	sortDefaultPrivileges(d.DefaultPrivileges)
 }
 
 func (s *Schema) sort() {

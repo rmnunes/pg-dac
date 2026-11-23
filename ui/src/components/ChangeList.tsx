@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import { useStore } from "../state/store";
 import { isExcluded } from "../state/plan";
 import type { ChangeKind, ObjectChange } from "../ipc/types";
-import { KIND_ORDER, gatedTitle, hazardInfo, kindGlyph, kindLabel, objectLabel, objectName, plural, sortedHazards, topHazard, unchangedText } from "../vocab";
+import { KIND_ORDER, gatedTitle, hazardInfo, kindGlyph, kindLabel, objectLabel, objectName, plural, sortedHazards, topHazard, typeLabel, unchangedText } from "../vocab";
 
 // The change list, grouped by action (Drop / Change / Add) like SSDT's results
 // grid. Groups collapse, carry a tri-state include checkbox, and the whole list
@@ -46,7 +46,7 @@ export function ChangeList() {
     const q = filter.trim().toLowerCase();
     const shown = all.filter((c) => {
       if (risksOnly && !(c.hazards?.length ?? 0)) return false;
-      if (q && !(objectName(c).toLowerCase().includes(q) || c.objectType.toLowerCase().includes(q))) return false;
+      if (q && !(objectName(c).toLowerCase().includes(q) || typeLabel(c.objectType).toLowerCase().includes(q))) return false;
       return true;
     });
     const out: Row[] = [];
@@ -297,7 +297,7 @@ export function ChangeList() {
                   <span className={"glyph kind-" + c.changeKind} aria-hidden="true">
                     {kindGlyph(c.changeKind)}
                   </span>
-                  <span className="otype">{c.objectType}</span>
+                  <span className="otype">{typeLabel(c.objectType)}</span>
                   <span className="oname">
                     {c.schema ? <span className="schema">{c.schema}.</span> : null}
                     {c.name}
