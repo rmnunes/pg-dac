@@ -32,7 +32,7 @@ body:
     id: version
     attributes:
       label: pg-dac version
-      description: "`pg-dac version`, or the version in the desktop app's status bar."
+      description: "`pg-dac --version`, or the version in the desktop app's status bar."
     validations:
       required: true
   - type: input

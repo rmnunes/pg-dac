@@ -3,7 +3,7 @@
 Thanks for helping. Bug reports, ideas, documentation fixes and code are all welcome.
 
 - **Found a bug?** Open an issue with the bug template. The most useful reports include the
-  pg-dac version (`pg-dac version`), the PostgreSQL version of both sides, and a minimal schema
+  pg-dac version (`pg-dac --version`), the PostgreSQL version of both sides, and a minimal schema
   that reproduces it. Leave out real connection strings and data.
 - **Want a feature?** Open an issue to discuss it before writing a large change, so the design
   can be agreed first.
