@@ -55,8 +55,11 @@ go test -p 1 -timeout 40m ./...      # everything, with embedded PostgreSQL
 ```
 
 The full suite runs real PostgreSQL instances one package at a time (`-p 1`); the engine's
-scenario matrix alone takes several minutes, hence the longer timeout. Set `PG_DAC_TEST_DSN` to a
-disposable database to also run the self-idempotence check against it.
+scenario matrix alone takes several minutes, hence the longer timeout. Scratch servers run
+PostgreSQL 16 unless a test names a version; `PGDAC_SCRATCH_MAJOR=13 go test -p 1 ./...` runs the
+suite on another major, which is what CI does for every supported one (11 to 18). A fixture or
+scenario that needs a newer major than 11 must say so and be skipped below it, not fail. Set
+`PG_DAC_TEST_DSN` to a disposable database to also run the self-idempotence check against it.
 
 For the desktop app, from `ui/`:
 

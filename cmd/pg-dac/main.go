@@ -15,7 +15,7 @@ import (
 )
 
 // version is overridable at build time with -ldflags "-X main.version=...".
-var version = "0.9.4-dev"
+var version = "0.9.5-dev"
 
 func main() {
 	// run() owns all deferred cleanup; main only translates the result into an

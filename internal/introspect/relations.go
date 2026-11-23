@@ -12,9 +12,10 @@ import (
 func tkey(schema, name string) string { return schema + "\x1f" + name }
 
 // readCollations introspects user-defined collations. The ICU locale column was
-// renamed across versions (colliculocale in PG15/16, colllocale in PG17+), and
-// the ICU rules column (collicurules) arrived in PG16 — so the query is built
-// against the running major version.
+// renamed across versions (colliculocale in PG15/16, colllocale in PG17+), the
+// ICU rules column (collicurules) arrived in PG16 and nondeterministic
+// collations (collisdeterministic) in PG12 — so the query is built against the
+// running major version.
 func readCollations(ctx context.Context, q Querier, schemas []string, major int, byName map[string]*model.Schema) error {
 	localeCol := "NULL::text"
 	if major >= 17 {
@@ -26,12 +27,16 @@ func readCollations(ctx context.Context, q Querier, schemas []string, major int,
 	if major >= 16 {
 		rulesCol = "c.collicurules"
 	}
+	deterministicCol := "true"
+	if major >= 12 {
+		deterministicCol = "c.collisdeterministic"
+	}
 	sql := fmt.Sprintf(`
 SELECT n.nspname, c.collname,
        pg_catalog.pg_get_userbyid(c.collowner),
        c.collprovider::text,
        c.collcollate, c.collctype, %s, %s,
-       c.collisdeterministic,
+       %s,
        COALESCE(pg_catalog.obj_description(c.oid, 'pg_collation'), '')
 FROM pg_catalog.pg_collation c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace
@@ -41,7 +46,7 @@ WHERE n.nspname = ANY($1)
         SELECT 1 FROM pg_catalog.pg_depend d
         WHERE d.classid = 'pg_catalog.pg_collation'::regclass
           AND d.objid = c.oid AND d.deptype IN ('e', 'i'))
-ORDER BY n.nspname, c.collname`, localeCol, rulesCol)
+ORDER BY n.nspname, c.collname`, localeCol, rulesCol, deterministicCol)
 
 	rows, err := q.Query(ctx, sql, schemas)
 	if err != nil {
@@ -334,13 +339,18 @@ func readColumns(ctx context.Context, q Querier, schemas []string, major int, ta
 	if major >= 14 {
 		compressionCol = "a.attcompression::text"
 	}
+	// Generated columns arrived in PG12.
+	generatedCol := "''::text"
+	if major >= 12 {
+		generatedCol = "a.attgenerated::text"
+	}
 	rows, err := q.Query(ctx, fmt.Sprintf(`
 SELECT n.nspname, c.relname, a.attnum, a.attname,
        pg_catalog.format_type(a.atttypid, a.atttypmod),
        a.attnotnull,
        COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), ''),
        a.attidentity::text,
-       a.attgenerated::text,
+       %s,
        CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation
             THEN (SELECT pg_catalog.quote_ident(cn.nspname) || '.' || pg_catalog.quote_ident(col.collname)
                   FROM pg_catalog.pg_collation col
@@ -357,7 +367,7 @@ JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.
 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
 LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
 WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND n.nspname = ANY($1)
-ORDER BY n.nspname, c.relname, a.attnum`, compressionCol), schemas)
+ORDER BY n.nspname, c.relname, a.attnum`, generatedCol, compressionCol), schemas)
 	if err != nil {
 		return fmt.Errorf("read columns: %w", err)
 	}

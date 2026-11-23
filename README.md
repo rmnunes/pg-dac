@@ -108,8 +108,9 @@ untick what you don't want to deploy.
 
 ## Status
 
-pg-dac is a release candidate on the way to 1.0. It has been exercised against PostgreSQL 16 and
-18 and a production schema of about 900 objects. Ownership, default privileges and roles are not
+pg-dac is a release candidate on the way to 1.0. CI runs the full test suite on every supported
+PostgreSQL major, 11 to 18, and it has been exercised against a production schema of about 900
+objects. Ownership, default privileges and roles are not
 managed (roles must exist), and a few changes PostgreSQL cannot make in place, such as removing an
 enum value, are reported instead of applied. See [STATUS.md](STATUS.md) for the details.
 

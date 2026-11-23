@@ -43,6 +43,23 @@ type scenario struct {
 // on the shared scratch server, so creation is guarded.
 const role = `DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='scn_reader') THEN CREATE ROLE scn_reader NOLOGIN; END IF; END$$;`
 
+// scenarioMinMajor holds the scenarios that need a newer PostgreSQL than the
+// oldest supported one; on an older scratch major (CI runs every supported
+// major) they are skipped, not passed.
+var scenarioMinMajor = map[string]int{
+	"generated-column-expr-change": 12, // generated columns arrived in PG12
+	"generated-to-plain":           12,
+	"plain-to-generated":           12,
+}
+
+// skipBelowMinMajor skips a scenario the scratch major cannot express.
+func skipBelowMinMajor(t *testing.T, name string) {
+	t.Helper()
+	if min := scenarioMinMajor[name]; devdb.DefaultMajor() < min {
+		t.Skipf("needs PostgreSQL %d (scratch major is %d)", min, devdb.DefaultMajor())
+	}
+}
+
 var scenarios = []scenario{
 	// --- fixed in WP1 ---
 	{"serial-table-from-empty", ``, `CREATE TABLE t(id serial primary key, name text);`, ok, ""},
@@ -169,6 +186,7 @@ func TestScenarios(t *testing.T) {
 	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.name, func(t *testing.T) {
+			skipBelowMinMajor(t, sc.name)
 			from, _, err := build.FromSQL(ctx, sc.from, build.Options{})
 			if err != nil {
 				t.Fatalf("build from: %v", err)
@@ -267,6 +285,7 @@ func TestScenariosOffline(t *testing.T) {
 			t.Fatalf("no scenario %q", name)
 		}
 		t.Run(sc.name, func(t *testing.T) {
+			skipBelowMinMajor(t, sc.name)
 			from, _, err := build.FromSQL(ctx, sc.from, build.Options{})
 			if err != nil {
 				t.Fatalf("build from: %v", err)

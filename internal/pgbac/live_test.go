@@ -51,12 +51,13 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if _, err := a.Exec(ctx, `
 DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='bac_reader') THEN CREATE ROLE bac_reader NOLOGIN; END IF; END$$;
 CREATE SCHEMA app;
-CREATE TABLE app.parent(id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL, upper_name text GENERATED ALWAYS AS (upper(name)) STORED);
+`+parentTable()+`
 CREATE TABLE app.child(id serial PRIMARY KEY, parent_id int NOT NULL REFERENCES app.parent(id), note text, "Odd Col" int DEFAULT 7);
 CREATE FUNCTION app.tf() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN NEW.note := coalesce(NEW.note, '') || '!'; RETURN NEW; END$$;
 CREATE TRIGGER tg BEFORE INSERT ON app.child FOR EACH ROW EXECUTE FUNCTION app.tf();
 INSERT INTO app.parent(name) VALUES ('a'), ('b'), ('c, with "quotes"
 and a newline');
+`+parentFill()+`
 INSERT INTO app.child(parent_id, note) VALUES (1, 'x'), (2, NULL), (3, 'z');
 CREATE MATERIALIZED VIEW app.mv AS SELECT count(*) AS n FROM app.child WITH DATA;
 GRANT SELECT ON app.parent TO bac_reader;
@@ -72,9 +73,15 @@ CREATE TABLE app.empty_table(id int PRIMARY KEY);`); err != nil {
 	if man.Kind != pgbac.Kind || man.Data == nil || len(man.Data.Tables) != 3 {
 		t.Fatalf("manifest: kind=%q tables=%v", man.Kind, man.Data)
 	}
+	// A generated column is computed on import, so its values are not copied;
+	// before PG12 upper_name is a plain column and is.
+	wantColumns := "id,name"
+	if devdb.DefaultMajor() < 12 {
+		wantColumns = "id,name,upper_name"
+	}
 	for _, td := range man.Data.Tables {
-		if td.Name == "parent" && (td.Rows != 3 || strings.Join(td.Columns, ",") != "id,name") {
-			t.Errorf("parent data: %+v (generated column must be excluded)", td)
+		if td.Name == "parent" && (td.Rows != 3 || strings.Join(td.Columns, ",") != wantColumns) {
+			t.Errorf("parent data: %+v (want columns %s)", td, wantColumns)
 		}
 	}
 
@@ -195,4 +202,22 @@ func corruptDataPart(t *testing.T, from, to string) {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// parentTable and parentFill give app.parent a generated column where the
+// scratch major has them (PG12+): export must leave it out of the copied
+// rows. Before PG12 upper_name is a plain column the fixture fills, so the
+// rows still round-trip.
+func parentTable() string {
+	if devdb.DefaultMajor() >= 12 {
+		return `CREATE TABLE app.parent(id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL, upper_name text GENERATED ALWAYS AS (upper(name)) STORED);`
+	}
+	return `CREATE TABLE app.parent(id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL, upper_name text);`
+}
+
+func parentFill() string {
+	if devdb.DefaultMajor() >= 12 {
+		return ""
+	}
+	return `UPDATE app.parent SET upper_name = upper(name);`
 }

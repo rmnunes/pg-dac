@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,19 @@ COMMENT ON INDEX app.orders_user_idx IS 'fk lookup';
 COMMENT ON CONSTRAINT users_email_uniq ON app.users IS 'unique email';
 `
 
+// bootstrapFixture is bootstrapSQL for the PostgreSQL major the scratch
+// servers run (CI runs the suite on every supported major): before PG12 a
+// collation cannot be nondeterministic, so app.ci is a plain ICU collation
+// there and the rest of the schema is the same.
+func bootstrapFixture() string {
+	if devdb.DefaultMajor() >= 12 {
+		return bootstrapSQL
+	}
+	return strings.Replace(bootstrapSQL,
+		"CREATE COLLATION app.ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);",
+		"CREATE COLLATION app.ci (provider = icu, locale = 'und-u-ks-level2');", 1)
+}
+
 // TestBootstrap_FromEmpty is the end-to-end gate for "publish an artifact into
 // an empty database": build the model from SQL, generate the from-empty
 // migration, replay it on a fresh scratch database, re-introspect, and require
@@ -113,7 +127,7 @@ func TestBootstrap_FromEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build empty baseline: %v", err)
 	}
-	fixtures := map[string]string{"comprehensive": bootstrapSQL}
+	fixtures := map[string]string{"comprehensive": bootstrapFixture()}
 	if demo, _, err := build.FromDir(ctx, filepath.Join("..", "..", "testdata", "demo-project"), build.Options{}); err == nil {
 		checkBootstrap(ctx, t, "demo-project", empty, demo)
 	} else {
@@ -143,7 +157,7 @@ func TestExtractProjectRoundTrip(t *testing.T) {
 	ctx, cleanup := devdb.WithShared(ctx)
 	defer cleanup()
 
-	to, _, err := build.FromSQL(ctx, bootstrapSQL, build.Options{})
+	to, _, err := build.FromSQL(ctx, bootstrapFixture(), build.Options{})
 	if err != nil {
 		t.Fatalf("build fixture: %v", err)
 	}

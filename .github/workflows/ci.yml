@@ -28,9 +28,19 @@ jobs:
         run: go test -short ./...
 
   integration:
-    name: Integration (embedded PostgreSQL)
+    # The full suite once per supported PostgreSQL major: every scratch server
+    # a test starts without naming a version runs this major
+    # (PGDAC_SCRATCH_MAJOR), so the bootstrap gate, the scenario matrix,
+    # publish, drift and the round trips run against each one.
+    name: Integration (PostgreSQL ${{ matrix.pg }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [11, 12, 13, 14, 15, 16, 17, 18]
+    env:
+      PGDAC_SCRATCH_MAJOR: ${{ matrix.pg }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -41,7 +51,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.embedded-postgres-go
-          key: embedded-postgres-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: embedded-postgres-${{ runner.os }}-pg${{ matrix.pg }}-${{ hashFiles('go.sum') }}
       - name: Full suite (bootstrap gate, scenario matrix, extract round trip, refactorlog, drift)
         run: go test -p 1 -timeout 30m ./...
 

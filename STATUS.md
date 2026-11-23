@@ -1,6 +1,6 @@
 # pg-dac — Project Status & Roadmap
 
-_Last updated: 2026-11-23 — **v0.9.4**, the release candidate on the way to 1.0. Work packages WP0–WP8 are complete; see [Roadmap](#roadmap) for what comes next._
+_Last updated: 2026-11-23 — **v0.9.5**, the release candidate on the way to 1.0. Work packages WP0–WP8 are complete; see [Roadmap](#roadmap) for what comes next._
 
 A **DACPAC / SqlPackage-equivalent for PostgreSQL**: compare schemas, generate dependency-ordered
 lock-safe migration scripts, package a schema into a portable **signed `.pgdac` artifact**, and
@@ -44,6 +44,7 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | Version control / CI / release | ✅ Public at github.com/rmnunes/pg-dac; GitHub Actions CI (Go on Linux/Windows/macOS, embedded-PG integration, GUI type-check/lint/tests/build, cargo fmt + clippy) and tag-driven release (CLI for five targets + signed Tauri installers, published as a draft); versions pinned and test-enforced, Tauri JS packages checked against their Rust crates (WP4, 0.9.2) |
 | Saved passwords | ✅ A saved connection string's password is kept in the OS credential store (Windows Credential Manager, macOS Keychain, Secret Service), never in `profiles.json` or the frontend; older files are migrated on first read (0.9.4) |
 | Baselines without passwords | ✅ A publish whose desired state is a database records only the server it names in the target's `pgdac.baseline`; older rows are redacted when read (0.9.4) |
+| PostgreSQL versions | ✅ CI runs the full suite (bootstrap gate, scenario matrix, publish, drift, round trips) once per supported major, 11 to 18 (`PGDAC_SCRATCH_MAJOR`); scenarios a major cannot express are skipped there, not passed (0.9.5) |
 | Text encoding | ✅ The scratch cluster is UTF-8 with the C locale on every platform and every session is UTF-8, so non-ASCII definitions compare the same on Windows and Linux; `PGCLIENTENCODING` is ignored (0.9.3) |
 | Target platform check | ✅ A desired state normalized for a newer PostgreSQL major than the target runs is refused, like SqlPackage's platform check (`--target-major`, `--allow-incompatible-platform`); version-gated statements follow the target's version (0.9.3) |
 
@@ -337,20 +338,19 @@ Roles are cluster objects: never created or dropped, only required to exist.
 | 0.9.2 (2026-11-21) | First public release from GitHub, signed with the updater key |
 | 0.9.3 (2026-11-23) | UTF-8 scratch server and sessions; target platform check (both found by the first project using pg-dac) |
 | 0.9.4 (2026-11-23) | Saved passwords in the OS credential store; no passwords in baselines |
+| 0.9.5 (2026-11-23) | CI runs the full suite on PostgreSQL 11 to 18; PostgreSQL 11 targets read again; PostgreSQL 17 domains with NOT NULL |
 
 **1.0** is cut when the first production pilot completes without a correctness change
 (CHANGELOG.md). Problems the pilot finds are fixed with a regression test and a patch release.
 
 **Next, in order:**
 
-1. **PostgreSQL version matrix in CI.** 11 to 18 are supported targets, but the integration tests
-   run almost entirely on 16, with a few on 18. Run the publish and convergence gates on every supported major.
-2. **Dependents of a recreated function.** Policies, column defaults, CHECK constraints and index
+1. **Dependents of a recreated function.** Policies, column defaults, CHECK constraints and index
    expressions that call a function being dropped and recreated are not recreated around it
    today; PostgreSQL's error surfaces at publish time.
-3. **Ownership and default privileges** (`ALTER DEFAULT PRIVILEGES`), modeled and compared
+2. **Ownership and default privileges** (`ALTER DEFAULT PRIVILEGES`), modeled and compared
    instead of warned about; they matter most on Azure.
-4. **Code signing** for the Windows and macOS installers (needs a signing certificate and an Apple
+3. **Code signing** for the Windows and macOS installers (needs a signing certificate and an Apple
    developer account), and **tauri-action v1** in the release workflow (it renames the macOS
    update bundle and changes the URLs in `latest.json`, so it is tested on its own).
 

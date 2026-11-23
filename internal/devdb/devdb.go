@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,10 +52,10 @@ type Config struct {
 }
 
 // Start launches a scratch PostgreSQL instance on a free local port. A zero
-// Config means PostgreSQL 16 and a 60 s start timeout.
+// Config means the default major (DefaultMajor) and a 60 s start timeout.
 func Start(ctx context.Context, cfg Config) (*Instance, error) {
 	if cfg.Version == "" {
-		cfg.Version = embeddedpostgres.V16
+		cfg.Version = VersionFor(0)
 	}
 	if cfg.StartTimeout == 0 {
 		cfg.StartTimeout = 60 * time.Second
@@ -226,11 +227,29 @@ func (s *Scratch) Release() error {
 	return s.release()
 }
 
+// DefaultMajor is the scratch PostgreSQL major used when nothing names one:
+// no --target-major, no targetMajor in the project, no model to take it
+// from. It is 16, or PGDAC_SCRATCH_MAJOR when that names a supported major
+// (CI runs the whole suite once per supported major this way).
+func DefaultMajor() int {
+	if v, err := strconv.Atoi(os.Getenv("PGDAC_SCRATCH_MAJOR")); err == nil && v >= MinMajor && v <= MaxMajor {
+		return v
+	}
+	return 16
+}
+
+// MinMajor and MaxMajor bound the PostgreSQL majors pg-dac supports as targets
+// and can run as a scratch server.
+const MinMajor, MaxMajor = 11, 18
+
 // VersionFor maps a PostgreSQL major version to the matching embedded-postgres
 // version, so a scratch database used for normalization/validation matches the
 // schema's target major (mismatched majors can introduce false diffs and reject
-// newer syntax). Unknown/0 falls back to a stable default.
+// newer syntax). 0 or an unsupported major means DefaultMajor.
 func VersionFor(major int) embeddedpostgres.PostgresVersion {
+	if major < MinMajor || major > MaxMajor {
+		major = DefaultMajor()
+	}
 	switch major {
 	case 18:
 		return embeddedpostgres.V18

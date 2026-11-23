@@ -414,7 +414,10 @@ ORDER BY n.nspname, t.typname`, schemas)
 
 // readDomains introspects domain types. PostgreSQL has no pg_get_domaindef, so
 // the CREATE DOMAIN statement is reconstructed from the catalog (base type,
-// collation, default, NOT NULL, named CHECK constraints in name order).
+// collation, default, NOT NULL, named CHECK constraints in name order). NOT NULL
+// comes from typnotnull on every version: PG17 also records it in
+// pg_constraint (contype 'n', named <domain>_not_null), and reading it from
+// both declared it twice.
 func readDomains(ctx context.Context, q Querier, schemas []string, byName map[string]*model.Schema) error {
 	rows, err := q.Query(ctx, `
 SELECT n.nspname, t.typname,
@@ -429,7 +432,7 @@ SELECT n.nspname, t.typname,
                   WHERE col.oid = t.typcollation)
             ELSE '' END,
        COALESCE((SELECT string_agg('CONSTRAINT ' || pg_catalog.quote_ident(con.conname) || ' ' || pg_catalog.pg_get_constraintdef(con.oid), ' ' ORDER BY con.conname)
-                 FROM pg_catalog.pg_constraint con WHERE con.contypid = t.oid), ''),
+                 FROM pg_catalog.pg_constraint con WHERE con.contypid = t.oid AND con.contype <> 'n'), ''),
        COALESCE(pg_catalog.obj_description(t.oid, 'pg_type'), '')
 FROM pg_catalog.pg_type t
 JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -107,5 +108,29 @@ func TestScratchIsUTF8(t *testing.T) {
 	var text string
 	if err := conn.QueryRow(ctx, `SELECT 'em — dash → ✓'`).Scan(&text); err != nil || text != "em — dash → ✓" {
 		t.Fatalf("round trip = %q, %v", text, err)
+	}
+}
+
+// PGDAC_SCRATCH_MAJOR picks the scratch major when nothing names one (CI runs
+// the suite once per supported major); an explicit major always wins, and a
+// value outside the supported range is ignored.
+func TestDefaultMajor(t *testing.T) {
+	cases := map[string]embeddedpostgres.PostgresVersion{
+		"":    embeddedpostgres.V16,
+		"13":  embeddedpostgres.V13,
+		"11":  embeddedpostgres.V11,
+		"18":  embeddedpostgres.V18,
+		"10":  embeddedpostgres.V16,
+		"99":  embeddedpostgres.V16,
+		"abc": embeddedpostgres.V16,
+	}
+	for env, want := range cases {
+		t.Setenv("PGDAC_SCRATCH_MAJOR", env)
+		if got := VersionFor(0); got != want {
+			t.Errorf("PGDAC_SCRATCH_MAJOR=%q: VersionFor(0) = %s, want %s", env, got, want)
+		}
+		if got := VersionFor(17); got != embeddedpostgres.V17 {
+			t.Errorf("PGDAC_SCRATCH_MAJOR=%q: an explicit 17 became %s", env, got)
+		}
 	}
 }

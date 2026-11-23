@@ -4,6 +4,20 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## 0.9.5 — 2026-11-23
+
+### Fixed
+- **PostgreSQL 11 targets could not be read at all.** Introspection asked for two catalog columns
+  that arrived in PostgreSQL 12 (`pg_collation.collisdeterministic`, `pg_attribute.attgenerated`);
+  both are now read only where they exist.
+- **PostgreSQL 17 domains with NOT NULL.** PostgreSQL 17 also records a domain's NOT NULL as a
+  named constraint, so the rebuilt `CREATE DOMAIN` declared it twice and failed. It is read once.
+
+### Added
+- **CI tests every supported PostgreSQL major.** The integration suite runs once per major, 11 to
+  18. `PGDAC_SCRATCH_MAJOR` chooses the scratch server's major when nothing else names one; tests
+  and scenarios that need a newer major than 11 are skipped below it.
+
 ## 0.9.4 — 2026-11-23
 
 ### Security
