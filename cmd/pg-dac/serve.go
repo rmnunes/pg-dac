@@ -231,20 +231,22 @@ func (d *daemon) health(w http.ResponseWriter, _ *http.Request) {
 // compareReq is the request body for /plan, /replan, /script, /publish and
 // /drift.
 type compareReq struct {
-	From                   string   `json:"from"`
-	To                     string   `json:"to"`
-	OpID                   string   `json:"opId"`
-	Schemas                []string `json:"schemas"`
-	TargetMajor            int      `json:"targetMajor"`
-	Online                 *bool    `json:"online"`
-	AllowHazards           bool     `json:"allowHazards"`
-	DropObjectsNotInSource bool     `json:"dropObjectsNotInSource"`
-	IncludeIDs             []string `json:"includeIds"`
-	ExcludeIDs             []string `json:"excludeIds"`
-	RequireKey             string   `json:"requireKey"`
-	SkipDeployScripts      bool     `json:"skipDeployScripts"`
-	AllowDrift             bool     `json:"allowDrift"`
-	RecordBaseline         *bool    `json:"recordBaseline"` // default true
+	From         string   `json:"from"`
+	To           string   `json:"to"`
+	OpID         string   `json:"opId"`
+	Schemas      []string `json:"schemas"`
+	TargetMajor  int      `json:"targetMajor"`
+	Online       *bool    `json:"online"`
+	AllowHazards bool     `json:"allowHazards"`
+	// AllowIncompatiblePlatform: see engine.Options.
+	AllowIncompatiblePlatform bool     `json:"allowIncompatiblePlatform,omitempty"`
+	DropObjectsNotInSource    bool     `json:"dropObjectsNotInSource"`
+	IncludeIDs                []string `json:"includeIds"`
+	ExcludeIDs                []string `json:"excludeIds"`
+	RequireKey                string   `json:"requireKey"`
+	SkipDeployScripts         bool     `json:"skipDeployScripts"`
+	AllowDrift                bool     `json:"allowDrift"`
+	RecordBaseline            *bool    `json:"recordBaseline"` // default true
 	// Comparison semantics; nil / "" defers to the desired-state project's
 	// pgdac.yaml compare: block.
 	IgnorePrivileges   *bool             `json:"ignorePrivileges"`
@@ -293,6 +295,7 @@ func (r compareReq) engineOptions(dplan *deploy.Plan) engine.Options {
 		opts.Online = *r.Online
 	}
 	opts.AllowHazards = r.AllowHazards
+	opts.AllowIncompatiblePlatform = r.AllowIncompatiblePlatform
 	deploy.ApplyDropPolicy(&opts, dplan.DropPolicy)
 	deploy.ApplyCompareSettings(&opts, dplan.Compare)
 	if r.DropObjectsNotInSource {

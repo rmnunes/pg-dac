@@ -129,3 +129,17 @@ func TestDescribe(t *testing.T) {
 		}
 	}
 }
+
+// Sessions are UTF-8 whatever the environment asks for: pgx reads
+// PGCLIENTENCODING, and a non-UTF-8 session would make the server misread
+// the UTF-8 text pgx sends.
+func TestParseConfigForcesUTF8(t *testing.T) {
+	t.Setenv("PGCLIENTENCODING", "WIN1252")
+	cfg, err := ParseConfig("postgres://app@localhost:5432/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RuntimeParams["client_encoding"]; got != "UTF8" {
+		t.Fatalf("client_encoding = %q, want UTF8", got)
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/devdb"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
@@ -238,7 +239,7 @@ func rematerialize(ctx context.Context, db *model.Database, opts Options) (*mode
 		return nil, err
 	}
 	defer sc.Release()
-	conn, err := pgx.Connect(ctx, sc.ConnString)
+	conn, err := dbconn.Connect(ctx, sc.ConnString)
 	if err != nil {
 		return nil, fmt.Errorf("connect to scratch db: %w", err)
 	}
@@ -252,7 +253,9 @@ func rematerialize(ctx context.Context, db *model.Database, opts Options) (*mode
 	if err != nil {
 		return nil, err
 	}
-	mig, err := engine.Compare(baseline, db, engine.Options{Online: false, AllowHazards: true, DropObjectsNotInSource: true})
+	// Materializing in a scratch server of another major is the point here
+	// (normalizing for --target-major), not a deployment to check.
+	mig, err := engine.Compare(baseline, db, engine.Options{Online: false, AllowHazards: true, DropObjectsNotInSource: true, AllowIncompatiblePlatform: true})
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +274,7 @@ func fromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 	}
 	defer sc.Release()
 
-	conn, err := pgx.Connect(ctx, sc.ConnString)
+	conn, err := dbconn.Connect(ctx, sc.ConnString)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect to scratch db: %w", err)
 	}

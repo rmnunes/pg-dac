@@ -144,7 +144,7 @@ func Check(ctx context.Context, conn *pgx.Conn, current *model.Database) (*Repor
 	// Explain the drift as "what happened to the baseline": every drop allowed,
 	// no online rewrites, so the report is a plain description.
 	changes, err := engine.Compare(rep.Baseline.Model, current, engine.Options{
-		Online: false, AllowHazards: true,
+		Online: false, AllowHazards: true, AllowIncompatiblePlatform: true,
 		DropObjectsNotInSource: true, DropConstraintsNotInSource: true, DropIndexesNotInSource: true,
 	})
 	if err != nil {

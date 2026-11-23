@@ -53,9 +53,10 @@ statements under drop policy `all`, and adds new grantees to `roles:`. An object
 migration-style statements (`ALTER TABLE … ADD COLUMN`, `DO` blocks) cannot be rewritten by any
 tool and is refused with directions.
 
-Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (version-gated strategies, and
-the PostgreSQL major used to normalize a project source; a project's `pgdac.yaml` `targetMajor`
-is the default), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source` (overrides the
+Useful flags: `--schema <name>` (repeatable), `--target-major <n>` (the PostgreSQL major used to
+normalize a project source, default the project's `pgdac.yaml` `targetMajor`, and to choose
+version-gated statements, default the target database's version), `--allow-incompatible-platform`
+(see below), `--no-online`, `--allow-hazards`, `--drop-objects-not-in-source` (overrides the
 project's `dropPolicy`), `--exclude-object-type <kind>` (repeatable; SSDT's ExcludeObjectTypes),
 `--validate`, `--dry-run`, `--lock-timeout`, `--statement-timeout`, `--single-transaction`
 (consecutive transactional statements run in one transaction; CONCURRENTLY statements split it,
@@ -84,6 +85,17 @@ compare:
   ignoreComments: false
 roles: [app_readers]      # roles the project's GRANTs name but does not create
 ```
+
+**A newer project than the database.** A project normalized for a newer PostgreSQL major than the
+target runs is refused, as SqlPackage refuses a project whose target platform is newer than the
+server: the model would describe what the newer server makes of the project (an extension at the
+version that server ships, defaults and syntax it introduced), and the migration would ask the
+target for things it does not have. For a project that targets 18 and a local database on 16,
+compare for 16 with `--target-major 16`, or pass `--allow-incompatible-platform` to compare anyway.
+
+**Text encoding.** pg-dac's sessions are always UTF-8, and its scratch server is created as UTF-8
+with the C locale on every platform, so non-ASCII text in definitions and comments compares the
+same on Windows and Linux. `PGCLIENTENCODING` is meant for `psql` and is ignored by pg-dac.
 
 Roles are cluster objects pg-dac never creates. A GRANT to a role the target lacks is a blocking
 `MISSING_ROLE` hazard; when that is the only blocker and the project has pre-deploy scripts,

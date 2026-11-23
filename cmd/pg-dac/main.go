@@ -15,7 +15,7 @@ import (
 )
 
 // version is overridable at build time with -ldflags "-X main.version=...".
-var version = "0.9.2-dev"
+var version = "0.9.3-dev"
 
 func main() {
 	// run() owns all deferred cleanup; main only translates the result into an
@@ -25,6 +25,7 @@ func main() {
 }
 
 func run() int {
+	ignoreClientEncoding()
 	root := &cobra.Command{
 		Use:           "pg-dac",
 		Short:         "DACPAC-style schema compare and migration for PostgreSQL",
@@ -56,4 +57,14 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// ignoreClientEncoding drops PGCLIENTENCODING from pg-dac's environment.
+// Every session pg-dac opens is UTF-8 (dbconn.ParseConfig), and pg-dac never
+// runs psql, so the variable has nothing to do here; but the embedded
+// PostgreSQL library's readiness check connects through lib/pq, which refuses
+// any client encoding other than UTF-8, so a value such as WIN1252 (set for
+// psql in a Windows console) made every scratch server "time out" on start.
+func ignoreClientEncoding() {
+	_ = os.Unsetenv("PGCLIENTENCODING")
 }

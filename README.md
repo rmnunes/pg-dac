@@ -95,6 +95,7 @@ untick what you don't want to deploy.
 | Update project from database | `pg-dac publish --from ./schema --to <database>` |
 | Refactor log, pre/post-deploy scripts, SQLCMD variables | `refactorlog.json`, `preDeploy`/`postDeploy`, `--var name=value` |
 | `/p:BlockOnPossibleDataLoss`, `/p:DropObjectsNotInSource`, `/p:ExcludeObjectTypes` | On by default, `--drop-objects-not-in-source`, `--exclude-object-type` |
+| Target platform, `/p:AllowIncompatiblePlatform` | `targetMajor` in `pgdac.yaml` or `--target-major`, `--allow-incompatible-platform` |
 
 ## Documentation
 

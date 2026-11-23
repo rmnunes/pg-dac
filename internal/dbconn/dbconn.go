@@ -31,9 +31,13 @@ var backoff = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, ti
 // The error names the server (never the password) and the attempt count when
 // more than one was made.
 func Connect(ctx context.Context, connString string) (*pgx.Conn, error) {
+	cfg, err := ParseConfig(connString)
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", Describe(connString), err)
+	}
 	var last error
 	for attempt := 0; ; attempt++ {
-		conn, err := pgx.Connect(ctx, connString)
+		conn, err := pgx.ConnectConfig(ctx, cfg.Copy())
 		if err == nil {
 			return conn, nil
 		}
@@ -50,6 +54,22 @@ func Connect(ctx context.Context, connString string) (*pgx.Conn, error) {
 		case <-time.After(backoff[attempt]):
 		}
 	}
+}
+
+// ParseConfig parses a connection string into the configuration every pg-dac
+// connection uses. The session always runs with client_encoding UTF8: pgx
+// sends and expects UTF-8 text, and without the setting the session takes the
+// client encoding from PGCLIENTENCODING or, failing that, the database's own
+// encoding (WIN1252 for a database created on Windows), so the server would
+// misread or reject every non-ASCII character in a definition, a comment or a
+// deploy script.
+func ParseConfig(connString string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(connString)
+	if err != nil {
+		return nil, err
+	}
+	cfg.RuntimeParams["client_encoding"] = "UTF8"
+	return cfg, nil
 }
 
 // Transient reports whether a connect error is worth retrying: a DNS failure;

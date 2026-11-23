@@ -4,7 +4,21 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
-## Unreleased
+## 0.9.3 — 2026-11-23
+
+### Fixed
+- **Non-ASCII text on Windows.** The scratch PostgreSQL pg-dac normalizes and validates in took
+  its encoding from the OS (WIN1252 on Windows) and pg-dac's sessions took theirs from the
+  environment, so with `PGCLIENTENCODING=UTF8` a project with an arrow or other character outside
+  WIN1252 failed to build, and with any other non-UTF-8 value the scratch server never came up
+  (reported as a start timeout). The scratch cluster is now UTF-8 with the C locale on every
+  platform, every pg-dac session is UTF-8, and `PGCLIENTENCODING` (meant for `psql`) is ignored.
+- **A project newer than the database.** Comparing a project normalized for a newer PostgreSQL
+  major than the target runs planned what the newer server makes of the project, such as
+  `ALTER EXTENSION btree_gist UPDATE TO '1.8'` against PostgreSQL 16. Like SqlPackage's platform
+  check, that comparison is now refused with the fix (`--target-major <target's major>`), and
+  `--allow-incompatible-platform` compares anyway. Version-gated statements now follow the target
+  database's version instead of the project's, since they run on the target.
 
 ### Changed
 - The README is now a short introduction with screenshots of the desktop app, install steps and a

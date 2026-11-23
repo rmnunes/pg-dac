@@ -21,15 +21,16 @@ import (
 
 // commonFlags holds the flags shared by the comparison verbs.
 type commonFlags struct {
-	from        string
-	to          string
-	schemas     []string
-	targetMajor int
-	noOnline    bool
-	allowHaz    bool
-	dropObjects bool
-	doValidate  bool
-	requireKey  string
+	from              string
+	to                string
+	schemas           []string
+	targetMajor       int
+	noOnline          bool
+	allowHaz          bool
+	allowIncompatible bool
+	dropObjects       bool
+	doValidate        bool
+	requireKey        string
 
 	// Comparison semantics; the desired-state project's compare: block is the
 	// default, an explicitly given flag wins (see options()).
@@ -54,6 +55,7 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 	fl.StringVar(&f.to, "to", "", "desired state to converge the target toward (connection string)")
 	fl.StringArrayVar(&f.schemas, "schema", nil, "restrict to these schemas (repeatable; default: all user schemas)")
 	fl.IntVar(&f.targetMajor, "target-major", 0, "target PostgreSQL major version for version-gated strategies and for normalizing project sources (0 = derive)")
+	fl.BoolVar(&f.allowIncompatible, "allow-incompatible-platform", false, "compare even when the desired state was normalized for a newer PostgreSQL major than the target runs (SqlPackage's AllowIncompatiblePlatform)")
 	fl.BoolVar(&f.noOnline, "no-online", false, "disable lock-safe rewrites (CONCURRENTLY, NOT VALID/VALIDATE)")
 	fl.BoolVar(&f.allowHaz, "allow-hazards", false, "include data-loss operations (otherwise they are blocked)")
 	fl.BoolVar(&f.dropObjects, "drop-objects-not-in-source", false, "drop objects present in the target but not in the source")
@@ -204,6 +206,7 @@ func (f *commonFlags) options() engine.Options {
 	opts.TargetMajor = f.targetMajor
 	opts.Online = !f.noOnline
 	opts.AllowHazards = f.allowHaz
+	opts.AllowIncompatiblePlatform = f.allowIncompatible
 	// The source's pgdac.yaml dropPolicy and compare: block are the defaults; an
 	// explicitly given flag wins.
 	deploy.ApplyDropPolicy(&opts, f.dropPolicy)

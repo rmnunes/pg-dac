@@ -31,7 +31,7 @@ import (
 	"time"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
-	"github.com/jackc/pgx/v5"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 )
 
 const dbUser, dbPass = "postgres", "postgres"
@@ -77,6 +77,13 @@ func Start(ctx context.Context, cfg Config) (*Instance, error) {
 		RuntimePath(filepath.Join(baseDir, "runtime")).
 		DataPath(filepath.Join(baseDir, "data")).
 		BinariesPath(binariesCache(cfg.Version)).
+		// initdb otherwise takes the encoding from the OS locale: WIN1252 on a
+		// Windows machine set to English, so text outside that code page could
+		// not be stored and the server would disagree with Linux on what a
+		// definition contains. The C locale is the same on every platform and
+		// keeps the cluster independent of the machine's language settings.
+		Encoding("UTF8").
+		Locale("C").
 		StartTimeout(cfg.StartTimeout).
 		Logger(nil))
 
@@ -183,7 +190,7 @@ func (i *Instance) newScratchDB(ctx context.Context) (*Scratch, error) {
 	n := atomic.AddInt64(&i.counter, 1)
 	name := fmt.Sprintf("pgdac_scratch_%d", n)
 
-	admin, err := pgx.Connect(ctx, i.ConnString())
+	admin, err := dbconn.Connect(ctx, i.ConnString())
 	if err != nil {
 		return nil, fmt.Errorf("connect to scratch server: %w", err)
 	}
@@ -194,7 +201,7 @@ func (i *Instance) newScratchDB(ctx context.Context) (*Scratch, error) {
 
 	connStr := i.connStringFor(name)
 	release := func() error {
-		c, err := pgx.Connect(context.Background(), i.ConnString())
+		c, err := dbconn.Connect(context.Background(), i.ConnString())
 		if err != nil {
 			return err
 		}

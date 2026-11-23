@@ -20,8 +20,15 @@ import (
 // source, and block data loss unless explicitly allowed.
 type Options struct {
 	// TargetMajor overrides the PostgreSQL major version used for version-gated
-	// strategies. 0 means "derive from the target/desired model".
+	// strategies. 0 means the target's own version (the from model's), else the
+	// desired model's.
 	TargetMajor int
+	// AllowIncompatiblePlatform compares a desired state normalized for a newer
+	// PostgreSQL major than the target runs (SqlPackage's
+	// AllowIncompatiblePlatform). Without it Compare refuses: the desired model
+	// then reflects the newer server, and its extension versions, options and
+	// syntax may not exist on the target.
+	AllowIncompatiblePlatform bool
 	// Online enables lock-safe rewrites (CONCURRENTLY, NOT VALID/VALIDATE, ...).
 	Online bool
 
@@ -104,6 +111,10 @@ func (r *Result) Empty() bool { return len(r.Statements) == 0 }
 // Compare computes the migration to transform the "from" model (current/target)
 // into the "to" model (desired).
 func Compare(from, to *model.Database, opts Options) (*Result, error) {
+	platformWarning, err := checkPlatform(from, to, opts)
+	if err != nil {
+		return nil, err
+	}
 	cs := diff.DiffWith(from, to, opts.diffOptions())
 	diffWarnings := cs.Warnings
 	cs = filterByType(cs, opts)
@@ -116,12 +127,14 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 
 	p := plan.Build(cs)
 
+	// The statements run on the target, so its version decides which
+	// version-gated forms they may use.
 	major := opts.TargetMajor
 	if major == 0 {
-		major = to.MajorVersion()
+		major = from.MajorVersion()
 	}
 	if major == 0 {
-		major = from.MajorVersion()
+		major = to.MajorVersion()
 	}
 
 	groups, err := sqlgen.GenerateGrouped(p, sqlgen.Options{TargetMajor: major, Online: opts.Online})
@@ -133,6 +146,9 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 		stmts = append(stmts, g.Statements...)
 	}
 	res := &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, from: from, to: to, online: opts.Online}
+	if platformWarning != "" {
+		res.Warnings = append(res.Warnings, platformWarning)
+	}
 	res.Warnings = append(res.Warnings, diffWarnings...)
 	if len(p.Cyclic) > 0 {
 		names := make([]string, 0, len(p.Cyclic))
@@ -144,6 +160,30 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 			len(p.Cyclic), strings.Join(names, "; ")))
 	}
 	return res, nil
+}
+
+// checkPlatform refuses a desired state normalized for a newer PostgreSQL
+// major than the target runs, as SqlPackage refuses a project whose target
+// platform is newer than the server. The desired model then describes what
+// the newer server makes of the source (an extension at the version that
+// server ships, defaults and syntax it introduced), and a migration toward it
+// asks the target for things it does not have. Normalizing the source for the
+// target's major (--target-major) compares like for like. With
+// AllowIncompatiblePlatform the comparison proceeds and the mismatch becomes
+// a warning. Models whose version is unknown are not checked.
+func checkPlatform(from, to *model.Database, opts Options) (string, error) {
+	target, desired := from.MajorVersion(), to.MajorVersion()
+	if target == 0 || desired <= target {
+		return "", nil
+	}
+	if opts.AllowIncompatiblePlatform {
+		return fmt.Sprintf("the desired state was normalized for PostgreSQL %d but the target runs PostgreSQL %d "+
+			"(--allow-incompatible-platform): statements that need PostgreSQL %d will fail", desired, target, desired), nil
+	}
+	return "", fmt.Errorf("the desired state was normalized for PostgreSQL %d but the target runs PostgreSQL %d, "+
+		"so it may ask for extension versions, options or syntax PostgreSQL %d does not have. "+
+		"Compare for the target's version with --target-major %d (Target PostgreSQL version in the app's Options), "+
+		"or pass --allow-incompatible-platform to compare anyway", desired, target, target, target)
 }
 
 // diffOptions maps the comparison options onto the differ's.

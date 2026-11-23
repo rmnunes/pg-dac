@@ -87,7 +87,9 @@ func Import(ctx context.Context, connString, archivePath string, opts ImportOpti
 	}
 
 	// The from-empty plan, split into pre-data and post-data like pg_dump.
-	res, err := engine.Compare(target, o.Model, engine.Options{Online: false, AllowHazards: true})
+	// Import has no --target-major to offer: an archive is restored as taken,
+	// and a server that lacks something it needs fails on that statement.
+	res, err := engine.Compare(target, o.Model, engine.Options{Online: false, AllowHazards: true, AllowIncompatiblePlatform: true})
 	if err != nil {
 		return nil, err
 	}

@@ -9,7 +9,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/devdb"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
@@ -43,7 +43,7 @@ func Plan(ctx context.Context, from, to *model.Database, opts engine.Options) (*
 	}
 	defer sc.Release()
 
-	conn, err := pgx.Connect(ctx, sc.ConnString)
+	conn, err := dbconn.Connect(ctx, sc.ConnString)
 	if err != nil {
 		return nil, fmt.Errorf("connect to scratch db: %w", err)
 	}
@@ -59,7 +59,7 @@ func Plan(ctx context.Context, from, to *model.Database, opts engine.Options) (*
 
 	// Materialize the source schema (non-online, drops on, so the scratch db ends
 	// up exactly matching "from").
-	matOpts := engine.Options{Online: false, AllowHazards: true, DropObjectsNotInSource: true}
+	matOpts := engine.Options{Online: false, AllowHazards: true, DropObjectsNotInSource: true, AllowIncompatiblePlatform: true}
 	mat, err := engine.Compare(baseline, from, matOpts)
 	if err != nil {
 		return nil, fmt.Errorf("plan source materialization: %w", err)
