@@ -389,12 +389,12 @@ func (d *daemon) compare(ctx context.Context, req compareReq, phase func(step, m
 		return nil, err
 	}
 	dplan := deployPlan(req.To)
-	phase("read-from", "Reading Target…", map[string]any{"source": req.From})
+	phase("read-from", "Reading Target…", map[string]any{"source": dbconn.Redact(req.From)})
 	from, fw, err := source.Resolve(ctx, req.From, srcOpts)
 	if err != nil {
 		return nil, fmt.Errorf("from: %w", err)
 	}
-	phase("read-to", "Reading Source…", map[string]any{"source": req.To, "fromCount": objectCount(from)})
+	phase("read-to", "Reading Source…", map[string]any{"source": dbconn.Redact(req.To), "fromCount": objectCount(from)})
 	to, tw, err := source.Resolve(ctx, req.To, srcOpts)
 	if err != nil {
 		return nil, fmt.Errorf("to: %w", err)

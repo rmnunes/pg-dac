@@ -4,6 +4,7 @@
 //! Tauri events.
 
 mod daemon;
+mod dsn;
 mod profiles;
 mod update;
 
@@ -54,16 +55,34 @@ const COMPARE_EVENT: &str = "pgdac://compare";
 // pool; `stream` hands an SSE subscription to it and forwards each event to the
 // frontend as it arrives. The window stays fully interactive while work runs.
 
+/// Replaces a `profile:<id>` reference in a request's `from` / `to` with the
+/// saved source's full value, password included (see profiles::resolve). The
+/// frontend never holds a saved password; it exists only in the request that
+/// goes to the daemon.
+fn resolve_sources(app: &AppHandle, body: &mut Value) -> Result<(), String> {
+    for side in ["from", "to"] {
+        if let Some(Value::String(spec)) = body.get(side) {
+            let resolved = profiles::resolve(app, spec)?;
+            body[side] = Value::String(resolved);
+        }
+    }
+    Ok(())
+}
+
 /// POST `body` to a JSON endpoint of the daemon and return its response.
 async fn proxy(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: &'static str,
-    body: Value,
+    mut body: Value,
 ) -> Result<Value, String> {
     let daemon = state.daemon();
-    tauri::async_runtime::spawn_blocking(move || daemon.post(path, body))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_sources(&app, &mut body)?;
+        daemon.post(path, body)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// POST `body` to an SSE endpoint of the daemon and re-emit every server-sent
@@ -74,10 +93,17 @@ fn stream(
     state: State<'_, AppState>,
     path: &'static str,
     channel: &'static str,
-    body: Value,
+    mut body: Value,
 ) {
     let daemon = state.daemon();
     tauri::async_runtime::spawn_blocking(move || {
+        if let Err(message) = resolve_sources(&app, &mut body) {
+            let _ = app.emit(
+                channel,
+                serde_json::json!({ "event": "error", "data": { "message": message } }),
+            );
+            return;
+        }
         daemon.stream(path, body, |event, data| {
             let _ = app.emit(channel, serde_json::json!({ "event": event, "data": data }));
         });
@@ -101,20 +127,32 @@ fn pgdac_plan(app: AppHandle, state: State<'_, AppState>, req: Value) {
 
 /// Cancel an in-flight compare (or any op) by the opId the frontend assigned it.
 #[tauri::command]
-async fn pgdac_cancel(state: State<'_, AppState>, op_id: String) -> Result<Value, String> {
-    proxy(state, "/cancel", serde_json::json!({ "opId": op_id })).await
+async fn pgdac_cancel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    op_id: String,
+) -> Result<Value, String> {
+    proxy(app, state, "/cancel", serde_json::json!({ "opId": op_id })).await
 }
 
 /// Re-plans the last comparison with a changed selection or options, without
 /// reading the sources again (see the daemon's /replan).
 #[tauri::command]
-async fn pgdac_replan(state: State<'_, AppState>, req: Value) -> Result<Value, String> {
-    proxy(state, "/replan", req).await
+async fn pgdac_replan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    req: Value,
+) -> Result<Value, String> {
+    proxy(app, state, "/replan", req).await
 }
 
 #[tauri::command]
-async fn pgdac_script(state: State<'_, AppState>, req: Value) -> Result<Value, String> {
-    proxy(state, "/script", req).await
+async fn pgdac_script(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    req: Value,
+) -> Result<Value, String> {
+    proxy(app, state, "/script", req).await
 }
 
 /// Starts a publish and streams progress over PUBLISH_EVENT
@@ -124,9 +162,9 @@ fn pgdac_publish(app: AppHandle, state: State<'_, AppState>, req: Value) {
     stream(app, state, "/publish", PUBLISH_EVENT, req);
 }
 
-/// Saved source profiles (connection strings / projects / artifacts). The list
-/// returned to the frontend includes the raw value; the UI is responsible for
-/// only ever displaying a masked label, never the secret.
+/// Saved source profiles (connection strings / projects / artifacts). A saved
+/// connection string's password is kept in the OS credential store and is not
+/// part of what the frontend receives (see profiles.rs).
 #[tauri::command]
 async fn profiles_list(app: AppHandle) -> Result<Vec<Profile>, String> {
     profiles::load(&app)

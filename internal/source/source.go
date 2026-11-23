@@ -85,13 +85,7 @@ func extOf(s string) string {
 
 // IsConnString reports whether spec looks like a PostgreSQL connection string
 // (as opposed to a project directory, a .sql file, or an artifact).
-func IsConnString(s string) bool {
-	return strings.HasPrefix(s, "postgres://") ||
-		strings.HasPrefix(s, "postgresql://") ||
-		strings.Contains(s, "host=") ||
-		strings.Contains(s, "dbname=") ||
-		strings.Contains(s, "user=")
-}
+func IsConnString(s string) bool { return dbconn.LooksLikeConnString(s) }
 
 // resolveArtifact opens a .pgdac, rejecting it if its integrity check fails, if
 // it is signed but the signature does not verify, or if its signer is not the

@@ -95,6 +95,23 @@ func Transient(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// LooksLikeConnString reports whether a source spec is a connection string
+// rather than a path (the same test source.IsConnString applies).
+func LooksLikeConnString(s string) bool {
+	return strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://") ||
+		strings.Contains(s, "host=") || strings.Contains(s, "dbname=") || strings.Contains(s, "user=")
+}
+
+// Redact is how a source spec may be shown, logged or stored: a connection
+// string becomes the server it names (Describe), which carries no password;
+// a path or an artifact name is returned as it is.
+func Redact(spec string) string {
+	if LooksLikeConnString(spec) {
+		return Describe(spec)
+	}
+	return spec
+}
+
 // Describe names the server a connection string points at — host, port and
 // database — without its password, for error messages.
 func Describe(connString string) string {

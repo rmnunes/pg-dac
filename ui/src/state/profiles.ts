@@ -1,8 +1,9 @@
 // Helpers for saved source profiles. A "spec" (the value held in store.from /
 // store.to) is either a raw typed value (a path or a connection string) or a
-// `profile:<id>` reference. These helpers resolve a spec to the real value to
-// send to the daemon, and — crucially — derive a *masked* label for display so a
-// connection string's password is never rendered.
+// `profile:<id>` reference, which is sent as it is: the Rust layer resolves it,
+// adding a saved password from the OS credential store. These helpers derive a
+// *masked* label for display so a typed connection string's password is never
+// rendered either.
 
 import type { Profile, ProfileKind } from "../ipc/types";
 
@@ -64,12 +65,6 @@ export const defaultName = (value: string): string => maskValue(inferKind(value)
 
 const find = (spec: string, profiles: Profile[]): Profile | undefined =>
   isProfileRef(spec) ? profiles.find((p) => p.id === spec.slice(PREFIX.length)) : undefined;
-
-// resolveSpec → the actual value to send to the daemon (the real DSN / path).
-export function resolveSpec(spec: string, profiles: Profile[]): string {
-  const p = find(spec, profiles);
-  return p ? p.value : spec;
-}
 
 // displaySpec → a safe label to render. Never returns a secret: profile refs use
 // the saved name + masked value; a raw typed DSN is masked to "database @ host".

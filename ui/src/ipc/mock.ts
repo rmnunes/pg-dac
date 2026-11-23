@@ -46,6 +46,38 @@ function loadProfiles(): Profile[] {
   }
   return seedProfiles;
 }
+// The desktop app keeps a saved password in the OS credential store and the
+// rest of the connection string in profiles.json (src-tauri/src/profiles.rs).
+// The mock keeps passwords in memory only, so browser storage never holds one.
+const secrets = new Map<string, string>();
+
+// withoutPassword mirrors src-tauri/src/dsn.rs for the two connection string
+// forms: null when there is no password to remove.
+export function withoutPassword(dsn: string): string | null {
+  const s = dsn.trim();
+  const scheme = /^postgres(?:ql)?:\/\//i.exec(s);
+  if (scheme) {
+    const rest = s.slice(scheme[0].length);
+    const end = rest.search(/[/?#]/);
+    let authority = end < 0 ? rest : rest.slice(0, end);
+    let tail = end < 0 ? "" : rest.slice(end);
+    let changed = false;
+    const at = authority.lastIndexOf("@");
+    const colon = at < 0 ? -1 : authority.slice(0, at).indexOf(":");
+    if (colon >= 0) {
+      authority = authority.slice(0, colon) + authority.slice(at);
+      changed = true;
+    }
+    tail = tail.replace(/([?&])password=[^&#]*(&?)/gi, (_m, sep: string, amp: string) => {
+      changed = true;
+      return amp ? sep : "";
+    });
+    return changed ? scheme[0] + authority + tail : null;
+  }
+  const out = s.replace(/(^|\s)password\s*=\s*('(?:\\.|[^'\\])*'|\S+)/g, "");
+  return out === s ? null : out.trim().replace(/\s+/g, " ");
+}
+
 function saveProfiles(p: Profile[]) {
   try {
     localStorage.setItem(PROFILES_KEY, JSON.stringify(p));
@@ -99,12 +131,21 @@ export const mock = {
 
   listProfiles: async (): Promise<Profile[]> => loadProfiles(),
   addProfile: async (profile: Profile): Promise<Profile[]> => {
-    const p = [...loadProfiles(), { ...profile, id: profile.id || `p-${Date.now()}` }];
+    const id = profile.id || `p-${Date.now()}`;
+    const stripped = profile.kind === "db" ? withoutPassword(profile.value) : null;
+    const saved: Profile = { id, name: profile.name, kind: profile.kind, value: stripped ?? profile.value };
+    if (stripped !== null) {
+      secrets.set(id, profile.value);
+      saved.hasSecret = true;
+    }
+    // Saving the same source again replaces it, as in the desktop app.
+    const p = [...loadProfiles().filter((x) => x.id !== id && !(x.kind === saved.kind && x.value === saved.value)), saved];
     saveProfiles(p);
     return p;
   },
   removeProfile: async (id: string): Promise<Profile[]> => {
     const p = loadProfiles().filter((x) => x.id !== id);
+    secrets.delete(id);
     saveProfiles(p);
     return p;
   },

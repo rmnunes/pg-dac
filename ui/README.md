@@ -53,7 +53,7 @@ every command to the in-browser mock daemon (`src/ipc/mock.ts`), which replays a
 (`src/dev/fixture-plan.json`: six changes, data loss, a dependent view the engine recreates, three
 engine notes) with the same event choreography and refusals as the daemon (a re-plan of sources
 that were not compared answers 409, a publish with unapproved data loss is refused) and keeps
-saved sources in `localStorage`. Use it for UX
+saved sources in `localStorage`, without their passwords (those stay in memory). Use it for UX
 work, visual review and accessibility audits (axe-core from the console) — no database needed.
 The desktop app never takes this path.
 
@@ -68,6 +68,14 @@ The window is laid out like SSDT's Schema Compare:
   folder…*, *Open a .pgdac artifact…* and *Type a connection string or path…*. A typed
   connection string is shown masked and can be kept as a saved source. The swap button
   exchanges the two.
+- **Saved sources and passwords.** Saved sources live in `profiles.json` in the app's config
+  directory, but a connection string's password does not: it goes to the OS credential store
+  (Windows Credential Manager, the macOS Keychain, the Secret Service on Linux), filed under
+  `dev.pgdac.app`. The frontend never receives it; a request names a saved source as
+  `profile:<id>` and the Rust layer adds the password just before it goes to the engine
+  (`src-tauri/src/profiles.rs`). Files from earlier versions are moved over the first time the app
+  reads them. Where no credential store is available (a Linux session without a Secret Service), a
+  source with a password is not saved; save it without one and use `PGPASSWORD` or `~/.pgpass`.
 - **Options** opens a dialog with two tabs. *Comparison*: schemas, Target PostgreSQL version,
   privileges, column order, routine whitespace and comments (each defaulting to the Source
   project's `pgdac.yaml` `compare:` block), excluded object types, required signer key.

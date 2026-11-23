@@ -1,6 +1,6 @@
 [package]
 name = "pg-dac-ui"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 rust-version = "1.77"
 
@@ -19,6 +19,10 @@ serde_json = "1"
 ureq = { version = "2", features = ["json"] }
 rand = "0.8"
 tauri-plugin-updater = "2"
+# Saved passwords live in the OS credential store: Windows Credential Manager,
+# the macOS Keychain, or the Secret Service on Linux (pure-Rust D-Bus and
+# crypto, so building needs no libdbus or OpenSSL headers).
+keyring = { version = "3.6", features = ["windows-native", "apple-native", "async-secret-service", "tokio", "crypto-rust"] }
 
 [profile.release]
 panic = "abort"

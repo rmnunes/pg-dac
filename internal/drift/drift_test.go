@@ -2,6 +2,7 @@ package drift_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/rmnunes/pg-dac/internal/devdb"
 	"github.com/rmnunes/pg-dac/internal/drift"
 	"github.com/rmnunes/pg-dac/internal/introspect"
+	"github.com/rmnunes/pg-dac/internal/model"
 )
 
 func TestDrift_RecordAndCheck(t *testing.T) {
@@ -76,5 +78,51 @@ func TestDrift_RecordAndCheck(t *testing.T) {
 	rep, _ = drift.Check(ctx, conn, cur3)
 	if rep.Drifted {
 		t.Error("re-baselined target must not drift")
+	}
+}
+
+// A database published as the desired state must not leave its password in
+// the target: the baseline records only the server it names, and a baseline
+// written before that rule is redacted when it is read back.
+func TestDrift_BaselineSourceHasNoPassword(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs embedded postgres")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	sc, err := devdb.Acquire(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sc.Release()
+	conn, err := pgx.Connect(ctx, sc.ConnString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+
+	db := &model.Database{TargetVersion: 160000, Schemas: []*model.Schema{{Name: "public"}}}
+	b, err := drift.Record(ctx, conn, db, "postgres://app:s3cret@dev.example:5432/app", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := conn.QueryRow(ctx, `SELECT source FROM pgdac.baseline WHERE id = $1`, b.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored, "s3cret") || stored != "dev.example:5432/app" {
+		t.Fatalf("baseline source stored as %q", stored)
+	}
+
+	// A row from an older version, password and all.
+	if _, err := conn.Exec(ctx, `UPDATE pgdac.baseline SET source = 'postgres://app:s3cret@dev.example/app' WHERE id = $1`, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := drift.Latest(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(latest.Source, "s3cret") {
+		t.Fatalf("an old baseline's password was handed back: %q", latest.Source)
 	}
 }

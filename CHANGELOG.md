@@ -4,6 +4,22 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## 0.9.4 — 2026-11-23
+
+### Security
+- **Saved passwords move to the OS credential store.** The desktop app kept saved connection
+  strings, passwords included, in plain text in `profiles.json`. A password now goes to Windows
+  Credential Manager, the macOS Keychain or the Secret Service on Linux; the file keeps the rest
+  of the connection string. The frontend no longer receives saved passwords at all: it refers to a
+  saved source as `profile:<id>` and the Rust layer adds the password when a request goes to the
+  engine. Existing files are migrated the first time the app reads them. A connection string whose
+  password cannot be located safely is refused instead of saved.
+- **No passwords in baselines.** Publishing with a database as the desired state recorded that
+  database's full connection string, password included, as the baseline source in the target's
+  `pgdac.baseline` table, and drift messages printed it. Only the server it names (`host:port/db`)
+  is recorded now, older rows are redacted when they are read, and the GUI engine's progress
+  events name sources the same way.
+
 ## 0.9.3 — 2026-11-23
 
 ### Fixed

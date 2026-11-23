@@ -16,7 +16,7 @@ import type {
 } from "../ipc/types";
 import { firstLine, objectLabel, plural } from "../vocab";
 import { computeAutoExcluded, dependenciesOf, overlayPlan } from "./plan";
-import { profileRef, resolveSpec } from "./profiles";
+import { profileRef } from "./profiles";
 
 type Status = "idle" | "comparing" | "scripting";
 
@@ -277,10 +277,11 @@ export const useStore = create<State>((set, get) => ({
     const major = parseInt(s.targetMajor, 10);
     const excludeIds = [...new Set([...s.excluded, ...s.autoExcluded.keys()])];
     return {
-      // Resolve profile refs to the real value the daemon needs (the secret
-      // travels only here, at send time — it's never bound to a visible input).
-      from: resolveSpec(s.from, s.profiles),
-      to: resolveSpec(s.to, s.profiles),
+      // A saved source goes as its profile:<id> reference: the Rust layer
+      // puts the full connection string together, password from the OS
+      // credential store, so the frontend never holds a saved password.
+      from: s.from,
+      to: s.to,
       schemas: schemas.length ? schemas : undefined,
       targetMajor: Number.isFinite(major) && major > 0 ? major : undefined,
       online: s.online,

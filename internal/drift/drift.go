@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/model"
 )
@@ -70,6 +71,9 @@ func Record(ctx context.Context, conn *pgx.Conn, db *model.Database, source, gen
 	if err := conn.PgConn().Exec(ctx, schemaSQL).Close(); err != nil {
 		return nil, fmt.Errorf("create baseline table: %w", err)
 	}
+	// The source can be a connection string (a database published as the
+	// desired state); only the server it names is recorded.
+	source = dbconn.Redact(source)
 	b := &Baseline{Source: source, Generator: generator, SHA256: hex.EncodeToString(sum[:]), Model: db}
 	err = conn.QueryRow(ctx,
 		`INSERT INTO pgdac.baseline (source, generator, model_sha256, model) VALUES ($1, $2, $3, $4) RETURNING id, recorded_at`,
@@ -100,6 +104,8 @@ func Latest(ctx context.Context, conn *pgx.Conn) (*Baseline, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read baseline: %w", err)
 	}
+	// Baselines recorded before 0.9.4 could hold a full connection string.
+	b.Source = dbconn.Redact(b.Source)
 	zr, err := gzip.NewReader(bytes.NewReader(blob))
 	if err != nil {
 		return nil, fmt.Errorf("decode baseline: %w", err)

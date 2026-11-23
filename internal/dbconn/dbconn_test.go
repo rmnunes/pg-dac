@@ -143,3 +143,20 @@ func TestParseConfigForcesUTF8(t *testing.T) {
 		t.Fatalf("client_encoding = %q, want UTF8", got)
 	}
 }
+
+// Redact is what may be shown or stored for a source: the server a
+// connection string names, never its password; paths pass through.
+func TestRedact(t *testing.T) {
+	cases := map[string]string{
+		"postgres://app:s3cret@db.example:5433/app?sslmode=require": "db.example:5433/app",
+		"postgres://app@db.example/app?password=s3cret":             "db.example:5432/app",
+		"host=db.example dbname=app user=app password=s3cret":       "db.example:5432/app",
+		`C:\dev\app\schema`: `C:\dev\app\schema`,
+		"app-2.1.0.pgdac":   "app-2.1.0.pgdac",
+	}
+	for in, want := range cases {
+		if got := Redact(in); got != want {
+			t.Errorf("Redact(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

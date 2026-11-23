@@ -102,7 +102,11 @@ export interface Profile {
   id: string;
   name: string;
   kind: ProfileKind;
+  // A connection string without its password, or a path.
   value: string;
+  // The password is in the OS credential store; requests refer to this source
+  // as profile:<id> and the Rust layer adds it (src-tauri/src/profiles.rs).
+  hasSecret?: boolean;
 }
 
 export interface CompareRequest {
