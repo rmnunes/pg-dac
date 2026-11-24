@@ -55,6 +55,21 @@ type Options struct {
 	// back. Revokes of privileges the source does not hold follow
 	// DropObjectsNotInSource (DropPermissionsNotInSource).
 	IgnorePrivileges bool
+	// Owner is the role that owns the desired state's objects (pgdac.yaml
+	// owner:). The migration creates objects as it (SET ROLE), and changes
+	// every object as its owner: as Owner what Owner owns, as the deploying
+	// role what another role owns, and as the deploying role the extensions
+	// and the reassignments. Objects the desired state has under Owner that
+	// the target has under another role are reassigned (ALTER … OWNER TO, a
+	// blocking CHANGES_OWNER hazard) unless IgnoreOwnership. Owner's own
+	// privileges on what it owns are implicit and never compared, and its
+	// database-wide default privileges are managed (see
+	// DefaultPrivilegeRoles). Empty: objects are created by the deploying
+	// role and ownership is not compared.
+	Owner string
+	// IgnoreOwnership leaves objects under the owner the target has them
+	// (SSDT's IgnoreAuthorizer); they are still changed as that owner.
+	IgnoreOwnership bool
 	// DefaultPrivilegeRoles are roles whose database-wide default privileges
 	// (ALTER DEFAULT PRIVILEGES without IN SCHEMA) the comparison manages even
 	// where the desired state has no entry for them — the project's owner and
@@ -106,6 +121,13 @@ type Result struct {
 	// of the diff: refactorlog renames and their bookkeeping. Script() emits
 	// them first; publish executes them before re-reading the target.
 	Prelude []sqlgen.Statement
+	// Owner is the role Statements switch to (SET ROLE) for what they create
+	// and for what it owns; "" when no statement runs as the owner.
+	Owner        string
+	ownerMissing bool
+	// CreateRights are the CREATE privileges creating and reassigning
+	// objects for the owner needs (a publish checks them before it starts).
+	CreateRights []CreateRight
 
 	from, to *model.Database // retained for per-object before/after definition rendering
 	online   bool
@@ -130,6 +152,7 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	cs = expandDependents(cs, from, to)
 	cs = expandPrivileges(cs, from, to, opts)
 	cs = expandDefaultPrivileges(cs, from, to, opts)
+	cs = expandOwnership(cs, from, to, opts)
 	cs = filterByType(cs, opts) // privileges and dependents added above obey the exclusion too
 
 	p := plan.Build(cs)
@@ -148,11 +171,12 @@ func Compare(from, to *model.Database, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	var stmts []sqlgen.Statement
-	for _, g := range groups {
-		stmts = append(stmts, g.Statements...)
+	stmts, actsAsOwner, rights := withRoles(groups, from, opts)
+	res := &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, CreateRights: rights, from: from, to: to, online: opts.Online}
+	if actsAsOwner {
+		res.Owner = opts.Owner
+		res.ownerMissing = ownerMissing(from, opts.Owner)
 	}
-	res := &Result{ChangeSet: cs, Plan: p, Groups: groups, Statements: stmts, from: from, to: to, online: opts.Online}
 	if platformWarning != "" {
 		res.Warnings = append(res.Warnings, platformWarning)
 	}

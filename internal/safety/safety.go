@@ -43,6 +43,11 @@ const (
 	// statement would fail, so the publish is blocked up front (error severity)
 	// until the role exists or the grant is removed from the source.
 	MissingRole HazardType = "MISSING_ROLE"
+	// ChangesOwner: ALTER … OWNER TO gives an object to the project's owner.
+	// The previous owner loses every privilege it held as owner (it keeps only
+	// what is granted to it), so an application connecting as that role can
+	// lose access: error severity, reviewed once with --allow-hazards.
+	ChangesOwner HazardType = "CHANGES_OWNER"
 )
 
 // Severity ranks how dangerous a hazard is, so callers can render badges and
@@ -72,7 +77,7 @@ func New(t HazardType, msg string) Hazard {
 // else is a warning the user reviews.
 func defaultSeverity(t HazardType) Severity {
 	switch t {
-	case DeletesData, Unsupported, MissingRole:
+	case DeletesData, Unsupported, MissingRole, ChangesOwner:
 		return SeverityError
 	default:
 		return SeverityWarning

@@ -52,6 +52,9 @@ func expandDefaultPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts 
 		return to.Schema(name) != nil && (!droppedSchemas[name] || createdSchemas[name])
 	}
 	globalRoles := map[string]bool{}
+	if opts.Owner != "" {
+		globalRoles[opts.Owner] = true
+	}
 	for _, r := range opts.DefaultPrivilegeRoles {
 		globalRoles[r] = true
 	}

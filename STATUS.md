@@ -1,6 +1,6 @@
 # pg-dac — Project Status & Roadmap
 
-_Last updated: 2026-11-23 — **v0.9.7**, the release candidate on the way to 1.0. Work packages WP0–WP8 are complete; see [Roadmap](#roadmap) for what comes next._
+_Last updated: 2026-11-24 — **v0.9.8**, the release candidate on the way to 1.0. Work packages WP0–WP8 are complete; see [Roadmap](#roadmap) for what comes next._
 
 A **DACPAC / SqlPackage-equivalent for PostgreSQL**: compare schemas, generate dependency-ordered
 lock-safe migration scripts, package a schema into a portable **signed `.pgdac` artifact**, and
@@ -47,6 +47,7 @@ publish — via a CLI, a local daemon, a declarative project model, and a Tauri 
 | PostgreSQL versions | ✅ CI runs the full suite (bootstrap gate, scenario matrix, publish, drift, round trips) once per supported major, 11 to 18 (`PGDAC_SCRATCH_MAJOR`); scenarios a major cannot express are skipped there, not passed (0.9.5) |
 | Function dependents | ✅ A column default, CHECK constraint, index (expression or predicate) or policy that calls a function the migration drops — for good, or to recreate it with a new result type — is removed first and put back after; the dependencies are read from `pg_depend` (0.9.6) |
 | Default privileges | ✅ `ALTER DEFAULT PRIVILEGES` entries are introspected, compared, scripted, published, extracted to and updated in project files: scoped to a modeled schema, and database-wide for the roles the desired state names; a declared entry is applied in full (a `REVOKE … FROM PUBLIC` included), extras follow the drop policy (0.9.7) |
+| Ownership | ✅ A project names its owner (`owner:`); the build and the publish create objects as it (`SET ROLE`), so its default privileges apply on both sides; the publish changes each object as its owner, gives the owner what another role owns (`CHANGES_OWNER`, blocking; `--ignore-ownership` leaves it), and checks the rights this needs before it starts (0.9.8) |
 | Text encoding | ✅ The scratch cluster is UTF-8 with the C locale on every platform and every session is UTF-8, so non-ASCII definitions compare the same on Windows and Linux; `PGCLIENTENCODING` is ignored (0.9.3) |
 | Target platform check | ✅ A desired state normalized for a newer PostgreSQL major than the target runs is refused, like SqlPackage's platform check (`--target-major`, `--allow-incompatible-platform`); version-gated statements follow the target's version (0.9.3) |
 
@@ -168,7 +169,8 @@ grant silently.
 - **Privileges are modeled**: effective ACLs (built-in defaults included, owner entry excluded) on
   schemas, tables, views, materialized views, sequences, routines, enums, domains, composite types
   and table columns. GRANT for what the source adds; REVOKE only under drop policy `all`
-  (SSDT's `DropPermissionsNotInSource`); an object pg-dac drops and recreates always gets its
+  (SSDT's `DropPermissionsNotInSource`), except a built-in default the source revoked (PUBLIC's
+  `EXECUTE` on a routine), which is the source's declared state and always revoked; an object pg-dac drops and recreates always gets its
   privileges back, even with `--ignore-privileges`. A GRANT to a role the live target lacks is a
   blocking `MISSING_ROLE` hazard; when it is the only blocker, `publish` runs the project's
   pre-deploy scripts (where roles are provisioned) and re-checks before refusing. Projects list
@@ -285,14 +287,14 @@ tables and views, incl. enabled state), RLS policies (+ table RLS enable/force),
 list, `CHECK OPTION`, `security_barrier`/`security_invoker`), materialized views, comments on all
 of the above, privileges (GRANT/REVOKE, incl. `WITH GRANT OPTION` and column privileges) on
 schemas, tables, views, materialized views, sequences, routines, enums, domains and composite types,
-and default privileges (`ALTER DEFAULT PRIVILEGES`, scoped to a modeled schema or database-wide for
-the roles the desired state names).
+default privileges (`ALTER DEFAULT PRIVILEGES`, scoped to a modeled schema or database-wide for
+the roles the desired state names), and the owner of every object for a project with `owner:`.
 
 **Reported as `UNSUPPORTED_CHANGE` (error-severity hazard; the script will not converge until done by
 hand):** removing or reordering enum values, changing a domain or composite type definition,
 changing a table's partitioning, rebuilding a partitioned table or a partition for column order.
 
-**Warned about, not managed:** ownership, column-level privileges on views, database-level grants, aggregate/window functions,
+**Warned about, not managed:** column-level privileges on views, database-level grants, aggregate/window functions,
 range/multirange types, foreign tables, non-view rules, `INHERITS` (non-partition) inheritance.
 Roles are cluster objects: never created or dropped, only required to exist.
 
@@ -306,10 +308,12 @@ Roles are cluster objects: never created or dropped, only required to exist.
    an altered column, are not — PostgreSQL's own error surfaces at publish time. A recreated
    materialized view is rebuilt (`WITH DATA`), which recomputes its contents, and an index rebuilt
    because it calls a recreated function is dropped and created, not swapped in.
-2. **Ownership is not modeled.** Objects are created by, and owned by, the deploying role, so
-   default privileges `FOR ROLE` another role do not apply to what a publish creates, and the
-   grants they would imply are not part of the desired state. Database-level grants and column
-   privileges on views are counted and warned about. Partitions can be created and dropped but existing tables are not
+2. **Ownership needs `owner:`.** Without it, objects are created by and owned by the deploying
+   role, so default privileges `FOR ROLE` another role do not apply to what a publish creates.
+   With it, there is one owner per project; an object the project gives to another role
+   (`ALTER … OWNER TO` in a project file) is not modeled. Importing a `.pgbac` creates objects
+   as the importing role. Database-level grants and column privileges on views are counted and
+   warned about. Partitions can be created and dropped but existing tables are not
    attached/detached, and `INHERITS` inheritance is not modeled.
 3. **Deploy scripts are plain SQL.** psql meta-commands (`\i`, `\echo`) cannot run server-side;
    pre/post-deploy scripts run as one implicit transaction each and are re-run on every publish,
@@ -346,17 +350,14 @@ Roles are cluster objects: never created or dropped, only required to exist.
 | 0.9.5 (2026-11-23) | CI runs the full suite on PostgreSQL 11 to 18; PostgreSQL 11 targets read again; PostgreSQL 17 domains with NOT NULL |
 | 0.9.6 (2026-11-23) | Defaults, CHECK constraints, indexes and policies recreated around a function the migration drops; release workflow without macOS CLI builds, with a dry run |
 | 0.9.7 (2026-11-23) | Default privileges (`ALTER DEFAULT PRIVILEGES`) managed |
+| 0.9.8 (2026-11-24) | The project's owner (`owner:`): objects built and published as it, reassigned to it when allowed; a source's revoke of a built-in default always applies |
 
 **1.0** is cut when the first production pilot completes without a correctness change
 (CHANGELOG.md). Problems the pilot finds are fixed with a regression test and a patch release.
 
 **Next, in order:**
 
-1. **The project's owner role** (`owner:` in `pgdac.yaml`): the scratch build and the publish
-   create objects as that role, so its default privileges apply on both sides and objects end up
-   owned by it whoever deploys; objects owned by another role are reported, and reassigned when
-   allowed. Matters most on Azure, where the deploying identity is not the owner.
-2. **Code signing** for the Windows and macOS installers (needs a signing certificate and an Apple
+1. **Code signing** for the Windows and macOS installers (needs a signing certificate and an Apple
    developer account), and **tauri-action v1** in the release workflow (it renames the macOS
    update bundle and changes the URLs in `latest.json`, so it is tested on its own).
 

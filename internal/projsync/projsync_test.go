@@ -236,3 +236,51 @@ func TestUnifiedDiff(t *testing.T) {
 		t.Fatal("identical texts have an empty diff")
 	}
 }
+
+// A project builds as its owner, so ALTER DEFAULT PRIVILEGES without FOR ROLE
+// is the owner's entry: updating the project rewrites that statement in place
+// (with FOR ROLE spelled out) and lists no extra role for it. Without an owner
+// the statement is left alone, as an imperative one.
+func TestDefaultPrivilegesWithoutForRoleAreTheOwners(t *testing.T) {
+	dp := func(grantees ...string) *model.Database {
+		var gs []model.Grant
+		for _, g := range grantees {
+			gs = append(gs, model.Grant{Grantee: g, Privileges: []model.Privilege{{Type: "SELECT"}}})
+		}
+		db := dbModel(false, "")
+		db.DefaultPrivileges = []*model.DefaultPrivilege{{Role: "app_owner", Schema: "app", ObjectType: "tables", Grants: gs}}
+		return db
+	}
+	const stmt = "ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO readers;\n"
+	for _, owner := range []string{"app_owner", ""} {
+		dir, man := writeProject(t, map[string]string{"app/privs.sql": stmt})
+		man.Owner = owner
+		from, to := dp("readers"), dp("readers", "writers")
+		res := compare(t, from, to)
+		idx, err := Scan(dir, man, from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := Build(idx, man, from, to, res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := plan.Apply(); err != nil {
+			t.Fatal(err)
+		}
+		got := read(t, dir, "app/privs.sql")
+		switch owner {
+		case "app_owner":
+			if strings.Contains(got, stmt) || !strings.Contains(got, `FOR ROLE "app_owner" IN SCHEMA "app"`) || !strings.Contains(got, `"writers"`) {
+				t.Errorf("with an owner the statement is the owner's entry and is rewritten:\n%s", got)
+			}
+			if strings.Contains(strings.Join(plan.RolesAdded, ","), "app_owner") {
+				t.Errorf("the owner is not a role to list: %v", plan.RolesAdded)
+			}
+		default:
+			if !strings.HasPrefix(got, stmt) {
+				t.Errorf("without an owner the statement is left alone:\n%s", got)
+			}
+		}
+	}
+}

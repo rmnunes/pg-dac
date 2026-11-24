@@ -11,14 +11,20 @@ import (
 // privileges to the desired state. It runs after the dependents pass because
 // what it emits depends on which objects the migration (re)creates:
 //
-//   - an object that is created or recreated has NO privileges afterwards, so
-//     every desired privilege is granted; when the drop policy would not have
-//     revoked what the target held, those privileges are granted back too — a
-//     recreate pg-dac decided on must not quietly strip access;
+//   - an object that is created or recreated starts from what PostgreSQL gives
+//     a new object (see birthACL): every desired privilege is granted, and
+//     what it is born with but the source does not hold (PUBLIC's EXECUTE on a
+//     routine, USAGE on a type) is revoked, whatever the drop policy — that is
+//     the source's own state, not something the target added; when the drop
+//     policy would not have revoked what the target held, those privileges are
+//     granted back too — a recreate pg-dac decided on must not quietly strip
+//     access;
 //   - an object that persists gets GRANTs for what the source adds (including
 //     grant-option upgrades) and REVOKEs for what the source no longer holds,
 //     the latter only under the drop policy that drops objects not in the
-//     source (SSDT's DropPermissionsNotInSource);
+//     source (SSDT's DropPermissionsNotInSource) — except what the source's
+//     object would have been born with: lacking PUBLIC's EXECUTE on a
+//     routine means the source revoked it, which is its declared state;
 //   - with IgnorePrivileges, nothing is compared, but a recreated object still
 //     gets the target's own privileges back, so the option never changes what a
 //     role can do.
@@ -59,7 +65,8 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 	}
 
 	var added []diff.Op
-	// emit computes the privilege ops for one object (or column, when sub is set).
+	// emit computes the privilege ops for one object (or column, when sub is
+	// set). recreated means the migration creates the object (anew or again).
 	emit := func(owner model.ObjRef, sub string, fn *model.Function, fromGrants, toGrants []model.Grant, exists, recreated bool) {
 		current := acl{}
 		if exists && !recreated {
@@ -82,11 +89,25 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 			added = append(added, diff.Op{Type: diff.OpGrant, Owner: owner, Sub: sub, Function: fn, Grant: &g,
 				MissingRole: roles != nil && g.Grantee != "" && !roles[g.Grantee]})
 		}
-		if !opts.IgnorePrivileges && exists && !recreated && opts.DropObjectsNotInSource {
-			for _, g := range revokesNeeded(current, desired) {
+		revoke := func(gs []model.Grant) {
+			for _, g := range gs {
 				g := g
 				added = append(added, diff.Op{Type: diff.OpRevoke, Owner: owner, Sub: sub, Function: fn, Grant: &g})
 			}
+		}
+		switch {
+		case recreated && sub == "" && (exists || !opts.IgnorePrivileges):
+			revoke(revokesNeeded(birthACL(owner.Kind, owner.Schema, from, to, opts.Owner), desired))
+		case !opts.IgnorePrivileges && exists && !recreated:
+			gs := revokesNeeded(current, desired)
+			if !opts.DropObjectsNotInSource {
+				born := acl{}
+				if sub == "" {
+					born = birthACL(owner.Kind, owner.Schema, nil, to, opts.Owner)
+				}
+				gs = within(gs, born)
+			}
+			revoke(gs)
 		}
 	}
 
@@ -223,6 +244,74 @@ func expandPrivileges(cs *diff.ChangeSet, from, to *model.Database, opts Options
 	filtered := filterByObject(&diff.ChangeSet{Ops: added}, opts)
 	out := &diff.ChangeSet{Ops: append(append([]diff.Op{}, cs.Ops...), filtered.Ops...), Warnings: cs.Warnings}
 	return out
+}
+
+// birthACL is what an object of kind in schema may hold the moment the
+// migration creates it: PostgreSQL's built-in defaults (EXECUTE on routines
+// and USAGE on types for PUBLIC) — or, when it is created as the project's
+// owner, what the owner's default privileges give, before the migration
+// changes them or after (it changes them before creating anything, but a
+// revoke of a privilege the object turns out not to hold is a no-op, and one
+// it holds but should not is what matters). Without an owner the creating
+// role is whoever deploys, whose default privileges are not known.
+func birthACL(kind model.ObjKind, schema string, from, to *model.Database, owner string) acl {
+	objtype := defaultPrivilegeType(kind)
+	if owner == "" || objtype == "" {
+		return aclOf(model.BuiltinDefaultGrants(objtype))
+	}
+	out := acl{}
+	for _, db := range []*model.Database{from, to} {
+		if db == nil {
+			continue
+		}
+		grants := model.BuiltinDefaultGrants(objtype)
+		if e := db.DefaultPrivilege(owner, "", objtype); e != nil {
+			grants = e.Grants
+		}
+		if schema != "" {
+			if e := db.DefaultPrivilege(owner, schema, objtype); e != nil {
+				grants = append(append([]model.Grant{}, grants...), e.Grants...)
+			}
+		}
+		out.union(aclOf(grants))
+	}
+	return out
+}
+
+// within keeps the revokes of privileges a holds: whole privileges a has, and
+// grant options a has with them.
+func within(gs []model.Grant, a acl) []model.Grant {
+	var out []model.Grant
+	for _, g := range gs {
+		var privs []model.Privilege
+		for _, p := range g.Privileges {
+			if grantable, ok := a[g.Grantee][p.Type]; ok && (!p.Grantable || grantable) {
+				privs = append(privs, p)
+			}
+		}
+		if len(privs) > 0 {
+			out = append(out, model.Grant{Grantee: g.Grantee, Privileges: privs})
+		}
+	}
+	return out
+}
+
+// defaultPrivilegeType is the ALTER DEFAULT PRIVILEGES object type that
+// covers objects of kind ("" for none).
+func defaultPrivilegeType(kind model.ObjKind) string {
+	switch kind {
+	case model.KindTable, model.KindView, model.KindMatView:
+		return "tables"
+	case model.KindSequence:
+		return "sequences"
+	case model.KindFunction:
+		return "functions"
+	case model.KindEnum, model.KindDomain, model.KindComposite:
+		return "types"
+	case model.KindSchema:
+		return "schemas"
+	}
+	return ""
 }
 
 func tableNamed(s *model.Schema, name string) *model.Table {

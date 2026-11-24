@@ -4,6 +4,34 @@ All notable changes to pg-dac. The format follows Keep a Changelog; versions fol
 `0.9.0` is the release candidate for production rollout; `1.0.0` is cut after the first
 production pilot completes without a correctness change.
 
+## 0.9.8 — 2026-11-24
+
+### Added
+- **The project's owner.** `owner: <role>` in `pgdac.yaml` names the role that owns the project's
+  objects, whoever deploys them. The scratch build runs the project as that role, so its default
+  privileges apply to what the project creates, as they will on the target; in a project file,
+  `ALTER DEFAULT PRIVILEGES` without `FOR ROLE` is the owner's.
+  - A publish changes each object as its owner. It creates objects and changes what the owner
+    owns after `SET ROLE`, and changes what another role owns, and the extensions, as the
+    deploying role. The script shows each `SET ROLE` and `RESET ROLE`.
+  - An object the target has under another role is given to the owner (`ALTER … OWNER TO`, a
+    blocking `CHANGES_OWNER` hazard: the previous owner keeps only what is granted to it).
+    `--ignore-ownership`, `compare.ownership: false` or the app's "Object ownership" option leave
+    such objects with their owner.
+  - Before anything runs, `publish` checks the rights this needs and refuses with the `GRANT` that
+    fixes each missing one: `SET ROLE` to the owner, acting as the previous owners, and `CREATE`
+    on the database and schemas. The owner's own privileges and its database-wide default
+    privileges are part of the project.
+  - `extract --to-project` sets `owner:` when one role owns everything it extracts.
+
+### Fixed
+- **A source's revoke of a built-in default was lost.** A project that creates a function and runs
+  `REVOKE EXECUTE … FROM PUBLIC` (or revokes `USAGE` on a type) was published with PUBLIC keeping
+  the privilege. Even the generated script granted it back. A new object now gets revokes for
+  what PostgreSQL gives it and the source does not hold. An existing one loses such a privilege
+  whatever the drop policy, because the source lacks it only by revoking it.
+- The `BLOCKED` comment above a blocked statement in a script names the hazard that blocks it.
+
 ## 0.9.7 — 2026-11-23
 
 ### Added

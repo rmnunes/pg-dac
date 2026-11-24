@@ -89,6 +89,17 @@ export function OptionsDialog({ initialTab, onClose }: { initialTab: OptionsTab;
             </select>
           </Field>
           <Field
+            id={id("owner")}
+            label="Object ownership"
+            desc="For a project with an owner: role in pgdac.yaml. Compare gives that role the Target's objects that another role owns (a blocking risk: the previous owner loses its rights). Ignore leaves them with their owner."
+          >
+            <select id={id("owner")} value={s.ownership} onChange={(e) => setOptions({ ownership: e.target.value as typeof s.ownership })} aria-describedby={id("owner-desc")}>
+              <option value="">Project default (compare)</option>
+              <option value="compare">Compare</option>
+              <option value="ignore">Ignore</option>
+            </select>
+          </Field>
+          <Field
             id={id("colorder")}
             label="Column order"
             desc="PostgreSQL cannot reorder columns in place. Warn reports a table whose declared order differs; Rebuild copies the table into one with the declared order (SSDT behaviour, heavy); Ignore stays silent."

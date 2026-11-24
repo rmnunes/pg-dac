@@ -35,6 +35,7 @@ type commonFlags struct {
 	// Comparison semantics; the desired-state project's compare: block is the
 	// default, an explicitly given flag wins (see options()).
 	ignorePrivileges  bool
+	ignoreOwnership   bool
 	columnOrder       string
 	ignoreComments    bool
 	compareWhitespace bool
@@ -62,6 +63,7 @@ func (f *commonFlags) bind(cmd *cobra.Command) {
 	fl.BoolVar(&f.doValidate, "validate", false, "replay the migration in a scratch database to prove it executes and converges")
 	fl.StringVar(&f.requireKey, "require-key", "", "fail unless a .pgdac source is signed by this key fingerprint (default: the trusted_keys file, if any)")
 	fl.BoolVar(&f.ignorePrivileges, "ignore-privileges", false, "do not compare GRANT/REVOKE (recreated objects still get their privileges back)")
+	fl.BoolVar(&f.ignoreOwnership, "ignore-ownership", false, "do not reassign objects the target has under a role other than the project's owner: (they are changed as their owner)")
 	fl.StringVar(&f.columnOrder, "column-order", "", "when a table's declared column order differs from the target's: ignore | warn (default) | rebuild the table in the declared order")
 	fl.BoolVar(&f.ignoreComments, "ignore-comments", false, "treat comment-only changes inside routine bodies as no change")
 	fl.BoolVar(&f.compareWhitespace, "compare-whitespace", false, "compare routine bodies as exact text (by default whitespace and line endings are ignored)")
@@ -212,6 +214,7 @@ func (f *commonFlags) options() engine.Options {
 	deploy.ApplyDropPolicy(&opts, f.dropPolicy)
 	if f.plan != nil {
 		deploy.ApplyCompareSettings(&opts, f.plan.Compare)
+		deploy.ApplyOwner(&opts, f.plan)
 	}
 	if f.dropObjectsSet || f.dropObjects {
 		opts.DropObjectsNotInSource = f.dropObjects
@@ -220,6 +223,9 @@ func (f *commonFlags) options() engine.Options {
 		fl := f.cmd.Flags()
 		if fl.Changed("ignore-privileges") {
 			opts.IgnorePrivileges = f.ignorePrivileges
+		}
+		if fl.Changed("ignore-ownership") {
+			opts.IgnoreOwnership = f.ignoreOwnership
 		}
 		if fl.Changed("column-order") {
 			opts.ColumnOrder = f.columnOrder

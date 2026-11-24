@@ -9,12 +9,14 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/rmnunes/pg-dac/internal/build"
 	"github.com/rmnunes/pg-dac/internal/dbconn"
 	"github.com/rmnunes/pg-dac/internal/devdb"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
 	"github.com/rmnunes/pg-dac/internal/introspect"
 	"github.com/rmnunes/pg-dac/internal/model"
+	"github.com/rmnunes/pg-dac/internal/sqlgen"
 )
 
 // Result reports the outcome of validating a migration.
@@ -49,6 +51,14 @@ func Plan(ctx context.Context, from, to *model.Database, opts engine.Options) (*
 	}
 	defer conn.Close(ctx)
 
+	// The migration creates objects as the project's owner (SET ROLE); the
+	// scratch cluster needs the role, able to do what the deploying role does.
+	if opts.Owner != "" {
+		if err := build.EnsureOwnerRole(ctx, conn, opts.Owner); err != nil {
+			return nil, err
+		}
+	}
+
 	// Baseline: the empty scratch database (has public, plpgsql, etc.). We build
 	// the source schema on top of it so we never try to recreate what is already
 	// there.
@@ -66,6 +76,18 @@ func Plan(ctx context.Context, from, to *model.Database, opts engine.Options) (*
 	}
 	if err := execute.ApplyStatements(ctx, conn, mat.Statements); err != nil {
 		return nil, fmt.Errorf("materialize source schema in scratch db: %w", err)
+	}
+	// What the target has under the owner is under the owner here too, so the
+	// migration neither reassigns it nor leaves it to be reassigned.
+	if opts.Owner != "" {
+		for _, o := range from.OwnedObjects() {
+			if o.Owner != opts.Owner || o.Linked {
+				continue
+			}
+			if _, err := conn.Exec(ctx, sqlgen.AlterOwnerSQL(o.Ref, o.Function, opts.Owner)); err != nil {
+				return nil, fmt.Errorf("give %s to the owner in scratch db: %w", o.Ref, err)
+			}
+		}
 	}
 
 	// Replay the real migration.

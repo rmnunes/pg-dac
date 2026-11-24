@@ -137,8 +137,10 @@ func deriveEdges(ops []diff.Op) map[int][]int {
 				add(c, i)
 			}
 
-		case diff.OpGrant:
-			// Privileges follow the object (and, for a column, the column).
+		case diff.OpGrant, diff.OpRevoke:
+			// Privileges follow the object (and, for a column, the column): a
+			// revoke exists for a created object when it takes away what the
+			// object is born with.
 			if c, ok := createByObj[op.Owner.Key()]; ok {
 				add(c, i)
 			}

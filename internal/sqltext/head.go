@@ -33,6 +33,10 @@ type Head struct {
 	// COLUMN, DROP, RENAME, DO blocks, DML, CREATE ROLE, GRANT ON ALL TABLES
 	// IN SCHEMA, ...) are not.
 	Declarative bool
+	// CurrentRole marks ALTER DEFAULT PRIVILEGES without FOR ROLE that sets
+	// one entry: the entry of whichever role runs it (Name[1] is ""). It is
+	// declarative where that role is known — a project's owner.
+	CurrentRole bool
 }
 
 // ParseHead reads the leading clause of one statement.
@@ -394,4 +398,5 @@ func parseDefaultPrivileges(h *Head, toks []token, i int) {
 	}
 	h.Name = []string{schema, role, objtype}
 	h.Declarative = single && role != "" && objtype != ""
+	h.CurrentRole = single && role == "" && objtype != ""
 }

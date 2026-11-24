@@ -110,8 +110,9 @@ untick what you don't want to deploy.
 
 pg-dac is a release candidate on the way to 1.0. CI runs the full test suite on every supported
 PostgreSQL major, 11 to 18, and it has been exercised against a production schema of about 900
-objects. Object ownership and roles are not managed (roles must exist), and a few changes PostgreSQL cannot make in place, such as removing an
-enum value, are reported instead of applied. See [STATUS.md](STATUS.md) for the details.
+objects. Roles are not managed (they must exist), ownership is only for a project that names
+its owner, and a few changes PostgreSQL cannot make in place, such as removing an enum value, are
+reported instead of applied. See [STATUS.md](STATUS.md) for the details.
 
 ## Contributing
 

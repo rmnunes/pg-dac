@@ -41,6 +41,10 @@ type Plan struct {
 	// Variables are the project's default values for the $(name) placeholders
 	// its deploy scripts use (pgdac.yaml variables:); the command line overrides.
 	Variables map[string]string
+	// Owner is the role the project's objects belong to (pgdac.yaml owner:).
+	// It is the desired state's: a project that is the target of a publish
+	// does not lend its owner to the database it is updated from.
+	Owner string
 }
 
 // WithProjectDefaults fills the comparison settings and drop policy a plan
@@ -85,7 +89,7 @@ func ForSource(spec string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan := &Plan{DropPolicy: m.DropPolicy, Compare: m.Compare, Variables: m.Variables}
+	plan := &Plan{DropPolicy: m.DropPolicy, Compare: m.Compare, Variables: m.Variables, Owner: m.Owner}
 	if plan.ManifestYAML, err = os.ReadFile(filepath.Join(spec, project.ManifestName)); err != nil {
 		return nil, err
 	}
@@ -128,6 +132,7 @@ func fromArtifact(o *artifact.Opened) *Plan {
 		if m, err := project.Parse(plan.ManifestYAML); err == nil {
 			plan.Compare = m.Compare
 			plan.Variables = m.Variables
+			plan.Owner = m.Owner
 		}
 	}
 	if data, ok := o.Parts[artifact.PartRefactorLog]; ok {
@@ -266,8 +271,18 @@ func ApplyCompareSettings(opts *engine.Options, cs *project.CompareSettings) {
 	if cs.IgnoreComments != nil {
 		opts.IgnoreComments = *cs.IgnoreComments
 	}
+	if cs.Ownership != nil {
+		opts.IgnoreOwnership = !*cs.Ownership
+	}
 	if len(cs.ExcludeObjectTypes) > 0 {
 		opts.ExcludeObjectTypes = append([]string{}, cs.ExcludeObjectTypes...)
+	}
+}
+
+// ApplyOwner gives the engine the desired state's owner (see Plan.Owner).
+func ApplyOwner(opts *engine.Options, p *Plan) {
+	if p != nil {
+		opts.Owner = p.Owner
 	}
 }
 

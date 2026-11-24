@@ -71,8 +71,9 @@ bodies are compared ignoring whitespace and line endings (`--compare-whitespace`
 exact; `--ignore-comments` also ignores comments); privileges (`GRANT`/`REVOKE` on schemas,
 tables, views, sequences, routines, types and columns) are part of the model and compared
 (`--ignore-privileges`; revokes of privileges the source does not hold follow the drop policy,
-like SSDT's `DropPermissionsNotInSource`), and an object pg-dac drops and recreates always gets
-its privileges back; default privileges (`ALTER DEFAULT PRIVILEGES FOR ROLE … [IN SCHEMA …]`) are
+like SSDT's `DropPermissionsNotInSource`, except a privilege every new object of its kind gets,
+such as PUBLIC's `EXECUTE` on a routine: the source lacks it only because it revoked it, so that
+revoke always applies), and an object pg-dac drops and recreates always gets its privileges back; default privileges (`ALTER DEFAULT PRIVILEGES FOR ROLE … [IN SCHEMA …]`) are
 compared the same way: those scoped to the source's schemas, and the database-wide ones of roles
 the source has database-wide entries for, so another application's entries in a shared database
 are left alone (an entry the source declares is applied in full, including a `REVOKE … FROM
@@ -84,11 +85,37 @@ copied (`rebuild`, the SSDT table rebuild — heavy and explicit). A project set
 ```yaml
 compare:
   privileges: true        # false = ignore GRANT/REVOKE
+  ownership: true         # false = leave objects with the owner the target has them under
   columnOrder: warn       # ignore | warn | rebuild
   ignoreWhitespace: true
   ignoreComments: false
+owner: app_owner          # the role that owns the project's objects (optional)
 roles: [app_readers]      # roles the project's GRANTs name but does not create
 ```
+
+**The project's owner.** With `owner:` set, the project's objects belong to that role whoever
+deploys them, the way they do when an application's schema is owned by a role nobody logs in as:
+
+- The scratch build runs the project's SQL as the owner, so its default privileges apply to what
+  the project creates, as they will on the target. In a project file, `ALTER DEFAULT PRIVILEGES`
+  without `FOR ROLE` is the owner's.
+- A publish changes each object as its owner. It creates objects and changes what the owner owns
+  after `SET ROLE <owner>`, and changes what another role owns as the deploying role. Extensions
+  are also created as the deploying role. The script shows each `SET ROLE` and `RESET ROLE`.
+- An object the target has under another role is given to the owner with `ALTER … OWNER TO`. That
+  is a blocking `CHANGES_OWNER` hazard, because the previous owner keeps only what is granted to
+  it, and `--allow-hazards` lets it through. With `--ignore-ownership` (`compare.ownership:
+  false`) such objects keep their owner. The public schema always keeps its owner.
+- The owner's privileges on what it owns are implicit and never compared, and its database-wide
+  default privileges are part of the project.
+- The owner must exist in the target, like a role in `roles:`. Before anything runs, `publish`
+  checks the rights this needs and refuses with the `GRANT` that fixes each missing one. The
+  deploying role must be able to `SET ROLE` to the owner, and to act as the previous owner of
+  anything it reassigns. The role that creates a schema or gives one to the owner needs `CREATE`
+  on the database. The owner needs `CREATE` on any schema it does not own where it creates or
+  takes objects.
+- `extract --to-project` sets `owner:` when one role owns every extracted object.
+- Without `owner:`, objects are owned by whoever deploys them and ownership is not compared.
 
 **A newer project than the database.** A project normalized for a newer PostgreSQL major than the
 target runs is refused, as SqlPackage refuses a project whose target platform is newer than the

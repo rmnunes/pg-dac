@@ -55,6 +55,14 @@ func Build(cs *diff.ChangeSet) *Plan {
 // 100..199 (lower = created earlier, i.e. dependencies first).
 func opPriority(op diff.Op) int {
 	switch op.Type {
+	// --- ownership first: what follows changes the object as its owner ---
+	case diff.OpAlterOwner:
+		// A schema before what it holds: the new owner needs CREATE on the
+		// schema of an object it takes over, which owning the schema gives.
+		if op.Owner.Kind == model.KindSchema {
+			return 1
+		}
+		return 2
 	// --- drops: dependents first ---
 	case diff.OpDropView:
 		return 10

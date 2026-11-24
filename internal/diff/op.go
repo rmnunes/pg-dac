@@ -104,6 +104,10 @@ const (
 	OpGrantDefault  OpType = "grantDefault"
 	OpRevokeDefault OpType = "revokeDefault"
 
+	// OpAlterOwner makes NewOwner the owner of an existing object (ALTER …
+	// OWNER TO) that the target has under PrevOwner.
+	OpAlterOwner OpType = "alterOwner"
+
 	// OpUnsupported records a desired change PostgreSQL cannot apply in place
 	// (dropping/reordering enum values, altering a type in use, re-partitioning).
 	// It renders as a RAISE WARNING carrying an error-severity hazard so the
@@ -207,6 +211,10 @@ type Op struct {
 	// MissingForRole (OpGrantDefault) marks an entry for a role the target
 	// cluster does not have.
 	MissingForRole bool
+
+	// PrevOwner / NewOwner (OpAlterOwner) are the object's owner on the target
+	// and the one it gets.
+	PrevOwner, NewOwner string
 
 	// Rebuild (OpCreateTable) marks a table rebuilt in place of PrevTable to
 	// reach a declared column order PostgreSQL cannot produce with ALTERs: the

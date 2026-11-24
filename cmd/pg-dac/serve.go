@@ -250,6 +250,7 @@ type compareReq struct {
 	// Comparison semantics; nil / "" defers to the desired-state project's
 	// pgdac.yaml compare: block.
 	IgnorePrivileges   *bool             `json:"ignorePrivileges"`
+	IgnoreOwnership    *bool             `json:"ignoreOwnership"`
 	ColumnOrder        string            `json:"columnOrder"`
 	IgnoreComments     *bool             `json:"ignoreComments"`
 	CompareWhitespace  *bool             `json:"compareWhitespace"`
@@ -298,11 +299,15 @@ func (r compareReq) engineOptions(dplan *deploy.Plan) engine.Options {
 	opts.AllowIncompatiblePlatform = r.AllowIncompatiblePlatform
 	deploy.ApplyDropPolicy(&opts, dplan.DropPolicy)
 	deploy.ApplyCompareSettings(&opts, dplan.Compare)
+	deploy.ApplyOwner(&opts, dplan)
 	if r.DropObjectsNotInSource {
 		opts.DropObjectsNotInSource = true
 	}
 	if r.IgnorePrivileges != nil {
 		opts.IgnorePrivileges = *r.IgnorePrivileges
+	}
+	if r.IgnoreOwnership != nil {
+		opts.IgnoreOwnership = *r.IgnoreOwnership
 	}
 	if r.ColumnOrder != "" {
 		opts.ColumnOrder = r.ColumnOrder

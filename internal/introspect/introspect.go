@@ -217,6 +217,7 @@ SELECT n.nspname,
        p.proname,
        CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END,
        pg_catalog.pg_get_function_identity_arguments(p.oid),
+       pg_catalog.pg_get_userbyid(p.proowner),
        pg_catalog.pg_get_functiondef(p.oid),
        l.lanname,
        COALESCE(pg_catalog.pg_get_function_result(p.oid), ''),
@@ -239,7 +240,7 @@ ORDER BY n.nspname, p.proname`, schemas)
 
 	for rows.Next() {
 		f := &model.Function{}
-		if err := rows.Scan(&f.Schema, &f.Name, &f.Kind, &f.IdentityArgs, &f.Definition, &f.Language, &f.ReturnType, &f.Arguments, &f.Comment); err != nil {
+		if err := rows.Scan(&f.Schema, &f.Name, &f.Kind, &f.IdentityArgs, &f.Owner, &f.Definition, &f.Language, &f.ReturnType, &f.Arguments, &f.Comment); err != nil {
 			return err
 		}
 		f.Definition = nlnorm(f.Definition)

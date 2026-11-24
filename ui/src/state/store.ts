@@ -8,6 +8,7 @@ import type {
   CompareRequest,
   PlanDoc,
   PrivilegesMode,
+  OwnershipMode,
   Profile,
   ProfileKind,
   PublishEvent,
@@ -53,6 +54,7 @@ export interface OptionsState {
   skipDeployScripts: boolean;
   allowDrift: boolean;
   privileges: PrivilegesMode;
+  ownership: OwnershipMode;
   columnOrder: ColumnOrderMode;
   comments: CommentsMode;
   whitespace: WhitespaceMode;
@@ -70,6 +72,7 @@ export const OPTION_DEFAULTS: OptionsState = {
   skipDeployScripts: false,
   allowDrift: false,
   privileges: "",
+  ownership: "",
   columnOrder: "",
   comments: "",
   whitespace: "",
@@ -293,6 +296,7 @@ export const useStore = create<State>((set, get) => ({
       allowDrift: s.allowDrift || undefined,
       // Only an explicit choice is sent; "" leaves the project's default in force.
       ignorePrivileges: s.privileges === "" ? undefined : s.privileges === "ignore",
+      ignoreOwnership: s.ownership === "" ? undefined : s.ownership === "ignore",
       columnOrder: s.columnOrder || undefined,
       ignoreComments: s.comments === "" ? undefined : s.comments === "ignore",
       compareWhitespace: s.whitespace === "" ? undefined : s.whitespace === "compare",

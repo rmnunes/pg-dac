@@ -67,6 +67,11 @@ func Scan(dir string, man *project.Manifest, m *model.Database) (*Index, error) 
 		f := &file{abs: p, rel: filepath.ToSlash(rel), text: string(data)}
 		for _, sp := range sqltext.Spans(f.text) {
 			h := sqltext.ParseHead(f.text[sp.Code:sp.End])
+			if h.CurrentRole && man.Owner != "" {
+				// The build runs the project as its owner, so an entry
+				// without FOR ROLE is the owner's.
+				h.Name[1], h.Declarative = man.Owner, true
+			}
 			st := statement{span: sp, head: h, declarative: h.Declarative}
 			if unit, ok := res.unit(h); ok {
 				st.unit = unit
@@ -238,7 +243,9 @@ func Build(idx *Index, man *project.Manifest, from, to *model.Database, res *eng
 	}
 	sort.Slice(plan.Changes, func(i, j int) bool { return plan.Changes[i].Path < plan.Changes[j].Path })
 
-	have := map[string]bool{}
+	// The owner has its own setting and is created in the scratch build as
+	// the owner, so it is not listed with the roles.
+	have := map[string]bool{man.Owner: true}
 	for _, r := range man.Roles {
 		have[r] = true
 	}

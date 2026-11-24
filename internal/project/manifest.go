@@ -46,6 +46,15 @@ type Manifest struct {
 	// in the scratch database so the project builds, and a publish refuses a
 	// target that lacks one.
 	Roles []string `yaml:"roles,omitempty"`
+	// Owner is the role that owns the project's objects. The scratch build
+	// and a publish create them as this role (SET ROLE), so the default
+	// privileges FOR ROLE it apply on both sides; objects the target has under
+	// another owner are reassigned (a blocking hazard: the previous owner
+	// loses what it held as owner). Like roles:, it belongs to the
+	// environment, and the deploying role must be able to SET ROLE to it.
+	// Empty: objects are owned by whoever deploys them, and ownership is not
+	// compared.
+	Owner string `yaml:"owner,omitempty"`
 	// Variables are default values for the $(name) placeholders the project's
 	// pre/post-deploy scripts use (SQLCMD variables); --var overrides them.
 	Variables map[string]string `yaml:"variables,omitempty"`
@@ -64,6 +73,10 @@ type CompareSettings struct {
 	// IgnoreComments: a comment-only change in a routine body is not a change
 	// (default false).
 	IgnoreComments *bool `yaml:"ignoreComments,omitempty"`
+	// Ownership: reassign objects the target has under another owner than
+	// the project's owner: (default true; SSDT's IgnoreAuthorizer inverted).
+	// Off, they keep their owner and pg-dac changes them as the deploying role.
+	Ownership *bool `yaml:"ownership,omitempty"`
 	// ExcludeObjectTypes leaves whole kinds of object out of the comparison
 	// (SSDT's ExcludeObjectTypes): table, view, matview, sequence, function,
 	// enum, domain, compositeType, collation, schema, extension, index,

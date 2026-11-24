@@ -42,6 +42,10 @@ type Options struct {
 	// manifest's `roles:`); they are created in the scratch database first so
 	// the GRANTs apply. Roles are cluster objects pg-dac never deploys.
 	Roles []string
+	// Owner is the role the authored SQL runs as (the manifest's `owner:`), so
+	// what it creates is owned by that role and the default privileges FOR
+	// ROLE it fire, as they will when a publish creates the same objects.
+	Owner string
 }
 
 // FromSQL materializes authored SQL in a scratch database and returns its model
@@ -169,64 +173,10 @@ func cloneModel(m *model.Database) *model.Database {
 func restoreProvenance(src, dst *model.Database) {
 	dst.TargetVersion = src.TargetVersion
 	dst.Roles = src.Roles
-	owners := map[string]string{}
-	for _, s := range src.Schemas {
-		owners["schema:"+s.Name] = s.Owner
-		for _, t := range s.Tables {
-			owners[t.Ref().Key()] = t.Owner
-		}
-		for _, v := range s.Views {
-			owners[v.Ref().Key()] = v.Owner
-		}
-		for _, m := range s.MatViews {
-			owners[m.Ref().Key()] = m.Owner
-		}
-		for _, q := range s.Sequences {
-			owners[q.Ref().Key()] = q.Owner
-		}
-		for _, e := range s.Enums {
-			owners[e.Ref().Key()] = e.Owner
-		}
-		for _, d := range s.Domains {
-			owners[d.Ref().Key()] = d.Owner
-		}
-		for _, c := range s.Composites {
-			owners[c.Ref().Key()] = c.Owner
-		}
-		for _, c := range s.Collations {
-			owners[c.Ref().Key()] = c.Owner
-		}
-	}
-	set := func(key string, dst *string) {
-		if o, ok := owners[key]; ok {
-			*dst = o
-		}
-	}
-	for _, s := range dst.Schemas {
-		set("schema:"+s.Name, &s.Owner)
-		for _, t := range s.Tables {
-			set(t.Ref().Key(), &t.Owner)
-		}
-		for _, v := range s.Views {
-			set(v.Ref().Key(), &v.Owner)
-		}
-		for _, m := range s.MatViews {
-			set(m.Ref().Key(), &m.Owner)
-		}
-		for _, q := range s.Sequences {
-			set(q.Ref().Key(), &q.Owner)
-		}
-		for _, e := range s.Enums {
-			set(e.Ref().Key(), &e.Owner)
-		}
-		for _, d := range s.Domains {
-			set(d.Ref().Key(), &d.Owner)
-		}
-		for _, c := range s.Composites {
-			set(c.Ref().Key(), &c.Owner)
-		}
-		for _, c := range s.Collations {
-			set(c.Ref().Key(), &c.Owner)
+	owners := src.Owners()
+	for _, o := range dst.OwnedObjects() {
+		if owner, ok := owners[o.Ref.Key()]; ok {
+			o.SetOwner(owner)
 		}
 	}
 }
@@ -282,6 +232,11 @@ func fromSQL(ctx context.Context, sqlText string, opts Options) (*model.Database
 
 	if err := ensureRoles(ctx, conn, opts.Roles); err != nil {
 		return nil, nil, err
+	}
+	if opts.Owner != "" {
+		if err := actAsOwner(ctx, conn, opts.Owner); err != nil {
+			return nil, nil, err
+		}
 	}
 	// Statements run one by one with deferred retry (see execute.ApplyDeferred),
 	// so a project's files need no particular order, and with function-body
@@ -357,6 +312,9 @@ func collectFiles(dir string, opts *Options) ([]string, error) {
 			opts.TargetMajor = m.TargetMajor
 		}
 		opts.Roles = append(opts.Roles, m.Roles...)
+		if opts.Owner == "" {
+			opts.Owner = m.Owner
+		}
 		return m.IncludeFiles(dir)
 	}
 	return collectSQLFiles(dir)
@@ -377,6 +335,37 @@ func ensureRoles(ctx context.Context, conn *pgx.Conn, roles []string) error {
 		if _, err := conn.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("create role %s in scratch db: %w", r, err)
 		}
+	}
+	return nil
+}
+
+// actAsOwner makes the scratch session create objects as role: the role is
+// created if missing and made a superuser — in the throwaway scratch cluster
+// only — so the authored SQL runs as it does for the deploying role
+// (extensions, grants on schemas it does not own, default privileges for
+// other roles) while what it creates is owned by role. Superuser is a role
+// attribute, not a privilege, so it changes no ACL the model records.
+func actAsOwner(ctx context.Context, conn *pgx.Conn, role string) error {
+	if err := EnsureOwnerRole(ctx, conn, role); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, "SET ROLE "+model.QuoteIdent(role)); err != nil {
+		return fmt.Errorf("act as the owner %s in scratch db: %w", role, err)
+	}
+	return nil
+}
+
+// EnsureOwnerRole creates the project's owner in a scratch cluster, as a
+// superuser so it can do whatever the deploying role does there (see
+// actAsOwner). Roles are cluster-wide: an existing role is promoted.
+func EnsureOwnerRole(ctx context.Context, conn *pgx.Conn, role string) error {
+	if err := ensureRoles(ctx, conn, []string{role}); err != nil {
+		return err
+	}
+	sql := "DO $$ BEGIN IF NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = " + model.QuoteLiteral(role) +
+		") THEN EXECUTE 'ALTER ROLE ' || " + model.QuoteLiteral(model.QuoteIdent(role)) + " || ' SUPERUSER'; END IF; END $$;"
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("prepare the owner %s in scratch db: %w", role, err)
 	}
 	return nil
 }

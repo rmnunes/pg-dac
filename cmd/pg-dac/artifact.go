@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -148,17 +149,46 @@ func writeProject(cmd *cobra.Command, dir, name, version string, schemas []strin
 		man.TargetMajor = mv
 	}
 	man.Schemas = schemas
+	// One role owning everything is the project's owner: the project is
+	// built and published as it, so its default privileges keep applying.
+	man.Owner = m.CommonOwner()
 	// The extracted GRANTs name roles the project does not create; list them so
 	// the project builds (they are created in the scratch database) and a publish
 	// refuses a target that lacks one.
-	man.Roles = m.Grantees()
+	for _, r := range m.Grantees() {
+		if r != man.Owner {
+			man.Roles = append(man.Roles, r)
+		}
+	}
 	if err := man.Save(dir); err != nil {
 		return err
 	}
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "Extracted %d file(s) into project %q at %s\n", len(files), name, dir)
 	fmt.Fprintf(w, "  %s (targetMajor %d); one file per object under %s/<schema>/<kind>/\n", project.ManifestName, man.TargetMajor, engine.ExtractSection)
+	if man.Owner != "" {
+		fmt.Fprintf(w, "  owner: %s (it owns every object; a publish creates and changes them as it)\n", man.Owner)
+	} else if owners := ownersOf(m); len(owners) > 1 {
+		fmt.Fprintf(w, "  the objects have %d owners (%s); set owner: in %s to give them one\n",
+			len(owners), strings.Join(owners, ", "), project.ManifestName)
+	}
 	return nil
+}
+
+// ownersOf lists the roles that own m's objects (the public schema aside),
+// sorted.
+func ownersOf(m *model.Database) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, o := range m.OwnedObjects() {
+		if o.Owner == "" || seen[o.Owner] || (o.Ref.Kind == model.KindSchema && o.Ref.Name == "public") {
+			continue
+		}
+		seen[o.Owner] = true
+		out = append(out, o.Owner)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func newInspectCmd() *cobra.Command {

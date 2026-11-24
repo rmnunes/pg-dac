@@ -12,11 +12,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rmnunes/pg-dac/internal/deploy"
+	"github.com/rmnunes/pg-dac/internal/diff"
 	"github.com/rmnunes/pg-dac/internal/drift"
 	"github.com/rmnunes/pg-dac/internal/engine"
 	"github.com/rmnunes/pg-dac/internal/execute"
@@ -301,6 +303,28 @@ func Run(ctx context.Context, conn *pgx.Conn, req Request, obs Observer) (*Resul
 	if res.HasBlocking() && !req.Engine.AllowHazards {
 		return out, &BlockedError{MissingRoles: res.MissingRoles()}
 	}
+	problems, err := ownerRights(ctx, conn, res, canonFrom.MajorVersion())
+	if err != nil {
+		return out, err
+	}
+	if len(problems) > 0 && !req.DryRun && len(pre) > 0 {
+		// A pre-deploy script may grant the memberships, as it may create the
+		// roles: run the scripts and check again before refusing.
+		if err := deploy.Run(ctx, conn, pre, vars, scriptHook(obs, "pre")); err != nil {
+			return out, err
+		}
+		pre = nil
+		out.Pre = nil
+		if problems, err = ownerRights(ctx, conn, res, canonFrom.MajorVersion()); err != nil {
+			return out, err
+		}
+	}
+	if len(problems) > 0 {
+		if !req.DryRun {
+			return out, fmt.Errorf("%s", strings.Join(problems, "; "))
+		}
+		obs.warn("plan", problems)
+	}
 	if req.DryRun {
 		return out, nil
 	}
@@ -338,6 +362,87 @@ func Run(ctx context.Context, conn *pgx.Conn, req Request, obs Observer) (*Resul
 		}
 	}
 	return out, nil
+}
+
+// ownerRights checks that the session can do what the migration asks of it
+// around the project's owner, before anything runs: switch to the owner (SET
+// ROLE), act as the previous owner of each object it reassigns (ALTER …
+// OWNER TO needs both), and hold the CREATE privileges creating and
+// reassigning objects for the owner takes (engine.CreateRight). It returns
+// what is missing, each with the GRANT that fixes it.
+func ownerRights(ctx context.Context, conn *pgx.Conn, res *engine.Result, major int) ([]string, error) {
+	type need struct{ role, mode, why string }
+	var needs []need
+	if res.Owner != "" {
+		// PostgreSQL 16 split SET ROLE out of membership (GRANT … WITH SET).
+		mode := "MEMBER"
+		if major >= 16 {
+			mode = "SET"
+		}
+		needs = append(needs, need{res.Owner, mode, "to create and change the project's objects as their owner"})
+	}
+	seen := map[string]bool{}
+	for _, op := range res.ChangeSet.Ops {
+		if op.Type == diff.OpAlterOwner && !seen[op.PrevOwner] {
+			seen[op.PrevOwner] = true
+			needs = append(needs, need{op.PrevOwner, "USAGE", "to give objects it owns to " + model.QuoteIdent(op.NewOwner)})
+		}
+	}
+	if len(needs) == 0 && len(res.CreateRights) == 0 {
+		return nil, nil
+	}
+	var me, db string
+	if err := conn.QueryRow(ctx, "SELECT current_user, current_database()").Scan(&me, &db); err != nil {
+		return nil, fmt.Errorf("read the deploying role: %w", err)
+	}
+	var problems []string
+	for _, n := range needs {
+		var ok *bool
+		err := conn.QueryRow(ctx, `SELECT pg_catalog.pg_has_role(current_user, r.oid, $2)
+FROM pg_catalog.pg_roles r WHERE r.rolname = $1`, n.role, n.mode).Scan(&ok)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // a missing role is a MISSING_ROLE hazard already
+		}
+		if err != nil {
+			return nil, fmt.Errorf("check the rights of %s: %w", me, err)
+		}
+		if ok != nil && !*ok {
+			problems = append(problems, fmt.Sprintf("the deploying role %s must be able to act as %s %s: GRANT %s TO %s",
+				model.QuoteIdent(me), model.QuoteIdent(n.role), n.why, model.QuoteIdent(n.role), model.QuoteIdent(me)))
+		}
+	}
+	for _, r := range res.CreateRights {
+		role, who := r.Role, "the owner "+model.QuoteIdent(r.Role)
+		if role == "" {
+			role, who = me, "the deploying role "+model.QuoteIdent(me)
+		}
+		var ok *bool
+		err := conn.QueryRow(ctx, `SELECT CASE WHEN $2 = '' THEN pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')
+            ELSE pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE') END
+FROM pg_catalog.pg_roles r LEFT JOIN pg_catalog.pg_namespace n ON n.nspname = $2
+WHERE r.rolname = $1`, role, r.Schema).Scan(&ok)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("check the rights of %s: %w", role, err)
+		}
+		if ok == nil || *ok {
+			continue // a schema the migration creates, or the right is there
+		}
+		switch {
+		case r.Schema != "":
+			problems = append(problems, fmt.Sprintf("%s needs CREATE on schema %s to create and take objects in it: GRANT CREATE ON SCHEMA %s TO %s",
+				who, model.QuoteIdent(r.Schema), model.QuoteIdent(r.Schema), model.QuoteIdent(role)))
+		case r.Role == "":
+			problems = append(problems, fmt.Sprintf("%s needs CREATE on the database to give schemas to the owner: GRANT CREATE ON DATABASE %s TO %s",
+				who, model.QuoteIdent(db), model.QuoteIdent(role)))
+		default:
+			problems = append(problems, fmt.Sprintf("%s needs CREATE on the database to create schemas: GRANT CREATE ON DATABASE %s TO %s",
+				who, model.QuoteIdent(db), model.QuoteIdent(role)))
+		}
+	}
+	return problems, nil
 }
 
 func scriptHook(obs Observer, phase string) func(string) {

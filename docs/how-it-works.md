@@ -51,12 +51,13 @@ partitioning), primary/foreign/unique/check/exclude constraints (incl. `NOT VALI
 tables and materialized views, triggers on tables and views (incl. enabled state), row-level-security
 policies and table RLS enable/force, views (incl. check option and security options), materialized
 views, comments on all of them, privileges (GRANT/REVOKE incl. grant options and column
-privileges) on schemas, tables, views, sequences, routines and types, and default privileges
+privileges) on schemas, tables, views, sequences, routines and types, default privileges
 (`ALTER DEFAULT PRIVILEGES`: those scoped to the project's schemas, and the database-wide ones of
-the roles the project names).
+the roles the project names), and, for a project that names its owner (`owner:` in `pgdac.yaml`),
+who owns each object.
 
-**Out of scope** (details in [STATUS.md](../STATUS.md)): ownership is not modeled (objects are
-owned by the role that deploys them); a generated column whose expression calls a function being recreated is not
+**Out of scope** (details in [STATUS.md](../STATUS.md)): without `owner:`, ownership is not
+compared (objects are owned by the role that deploys them); a generated column whose expression calls a function being recreated is not
 recreated around it; changes PostgreSQL cannot make in place (removing enum values, altering a
 domain or composite type, re-partitioning) are reported as an `UNSUPPORTED_CHANGE` hazard rather
 than applied; roles are required to exist, never created.

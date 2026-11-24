@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rmnunes/pg-dac/internal/diff"
 	"github.com/rmnunes/pg-dac/internal/model"
 	"github.com/rmnunes/pg-dac/internal/safety"
 	"github.com/rmnunes/pg-dac/internal/sqlgen"
@@ -107,8 +108,12 @@ func (r *Result) ObjectChanges() ([]ObjectChange, error) {
 	var order []string
 	byKey := map[string]*ObjectChange{}
 	reasons := map[string][]string{}
+	reowned := map[string]diff.Op{}
 	for _, g := range r.Groups {
 		key := g.Op.Owner.Key()
+		if g.Op.Type == diff.OpAlterOwner {
+			reowned[key] = g.Op
+		}
 		if reason := g.Op.Reason; reason != "" && !slices.Contains(reasons[key], reason) {
 			reasons[key] = append(reasons[key], reason)
 		}
@@ -153,10 +158,25 @@ func (r *Result) ObjectChanges() ([]ObjectChange, error) {
 				return nil, err
 			}
 			oc.DependsOn = dependsOnFor(r.to, ref)
+			// Definitions do not carry owners; a change of owner shows as the
+			// statement that sets each.
+			if op, ok := reowned[key]; ok {
+				oc.OldDefinition = withOwner(oc.OldDefinition, sqlgen.AlterOwnerSQL(ref, op.Function, op.PrevOwner))
+				oc.NewDefinition = withOwner(oc.NewDefinition, sqlgen.AlterOwnerSQL(ref, op.Function, op.NewOwner))
+			}
 		}
 		out = append(out, *oc)
 	}
 	return out, nil
+}
+
+// withOwner appends the statement that sets an object's owner to its
+// definition.
+func withOwner(def, stmt string) string {
+	if def == "" {
+		return stmt + "\n"
+	}
+	return strings.TrimRight(def, "\n") + "\n\n" + stmt + "\n"
 }
 
 func changeKind(key string, fromKeys, toKeys map[string]model.ObjKind) string {

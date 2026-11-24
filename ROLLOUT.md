@@ -11,7 +11,7 @@ environment variables; never put a password in a command line (pg-dac reads `PGP
 | Item | Requirement |
 |---|---|
 | PostgreSQL | 11 to 18 as targets; the scratch server matches the target major (downloaded once per major into the user cache; pre-seed CI runners by running any compare once, or cache `~/.cache/pg-dac` / `%LOCALAPPDATA%\pg-dac`) |
-| Deploy role | Owner of the schemas it publishes (or superuser-equivalent on Azure); `CREATE` on the database for the `pgdac` bookkeeping schema |
+| Deploy role | Owner of the schemas it publishes (or superuser-equivalent on Azure); `CREATE` on the database for the `pgdac` bookkeeping schema. With `owner:` in `pgdac.yaml`: able to `SET ROLE` to the owner (`GRANT app_owner TO deployer`); `publish` checks this and the other rights ownership needs before it starts |
 | Roles | Cluster objects pg-dac never creates. List environment roles in `pgdac.yaml roles:`; provision them in a pre-deploy script (Azure: `pgaadauth_create_principal`); a grant to a missing role blocks the publish |
 | Project | Declarative files (one `CREATE` per object; `pg-dac extract --to-project` produces the layout). Migration-style scripts belong in `preDeploy` / `postDeploy` |
 | Signing | A signing key per build agent (`pg-dac build` creates it under the pg-dac config dir); consumers pin it with `--require-key <fingerprint>` or a `trusted_keys` file |
@@ -77,7 +77,7 @@ pg-dac publish --from "$DSN" --to "app-$GIT_SHA.pgdac" --require-key "$KEY" --va
 
 ## 6. Known limits to plan around
 
-See STATUS.md "Known limitations": ownership is not modeled; partitions
+See STATUS.md "Known limitations": ownership is compared only for a project with `owner:`; partitions
 are created and dropped but not attached/detached; renames in a database → project update appear
 as drop + add (record them in the refactorlog); imperative project files cannot be updated in
 place; `.pgdac`/`.pgbac` are compressed, not encrypted.

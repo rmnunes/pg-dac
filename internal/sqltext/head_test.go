@@ -66,19 +66,22 @@ func TestParseHeadDefaultPrivileges(t *testing.T) {
 		stmt        string
 		name        []string
 		declarative bool
+		current     bool
 	}{
-		{`ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA app GRANT SELECT ON TABLES TO readers`, []string{"app", "app_owner", "tables"}, true},
-		{`ALTER DEFAULT PRIVILEGES FOR ROLE "App Owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, []string{"", "App Owner", "functions"}, true},
-		{`alter default privileges for user o in schema "S" grant usage on sequences to r`, []string{"S", "o", "sequences"}, true},
-		{`ALTER DEFAULT PRIVILEGES FOR ROLE o GRANT EXECUTE ON ROUTINES TO r`, []string{"", "o", "functions"}, true},
-		{`ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO readers`, []string{"app", "", "tables"}, false},
-		{`ALTER DEFAULT PRIVILEGES FOR ROLE a, b GRANT SELECT ON TABLES TO r`, nil, false},
-		{`ALTER DEFAULT PRIVILEGES FOR ROLE a IN SCHEMA s1, s2 GRANT SELECT ON TABLES TO r`, nil, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA app GRANT SELECT ON TABLES TO readers`, []string{"app", "app_owner", "tables"}, true, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE "App Owner" REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, []string{"", "App Owner", "functions"}, true, false},
+		{`alter default privileges for user o in schema "S" grant usage on sequences to r`, []string{"S", "o", "sequences"}, true, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE o GRANT EXECUTE ON ROUTINES TO r`, []string{"", "o", "functions"}, true, false},
+		{`ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO readers`, []string{"app", "", "tables"}, false, true},
+		{`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, []string{"", "", "functions"}, false, true},
+		{`ALTER DEFAULT PRIVILEGES IN SCHEMA s1, s2 GRANT SELECT ON TABLES TO r`, nil, false, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE a, b GRANT SELECT ON TABLES TO r`, nil, false, false},
+		{`ALTER DEFAULT PRIVILEGES FOR ROLE a IN SCHEMA s1, s2 GRANT SELECT ON TABLES TO r`, nil, false, false},
 	}
 	for _, c := range cases {
 		h := ParseHead(c.stmt)
-		if h.Verb != "ALTER" || h.Kind != "DEFAULT PRIVILEGES" || h.Declarative != c.declarative {
-			t.Errorf("%s: verb=%q kind=%q declarative=%v", c.stmt, h.Verb, h.Kind, h.Declarative)
+		if h.Verb != "ALTER" || h.Kind != "DEFAULT PRIVILEGES" || h.Declarative != c.declarative || h.CurrentRole != c.current {
+			t.Errorf("%s: verb=%q kind=%q declarative=%v current=%v", c.stmt, h.Verb, h.Kind, h.Declarative, h.CurrentRole)
 		}
 		if c.name != nil && strings.Join(h.Name, "|") != strings.Join(c.name, "|") {
 			t.Errorf("%s: name=%q, want %q", c.stmt, h.Name, c.name)

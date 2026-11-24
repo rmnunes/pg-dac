@@ -153,6 +153,7 @@ type Function struct {
 	// e.g. "integer, text". Together with Name it forms the object's identity and
 	// the DROP target.
 	IdentityArgs string `json:"identityArgs"`
+	Owner        string `json:"owner,omitempty"`
 	// Definition is the canonical CREATE OR REPLACE statement
 	// (pg_get_functiondef). Authoritative equality key — normalized through a real
 	// database so body formatting differences are not false diffs.

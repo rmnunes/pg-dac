@@ -84,7 +84,7 @@ func (r *Result) ScriptWith(so ScriptOptions) string {
 			b.WriteString("-- (run outside a transaction block)\n")
 		}
 		if !allowHazards && hasBlocking(s.Hazards) {
-			b.WriteString("-- BLOCKED: possible data loss or unsupported change. Re-run with --allow-hazards to include this.\n")
+			b.WriteString("-- BLOCKED (" + blockingTypes(s.Hazards) + "). Re-run with --allow-hazards to include this.\n")
 			for _, line := range strings.Split(s.SQL, "\n") {
 				fmt.Fprintf(&b, "-- %s\n", line)
 			}
@@ -147,16 +147,46 @@ func hasBlocking(hz []safety.Hazard) bool {
 	return false
 }
 
-// MissingRoles lists the roles the migration grants to that the target lacks
-// (the grantees of GRANTs carrying a MISSING_ROLE hazard), sorted.
+// blockingTypes names the blocking hazard types among hz, comma-separated.
+func blockingTypes(hz []safety.Hazard) string {
+	var out []string
+	for _, h := range hz {
+		if h.Severity == safety.SeverityError {
+			out = append(out, string(h.Type))
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// MissingRoles lists the roles the migration needs that the target lacks (the
+// ones its MISSING_ROLE hazards name: grantees, roles default privileges are
+// for, and the project's owner), sorted.
 func (r *Result) MissingRoles() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, op := range r.ChangeSet.Ops {
-		if op.Type == diff.OpGrant && op.MissingRole && op.Grant != nil && !seen[op.Grant.Grantee] {
-			seen[op.Grant.Grantee] = true
-			out = append(out, op.Grant.Grantee)
+	note := func(role string) {
+		if role != "" && !seen[role] {
+			seen[role] = true
+			out = append(out, role)
 		}
+	}
+	for _, op := range r.ChangeSet.Ops {
+		switch op.Type {
+		case diff.OpGrant, diff.OpGrantDefault:
+			if op.MissingRole && op.Grant != nil {
+				note(op.Grant.Grantee)
+			}
+			if op.MissingForRole && op.DefaultPriv != nil {
+				note(op.DefaultPriv.Role)
+			}
+		case diff.OpAlterOwner:
+			if op.MissingRole {
+				note(op.NewOwner)
+			}
+		}
+	}
+	if r.ownerMissing {
+		note(r.Owner)
 	}
 	sort.Strings(out)
 	return out

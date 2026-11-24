@@ -86,6 +86,7 @@ export interface ScriptResponse {
 
 /** Compare options a project's pgdac.yaml `compare:` block can also set; "" = the project's default. */
 export type PrivilegesMode = "" | "compare" | "ignore";
+export type OwnershipMode = "" | "compare" | "ignore";
 export type ColumnOrderMode = "" | "ignore" | "warn" | "rebuild";
 export type CommentsMode = "" | "compare" | "ignore";
 export type WhitespaceMode = "" | "ignore" | "compare";
@@ -127,6 +128,8 @@ export interface CompareRequest {
   allowDrift?: boolean;
   /** Do not compare GRANT/REVOKE (privileges are still re-granted after a recreate). */
   ignorePrivileges?: boolean;
+  /** Leave objects owned by another role than the project's owner with that owner. */
+  ignoreOwnership?: boolean;
   /** What to do when a table's declared column order differs from the target's. */
   columnOrder?: "ignore" | "warn" | "rebuild";
   /** Ignore SQL comments inside routine bodies. */
